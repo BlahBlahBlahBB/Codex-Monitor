@@ -22,10 +22,7 @@ final class DesktopLocalAdapterTests: XCTestCase {
 
         let wrong = try fixture.rollout("thread-b", lines: [fixture.session("not-thread-b")])
         try fixture.addThread("thread-b", rollout: wrong)
-        let wrongSnapshot = try adapter.open(threadRawID: "thread-b")
-        let result = try adapter.poll(threadID: wrongSnapshot.threadID)
-        XCTAssertEqual(result.invalidation, .sessionMismatch)
-        XCTAssertTrue(result.observations.containsUnavailable(.rolloutSessionIdentity))
+        XCTAssertThrowsError(try adapter.open(threadRawID: "thread-b")) { XCTAssertEqual($0 as? DesktopLocalAdapterError, .threadNotFound) }
     }
 
     func testInterleavedIdenticalTimestampsNeverCrossThreadOrToken() throws {
@@ -98,8 +95,7 @@ final class DesktopLocalAdapterTests: XCTestCase {
         let rebound = try adapter.open(threadRawID: "thread-a")
         XCTAssertNil(try adapter.poll(threadID: rebound.threadID).invalidation)
         try fixture.replaceContents(at: archive, with: fixture.session("other-thread") + "\n")
-        let again = try adapter.open(threadRawID: "thread-a")
-        XCTAssertEqual(try adapter.poll(threadID: again.threadID).invalidation, .sessionMismatch)
+        XCTAssertThrowsError(try adapter.open(threadRawID: "thread-a")) { XCTAssertEqual($0 as? DesktopLocalAdapterError, .threadNotFound) }
     }
 
     func testPIDReuseAndWriterLossAreUnavailableEvidenceOnly() throws {
@@ -108,12 +104,125 @@ final class DesktopLocalAdapterTests: XCTestCase {
         let adapter = try fixture.adapter(); let thread = try adapter.open(threadRawID: "thread-a")
         let epochOne = ProcessEpoch(pid: 42, startedAtNanoseconds: 1)!
         XCTAssertEqual(adapter.health(threadID: thread.threadID, processEpoch: epochOne, writerOwnsSelectedRollout: true).health?.state, .available)
-        let reused = adapter.health(threadID: thread.threadID, processEpoch: ProcessEpoch(pid: 42, startedAtNanoseconds: 2)!, writerOwnsSelectedRollout: true)
-        XCTAssertEqual(reused.health?.reason, .processEpochMismatch)
         let missing = adapter.health(threadID: thread.threadID, processEpoch: epochOne, writerOwnsSelectedRollout: false)
         XCTAssertEqual(missing.health?.reason, .writerOwnershipMissing)
+        let reused = adapter.health(threadID: thread.threadID, processEpoch: ProcessEpoch(pid: 42, startedAtNanoseconds: 2)!, writerOwnsSelectedRollout: true)
+        XCTAssertEqual(reused.health?.reason, .processEpochMismatch)
+        XCTAssertEqual(adapter.health(threadID: thread.threadID, processEpoch: epochOne, writerOwnsSelectedRollout: true).health?.reason, .processEpochMismatch)
         XCTAssertNil(reused.rollout)
         XCTAssertNil(missing.rollout)
+    }
+
+    func testEpochMismatchLatchesUntilFreshExactRebindThenRejectsOldEpoch() throws {
+        let file = try fixture.rollout("thread-a", lines: [fixture.session("thread-a")])
+        try fixture.addThread("thread-a", rollout: file)
+        let adapter = try fixture.adapter(); let thread = try adapter.open(threadRawID: "thread-a")
+        let first = ProcessEpoch(pid: 42, startedAtNanoseconds: 1)!
+        let reusedPID = ProcessEpoch(pid: 42, startedAtNanoseconds: 2)!
+        XCTAssertEqual(adapter.health(threadID: thread.threadID, processEpoch: first, writerOwnsSelectedRollout: true).health?.state, .available)
+        XCTAssertEqual(adapter.health(threadID: thread.threadID, processEpoch: reusedPID, writerOwnsSelectedRollout: true).health?.reason, .processEpochMismatch)
+        XCTAssertEqual(adapter.health(threadID: thread.threadID, processEpoch: first, writerOwnsSelectedRollout: true).health?.reason, .processEpochMismatch)
+
+        let rebound = try adapter.open(threadRawID: "thread-a")
+        XCTAssertEqual(adapter.health(threadID: rebound.threadID, processEpoch: reusedPID, writerOwnsSelectedRollout: true).health?.state, .available)
+        XCTAssertEqual(adapter.health(threadID: rebound.threadID, processEpoch: first, writerOwnsSelectedRollout: true).health?.reason, .processEpochMismatch)
+    }
+
+    func testEpochMismatchLatchesAreIndependentPerThread() throws {
+        let a = try fixture.rollout("thread-a", lines: [fixture.session("thread-a")])
+        let b = try fixture.rollout("thread-b", lines: [fixture.session("thread-b")])
+        try fixture.addThread("thread-a", rollout: a); try fixture.addThread("thread-b", rollout: b)
+        let adapter = try fixture.adapter(); let first = try adapter.open(threadRawID: "thread-a"); let second = try adapter.open(threadRawID: "thread-b")
+        let aOne = ProcessEpoch(pid: 1, startedAtNanoseconds: 1)!, aTwo = ProcessEpoch(pid: 1, startedAtNanoseconds: 2)!, bOne = ProcessEpoch(pid: 2, startedAtNanoseconds: 1)!
+        XCTAssertEqual(adapter.health(threadID: first.threadID, processEpoch: aOne, writerOwnsSelectedRollout: true).health?.state, .available)
+        XCTAssertEqual(adapter.health(threadID: second.threadID, processEpoch: bOne, writerOwnsSelectedRollout: true).health?.state, .available)
+        XCTAssertEqual(adapter.health(threadID: first.threadID, processEpoch: aTwo, writerOwnsSelectedRollout: true).health?.reason, .processEpochMismatch)
+        XCTAssertEqual(adapter.health(threadID: second.threadID, processEpoch: bOne, writerOwnsSelectedRollout: true).health?.state, .available)
+    }
+
+    func testReplacementDuringReadIsRejectedBeforeValidLookingBytesDecode() throws {
+        let file = try fixture.rollout("thread-a", lines: [fixture.session("thread-a"), fixture.started("turn-a")])
+        try fixture.addThread("thread-a", rollout: file)
+        var descriptorOpens = 0
+        let adapter = try fixture.adapter(beforeDescriptorOpen: {
+            descriptorOpens += 1
+            if descriptorOpens == 2 {
+                try! self.fixture.atomicReplace(at: file, with: [self.fixture.session("thread-a"), self.fixture.started("turn-replacement"), self.fixture.token(total: 999, last: 999), self.fixture.complete("turn-replacement")].joined(separator: "\n") + "\n")
+            }
+        })
+        let thread = try adapter.open(threadRawID: "thread-a")
+        let rejected = try adapter.poll(threadID: thread.threadID)
+        XCTAssertEqual(rejected.invalidation, .fileReplaced)
+        XCTAssertTrue(rejected.observations.rollouts.isEmpty)
+        XCTAssertEqual(rejected.observations.health?.reason, .fileIdentityChanged)
+
+        let rebound = try adapter.open(threadRawID: "thread-a")
+        let admitted = try adapter.poll(threadID: rebound.threadID).observations.rollouts
+        XCTAssertEqual(admitted.tokenTotals, [999])
+        XCTAssertTrue(admitted.contains { $0.kind == .taskCompletedSuccess && $0.turnID?.rawID == "turn-replacement" })
+    }
+
+    func testCheckpointAtEOFRevalidatesBeforeAvailableWithoutReplayingHistory() throws {
+        let file = try fixture.rollout("thread-a", lines: [fixture.session("thread-a"), fixture.started("turn-a"), fixture.token(total: 10, last: 10)])
+        try fixture.addThread("thread-a", rollout: file)
+        let initial = try fixture.adapter(); let thread = try initial.open(threadRawID: "thread-a")
+        let checkpoint = try XCTUnwrap(try initial.poll(threadID: thread.threadID).cursor)
+
+        let resumed = try fixture.adapter(); let recovered = try resumed.open(threadRawID: "thread-a", checkpoint: checkpoint)
+        let result = try resumed.poll(threadID: recovered.threadID)
+        XCTAssertNil(result.invalidation)
+        XCTAssertEqual(result.observations.health?.state, .available)
+        XCTAssertTrue(result.observations.rollouts.isEmpty)
+    }
+
+    func testCheckpointResumeRestoresTokenAndTerminalExactlyOnce() throws {
+        let file = try fixture.rollout("thread-a", lines: [fixture.session("thread-a"), fixture.started("turn-a"), fixture.token(total: 10, last: 10)])
+        try fixture.addThread("thread-a", rollout: file)
+        let initial = try fixture.adapter(); let thread = try initial.open(threadRawID: "thread-a")
+        let checkpoint = try XCTUnwrap(try initial.poll(threadID: thread.threadID).cursor)
+        try fixture.append(to: file, text: fixture.token(total: 20, last: 10) + "\n" + fixture.tool("call-after-restart") + "\n" + fixture.complete("turn-a") + "\n")
+
+        let resumed = try fixture.adapter(); let recovered = try resumed.open(threadRawID: "thread-a", checkpoint: checkpoint)
+        let first = try resumed.poll(threadID: recovered.threadID).observations.rollouts
+        XCTAssertEqual(first.tokenTotals, [20])
+        XCTAssertEqual(first.filter { $0.activity == .tool && $0.itemID?.rawID == "call-after-restart" }.count, 1)
+        XCTAssertEqual(first.filter { $0.kind == .taskCompletedSuccess }.count, 1)
+        let second = try resumed.poll(threadID: recovered.threadID).observations.rollouts
+        XCTAssertTrue(second.isEmpty)
+    }
+
+    func testCheckpointRejectsReplacedFileAndSameInodeSessionMismatch() throws {
+        let file = try fixture.rollout("thread-a", lines: [fixture.session("thread-a"), fixture.started("turn-a")])
+        try fixture.addThread("thread-a", rollout: file)
+        let initial = try fixture.adapter(); let thread = try initial.open(threadRawID: "thread-a")
+        let checkpoint = try XCTUnwrap(try initial.poll(threadID: thread.threadID).cursor)
+        try fixture.atomicReplace(at: file, with: fixture.session("thread-a") + "\n")
+        let replaced = try fixture.adapter(); let reopened = try replaced.open(threadRawID: "thread-a", checkpoint: checkpoint)
+        XCTAssertEqual(try replaced.poll(threadID: reopened.threadID).invalidation, .fileReplaced)
+
+        let fresh = try fixture.adapter(); let current = try fresh.open(threadRawID: "thread-a")
+        let sameInodeCheckpoint = try XCTUnwrap(try fresh.poll(threadID: current.threadID).cursor)
+        try fixture.replaceContents(at: file, with: fixture.session("thread-b") + "\n")
+        let mismatch = try fixture.adapter(); let resumed = try mismatch.open(threadRawID: "thread-a", checkpoint: sameInodeCheckpoint)
+        let result = try mismatch.poll(threadID: resumed.threadID)
+        XCTAssertEqual(result.invalidation, .sessionMismatch)
+        XCTAssertTrue(result.observations.containsUnavailable(.rolloutSessionIdentity))
+        XCTAssertNil(result.observations.health)
+    }
+
+    func testCheckpointFirstPollRequiresCurrentExactStateDBBinding() throws {
+        let file = try fixture.rollout("thread-a", lines: [fixture.session("thread-a"), fixture.started("turn-a")])
+        let moved = try fixture.rollout("thread-a-moved", lines: [fixture.session("thread-a"), fixture.started("turn-moved"), fixture.token(total: 500, last: 500)])
+        try fixture.addThread("thread-a", rollout: file)
+        let initial = try fixture.adapter(); let thread = try initial.open(threadRawID: "thread-a")
+        let checkpoint = try XCTUnwrap(try initial.poll(threadID: thread.threadID).cursor)
+
+        let resumed = try fixture.adapter(); let recovered = try resumed.open(threadRawID: "thread-a", checkpoint: checkpoint)
+        try fixture.updatePath(thread: "thread-a", path: moved)
+        let result = try resumed.poll(threadID: recovered.threadID)
+        XCTAssertTrue(result.observations.containsUnavailable(.stateDatabase))
+        XCTAssertTrue(result.observations.rollouts.isEmpty)
+        XCTAssertNil(result.observations.health)
     }
 
     func testSilenceAndSourceLossNeverSynthesizeTerminal() throws {
@@ -201,7 +310,10 @@ private final class LocalFixture {
     }
 
     func cleanup() { try? FileManager.default.removeItem(at: root) }
-    func adapter() throws -> DesktopLocalAdapter { DesktopLocalAdapter(sourceID: sourceID, validatedSessionRoots: [root], stateDB: StateDBReader(databaseURL: database, sourceID: sourceID, schema: .init(acceptedUserVersions: [1]))) }
+    func adapter(beforeDescriptorOpen: (() -> Void)? = nil) throws -> DesktopLocalAdapter {
+        let reader = StateDBReader(databaseURL: database, sourceID: sourceID, schema: .init(acceptedUserVersions: [1]))
+        return DesktopLocalAdapter(sourceID: sourceID, validatedSessionRoots: [root], stateDB: reader, readerBeforeDescriptorOpen: beforeDescriptorOpen)
+    }
     func rollout(_ name: String, lines: [String]) throws -> URL {
         let url = root.appendingPathComponent("\(name).jsonl")
         try (lines.joined(separator: "\n") + "\n").data(using: .utf8)!.write(to: url)
@@ -212,6 +324,11 @@ private final class LocalFixture {
         try handle.seekToEnd(); try handle.write(contentsOf: Data(text.utf8))
     }
     func replaceContents(at url: URL, with text: String) throws { try Data(text.utf8).write(to: url) }
+    func atomicReplace(at url: URL, with text: String) throws {
+        let replacement = root.appendingPathComponent("replacement-\(UUID().uuidString).jsonl")
+        try Data(text.utf8).write(to: replacement)
+        guard rename(replacement.path, url.path) == 0 else { throw POSIXError(.EIO) }
+    }
     func addThread(_ id: String, rollout: URL, title: String = "title") throws {
         try executeDatabase("INSERT INTO threads VALUES ('\(sql(id))', '\(sql(rollout.path))', '\(sql(title))', 'gpt-test', 'high', 1, 0)")
     }

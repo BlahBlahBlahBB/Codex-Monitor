@@ -252,42 +252,122 @@ public final class RolloutIncrementalReader: @unchecked Sendable {
     private var sessionValidated = false
     private var activeTurnID: NamespacedID?
     private var lastTokenTotal: Int64?
+    /// An exact open binds a descriptor identity before it is allowed to own a
+    /// thread.  Every later poll compares its *opened* descriptor to this value.
+    private var admittedIdentity: FileIdentity?
+    private var checkpointNeedsStateDBRevalidation: Bool
+    /// Test-only deterministic seam: it runs immediately before the one
+    /// descriptor for a transaction is opened.  It models an atomic pathname
+    /// replacement without ever making production reads path-racy.
+    private let beforeDescriptorOpen: (() -> Void)?
 
     public init(binding: ThreadRolloutBinding, checkpoint: RolloutCursor? = nil, maxHeaderBytes: UInt64 = 65_536, maxTailBytes: UInt64 = 1_048_576, maxAppendBytes: Int = 262_144) {
         self.binding = binding; self.cursor = checkpoint; self.maxHeaderBytes = maxHeaderBytes; self.maxTailBytes = maxTailBytes; self.maxAppendBytes = maxAppendBytes
+        self.checkpointNeedsStateDBRevalidation = checkpoint != nil
+        self.beforeDescriptorOpen = nil
+    }
+
+    init(binding: ThreadRolloutBinding, checkpoint: RolloutCursor? = nil, maxHeaderBytes: UInt64 = 65_536, maxTailBytes: UInt64 = 1_048_576, maxAppendBytes: Int = 262_144, beforeDescriptorOpen: (() -> Void)?) {
+        self.binding = binding; self.cursor = checkpoint; self.maxHeaderBytes = maxHeaderBytes; self.maxTailBytes = maxTailBytes; self.maxAppendBytes = maxAppendBytes
+        self.checkpointNeedsStateDBRevalidation = checkpoint != nil
+        self.beforeDescriptorOpen = beforeDescriptorOpen
+    }
+
+    /// Admission is deliberately non-consuming.  `open` uses it before it
+    /// clears an epoch latch, so a path/session lookalike cannot become a new
+    /// owner merely because its DB row is plausible.
+    func admitExactBinding() -> RolloutReadInvalidation? {
+        guard let transaction = openTransaction() else { return .fileMissing }
+        defer { transaction.close() }
+        guard let header = read(transaction, offset: 0, count: Int(min(transaction.size, maxHeaderBytes))), validateSession(in: header) else {
+            return .sessionMismatch
+        }
+        admittedIdentity = transaction.identity
+        return nil
+    }
+
+    var requiresCheckpointStateDBRevalidation: Bool { checkpointNeedsStateDBRevalidation }
+
+    func confirmCheckpointStateDBRevalidation() { checkpointNeedsStateDBRevalidation = false }
+
+    func checkpointStateDBUnavailable() -> RolloutReadResult {
+        RolloutReadResult(observations: [.capabilityUnavailable(threadID: binding.threadID, capability: .stateDatabase)], cursor: cursor, invalidation: .sessionMismatch)
     }
 
     public func poll() -> RolloutReadResult {
-        guard let identity = FileIdentity.readOnlyIdentity(of: binding.rolloutURL),
-              let size = fileSize(binding.rolloutURL), let modified = modificationTime(binding.rolloutURL) else {
+        guard let transaction = openTransaction() else {
             return RolloutReadResult(observations: [.sourceHealth(health(.unavailable, reason: .sourceMissing, identity: nil))], cursor: cursor, invalidation: .fileMissing)
+        }
+        defer { transaction.close() }
+        let identity = transaction.identity
+        let size = transaction.size
+        let modified = transaction.modified
+        if let admittedIdentity, admittedIdentity != identity {
+            return invalidated(.fileReplaced, reason: .fileIdentityChanged, identity: identity)
         }
         if let cursor {
             if cursor.fileIdentity != identity {
                 return invalidated(.fileReplaced, reason: .fileIdentityChanged, identity: identity)
             }
             if size < cursor.byteOffset { return invalidated(.fileTruncated, reason: .fileTruncated, identity: identity) }
-            return appended(identity: identity, size: size, modified: modified, from: cursor.byteOffset)
+            if !sessionValidated {
+                return resumeCheckpoint(transaction: transaction, identity: identity, size: size, modified: modified, from: cursor.byteOffset)
+            }
+            return appended(transaction: transaction, identity: identity, size: size, modified: modified, from: cursor.byteOffset)
         }
-        return bootstrap(identity: identity, size: size, modified: modified)
+        return bootstrap(transaction: transaction, identity: identity, size: size, modified: modified)
     }
 
-    private func bootstrap(identity: FileIdentity, size: UInt64, modified: Date) -> RolloutReadResult {
-        guard let header = read(url: binding.rolloutURL, offset: 0, count: Int(min(size, maxHeaderBytes))), validateSession(in: header) else {
+    private func bootstrap(transaction: OpenedRollout, identity: FileIdentity, size: UInt64, modified: Date) -> RolloutReadResult {
+        guard let header = read(transaction, offset: 0, count: Int(min(size, maxHeaderBytes))), validateSession(in: header) else {
             return RolloutReadResult(observations: [.capabilityUnavailable(threadID: binding.threadID, capability: .rolloutSessionIdentity)], cursor: nil, invalidation: .sessionMismatch)
         }
         sessionValidated = true
         if size <= maxHeaderBytes { return consume(header, identity: identity, offset: 0, endingOffset: size, modified: modified, skipFirstPartial: false) }
         let start = size - min(size, maxTailBytes)
-        guard let tail = read(url: binding.rolloutURL, offset: start, count: Int(size - start)) else { return invalidated(.fileMissing, reason: .sourceMissing, identity: identity) }
+        guard let tail = read(transaction, offset: start, count: Int(size - start)) else { return invalidated(.fileMissing, reason: .sourceMissing, identity: identity) }
         return consume(tail, identity: identity, offset: start, endingOffset: size, modified: modified, skipFirstPartial: start > 0)
     }
 
-    private func appended(identity: FileIdentity, size: UInt64, modified: Date, from offset: UInt64) -> RolloutReadResult {
-        guard sessionValidated else { return invalidated(.sessionMismatch, reason: .fileIdentityChanged, identity: identity) }
+    /// A persisted cursor contains no raw rollout content or decoded state.  On
+    /// its first use, reconstruct only the bounded tail needed for turn/token
+    /// continuity, discard those historical observations, then consume new
+    /// bytes from the same verified descriptor.
+    private func resumeCheckpoint(transaction: OpenedRollout, identity: FileIdentity, size: UInt64, modified: Date, from offset: UInt64) -> RolloutReadResult {
+        guard !checkpointNeedsStateDBRevalidation else { return checkpointStateDBUnavailable() }
+        guard let header = read(transaction, offset: 0, count: Int(min(size, maxHeaderBytes))), validateSession(in: header) else {
+            return RolloutReadResult(observations: [.capabilityUnavailable(threadID: binding.threadID, capability: .rolloutSessionIdentity)], cursor: cursor, invalidation: .sessionMismatch)
+        }
+        let reconstructionStart = offset - min(offset, maxTailBytes)
+        guard let reconstruction = read(transaction, offset: reconstructionStart, count: Int(offset - reconstructionStart)) else {
+            return invalidated(.fileMissing, reason: .sourceMissing, identity: identity)
+        }
+        reconstructCheckpointState(from: reconstruction, offset: reconstructionStart, skipFirstPartial: reconstructionStart > 0)
+        sessionValidated = true
+        return appended(transaction: transaction, identity: identity, size: size, modified: modified, from: offset)
+    }
+
+    private func reconstructCheckpointState(from bytes: Data, offset: UInt64, skipFirstPartial: Bool) {
+        activeTurnID = nil
+        lastTokenTotal = nil
+        partialLine = Data()
+        let lines = bytes.split(separator: 0x0A, omittingEmptySubsequences: false)
+        let endedWithNewline = bytes.last == 0x0A
+        let completeCount = endedWithNewline ? lines.count - 1 : max(0, lines.count - 1)
+        var lineOffset = offset
+        for index in 0..<completeCount {
+            let line = Data(lines[index])
+            defer { lineOffset += UInt64(line.count + 1) }
+            if skipFirstPartial && index == 0 { continue }
+            _ = decode(line: line, offset: lineOffset)
+        }
+        if !endedWithNewline { partialLine = Data(lines.last ?? Data()) }
+    }
+
+    private func appended(transaction: OpenedRollout, identity: FileIdentity, size: UInt64, modified: Date, from offset: UInt64) -> RolloutReadResult {
         guard size > offset else { return RolloutReadResult(observations: [.sourceHealth(health(.available, reason: nil, identity: identity))], cursor: cursor, invalidation: nil) }
         let count = Int(min(UInt64(maxAppendBytes), size - offset))
-        guard let bytes = read(url: binding.rolloutURL, offset: offset, count: count) else { return invalidated(.fileMissing, reason: .sourceMissing, identity: identity) }
+        guard let bytes = read(transaction, offset: offset, count: count) else { return invalidated(.fileMissing, reason: .sourceMissing, identity: identity) }
         return consume(bytes, identity: identity, offset: offset, endingOffset: offset + UInt64(bytes.count), modified: modified, skipFirstPartial: false)
     }
 
@@ -391,27 +471,38 @@ private func number(_ value: Any?) -> Int64? {
     guard double.rounded() == double, double >= Double(Int64.min), double <= Double(Int64.max) else { return nil }
     return Int64(double)
 }
-private func fileSize(_ url: URL) -> UInt64? {
-    var attributes = stat()
-    let result = url.withUnsafeFileSystemRepresentation { path in
-        guard let path else { return -1 }
-        return Int(lstat(path, &attributes))
+private final class OpenedRollout {
+    let handle: FileHandle
+    let identity: FileIdentity
+    let size: UInt64
+    let modified: Date
+
+    init?(url: URL) {
+        let descriptor = url.withUnsafeFileSystemRepresentation { path -> Int32 in
+            guard let path else { return -1 }
+            return Darwin.open(path, O_RDONLY | O_CLOEXEC)
+        }
+        guard descriptor >= 0 else { return nil }
+        var attributes = stat()
+        guard fstat(descriptor, &attributes) == 0 else { Darwin.close(descriptor); return nil }
+        handle = FileHandle(fileDescriptor: descriptor, closeOnDealloc: true)
+        identity = FileIdentity(device: UInt64(attributes.st_dev), inode: UInt64(attributes.st_ino))
+        size = UInt64(attributes.st_size)
+        modified = Date(timeIntervalSince1970: TimeInterval(attributes.st_mtimespec.tv_sec) + TimeInterval(attributes.st_mtimespec.tv_nsec) / 1_000_000_000)
     }
-    return result == 0 ? UInt64(attributes.st_size) : nil
+
+    func close() { try? handle.close() }
 }
-private func modificationTime(_ url: URL) -> Date? {
-    var attributes = stat()
-    let result = url.withUnsafeFileSystemRepresentation { path in
-        guard let path else { return -1 }
-        return Int(lstat(path, &attributes))
+
+private extension RolloutIncrementalReader {
+    func openTransaction() -> OpenedRollout? {
+        beforeDescriptorOpen?()
+        return OpenedRollout(url: binding.rolloutURL)
     }
-    guard result == 0 else { return nil }
-    return Date(timeIntervalSince1970: TimeInterval(attributes.st_mtimespec.tv_sec) + TimeInterval(attributes.st_mtimespec.tv_nsec) / 1_000_000_000)
 }
-private func read(url: URL, offset: UInt64, count: Int) -> Data? {
-    guard let handle = try? FileHandle(forReadingFrom: url) else { return nil }
-    defer { try? handle.close() }
-    do { try handle.seek(toOffset: offset); return try handle.read(upToCount: count) } catch { return nil }
+
+private func read(_ transaction: OpenedRollout, offset: UInt64, count: Int) -> Data? {
+    do { try transaction.handle.seek(toOffset: offset); return try transaction.handle.read(upToCount: count) } catch { return nil }
 }
 
 public enum DesktopLocalAdapterError: Error, Equatable { case threadNotFound, rolloutOutsideValidatedRoots, shutdown }
@@ -425,10 +516,16 @@ public final class DesktopLocalAdapter: @unchecked Sendable {
     private let stateDB: StateDBReader
     private var readers: [NamespacedID: RolloutIncrementalReader] = [:]
     private var processEpochs: [NamespacedID: ProcessEpoch] = [:]
+    private var processEpochMismatchLatches: Set<NamespacedID> = []
+    private let readerBeforeDescriptorOpen: (() -> Void)?
     private var stopped = false
 
     public init(sourceID: DesktopLocalSourceID, validatedSessionRoots: [URL], stateDB: StateDBReader) {
-        self.sourceID = sourceID; self.roots = validatedSessionRoots.map { $0.standardizedFileURL }; self.stateDB = stateDB
+        self.sourceID = sourceID; self.roots = validatedSessionRoots.map { $0.standardizedFileURL }; self.stateDB = stateDB; self.readerBeforeDescriptorOpen = nil
+    }
+
+    init(sourceID: DesktopLocalSourceID, validatedSessionRoots: [URL], stateDB: StateDBReader, readerBeforeDescriptorOpen: (() -> Void)?) {
+        self.sourceID = sourceID; self.roots = validatedSessionRoots.map { $0.standardizedFileURL }; self.stateDB = stateDB; self.readerBeforeDescriptorOpen = readerBeforeDescriptorOpen
     }
 
     public func open(threadRawID: String, checkpoint: RolloutCursor? = nil) throws -> DesktopThreadSnapshot {
@@ -436,13 +533,34 @@ public final class DesktopLocalAdapter: @unchecked Sendable {
         guard let record = try stateDB.thread(rawID: threadRawID) else { throw DesktopLocalAdapterError.threadNotFound }
         guard isUnderValidatedRoot(record.rolloutURL) else { throw DesktopLocalAdapterError.rolloutOutsideValidatedRoots }
         guard let binding = ThreadRolloutBinding(sourceID: sourceID, threadRawID: threadRawID, rolloutURL: record.rolloutURL, sessionID: threadRawID) else { throw DesktopLocalAdapterError.threadNotFound }
-        readers[binding.threadID] = RolloutIncrementalReader(binding: binding, checkpoint: checkpoint)
+        let reader = RolloutIncrementalReader(binding: binding, checkpoint: checkpoint, beforeDescriptorOpen: readerBeforeDescriptorOpen)
+        if checkpoint == nil {
+            switch reader.admitExactBinding() {
+            case nil: break
+            case .fileMissing?: throw DesktopLocalAdapterError.threadNotFound
+            case .sessionMismatch?: throw DesktopLocalAdapterError.threadNotFound
+            default: throw DesktopLocalAdapterError.threadNotFound
+            }
+        }
+        // Only a newly DB/path/file/session-admitted owner clears the per-thread
+        // epoch latch.  An invalid attempted rebind leaves the old owner blocked.
+        readers[binding.threadID] = reader
+        processEpochs.removeValue(forKey: binding.threadID)
+        processEpochMismatchLatches.remove(binding.threadID)
         return record.snapshot
     }
 
     public func poll(threadID: NamespacedID) throws -> RolloutReadResult {
         guard !stopped else { throw DesktopLocalAdapterError.shutdown }
         guard let reader = readers[threadID] else { throw DesktopLocalAdapterError.threadNotFound }
+        if reader.requiresCheckpointStateDBRevalidation {
+            guard let record = try stateDB.thread(rawID: threadID.rawID),
+                  record.snapshot.threadID == threadID,
+                  record.rolloutURL.standardizedFileURL == reader.binding.rolloutURL.standardizedFileURL else {
+                return reader.checkpointStateDBUnavailable()
+            }
+            reader.confirmCheckpointStateDBRevalidation()
+        }
         return reader.poll()
     }
 
@@ -453,7 +571,11 @@ public final class DesktopLocalAdapter: @unchecked Sendable {
         guard let reader = readers[threadID] else { return .capabilityUnavailable(threadID: threadID, capability: .rolloutSessionIdentity) }
         let identity = FileIdentity.readOnlyIdentity(of: reader.binding.rolloutURL)
         guard let processEpoch else { return .sourceHealth(DesktopSourceHealth(threadID: threadID, state: .unavailable, processEpoch: nil, fileIdentity: identity, reason: .sourceMissing)) }
+        if processEpochMismatchLatches.contains(threadID) {
+            return .sourceHealth(DesktopSourceHealth(threadID: threadID, state: .unavailable, processEpoch: processEpoch, fileIdentity: identity, reason: .processEpochMismatch))
+        }
         if let expected = processEpochs[threadID], expected != processEpoch {
+            processEpochMismatchLatches.insert(threadID)
             return .sourceHealth(DesktopSourceHealth(threadID: threadID, state: .unavailable, processEpoch: processEpoch, fileIdentity: identity, reason: .processEpochMismatch))
         }
         guard writerOwnsSelectedRollout else { return .sourceHealth(DesktopSourceHealth(threadID: threadID, state: .unavailable, processEpoch: processEpoch, fileIdentity: identity, reason: .writerOwnershipMissing)) }
@@ -461,7 +583,7 @@ public final class DesktopLocalAdapter: @unchecked Sendable {
         return .sourceHealth(DesktopSourceHealth(threadID: threadID, state: .available, processEpoch: processEpoch, fileIdentity: identity))
     }
 
-    public func shutdown() { stopped = true; readers.removeAll(); processEpochs.removeAll() }
+    public func shutdown() { stopped = true; readers.removeAll(); processEpochs.removeAll(); processEpochMismatchLatches.removeAll() }
 
     private func isUnderValidatedRoot(_ url: URL) -> Bool {
         let candidate = url.standardizedFileURL.path
