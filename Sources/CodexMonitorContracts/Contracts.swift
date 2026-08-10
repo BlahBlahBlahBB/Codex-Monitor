@@ -21,13 +21,17 @@ public struct AdapterDescriptor: Sendable, Equatable {
     }
 }
 
-public enum RegistryError: Error, Equatable { case duplicateDescriptor }
+public enum RegistryError: Error, Equatable {
+    case duplicateDescriptor
+    case incompatibleDescriptor
+}
 
 public struct AdapterRegistry: Sendable {
     private let descriptors: [DescriptorKey: AdapterDescriptor]
     public init(_ values: [AdapterDescriptor]) throws {
         var built: [DescriptorKey: AdapterDescriptor] = [:]
         for descriptor in values {
+            guard descriptor.isLaneCompatible else { throw RegistryError.incompatibleDescriptor }
             let key = DescriptorKey(descriptor)
             guard built[key] == nil else { throw RegistryError.duplicateDescriptor }
             built[key] = descriptor
@@ -41,6 +45,98 @@ public struct AdapterRegistry: Sendable {
     public var realLiveAuthoritativeCapabilityCount: Int {
         descriptors.values.reduce(0) { partial, descriptor in
             partial + descriptor.capabilitySnapshot.allStates.values.filter { $0 == .liveAuthoritative }.count
+        }
+    }
+
+    /// A uniform output boundary. Construction of a payload alone never asserts
+    /// that it belongs to the descriptor currently registered for its source.
+    public func validatedOutput(_ output: AdapterOutput) throws -> AdapterOutput {
+        let provenance = output.provenance
+        guard let descriptor = descriptor(
+            adapterID: provenance.adapterID,
+            adapterVersion: provenance.adapterVersion,
+            sourceKind: provenance.sourceKind,
+            sourceID: provenance.sourceID
+        ) else {
+            throw AdapterOutputRejection.descriptorNotRegistered
+        }
+        guard descriptor.isLaneCompatible,
+              provenance.capability.isCompatible(with: descriptor.sourceKind) else {
+            throw AdapterOutputRejection.incompatibleDescriptor
+        }
+        switch output {
+        case .accountSnapshot:
+            guard descriptor.sourceKind == .account,
+                  provenance.observationMode == .snapshot else {
+                throw AdapterOutputRejection.laneMismatch
+            }
+        case .candidateRuntimeObservation:
+            guard descriptor.sourceKind == .monitorOwnedRuntime,
+                  provenance.observationMode == .live else {
+                throw AdapterOutputRejection.laneMismatch
+            }
+        case .snapshotSummary:
+            guard descriptor.sourceKind == .desktopSnapshot,
+                  provenance.observationMode == .snapshot else {
+                throw AdapterOutputRejection.laneMismatch
+            }
+        }
+        return output
+    }
+}
+
+public enum AdapterOutputRejection: Error, Equatable {
+    case descriptorNotRegistered
+    case incompatibleDescriptor
+    case laneMismatch
+}
+
+private extension AdapterDescriptor {
+    var isLaneCompatible: Bool {
+        if sourceKind == .futureObserver {
+            return CapabilityName.allCases.allSatisfy {
+                capabilitySnapshot.state(for: $0) == .unsupported
+            }
+        }
+        return capabilitySnapshot.allStates.keys.allSatisfy { $0.isCompatible(with: sourceKind) }
+    }
+}
+
+public extension CapabilityName {
+    func isCompatible(with sourceKind: SourceKind) -> Bool {
+        switch sourceKind {
+        case .account:
+            switch self {
+            case .accountReturnedFields, .planAndAuthModeFields, .stableLocalAccountDiscriminator,
+                 .primaryRateLimitSnapshot, .secondaryRateLimitSnapshot, .sparseRateLimitUpdateMerge,
+                 .usageResponsePresence, .authoritativeCost, .resetCreditCount, .resetCreditDetails,
+                 .resetCreditConsume, .accountSwitching:
+                return true
+            default:
+                return false
+            }
+        case .monitorOwnedRuntime:
+            switch self {
+            case .ownedRuntimeProvenance, .threadStartObservation, .threadStatusChangeObservation,
+                 .turnStartObservation, .itemLifecycleObservation, .successTurnCompletionObservation,
+                 .tokenUsageUpdateShape, .exactParentCorrelation, .thinkingWorkingReduction,
+                 .currentActivityText, .approvalLifecycle, .failedInterruptedProjection,
+                 .liveMultiThreadAggregation, .reconnectReconstruction, .ownerUISurvival:
+                return true
+            default:
+                return false
+            }
+        case .desktopSnapshot:
+            switch self {
+            case .desktopSummaryHistoryRead, .desktopSourceClassification,
+                 .desktopTitlePreviewStatusHistory, .desktopRealtimeLifecycle,
+                 .desktopApproval, .desktopSessionToken, .desktopTerminalRetention:
+                return true
+            default:
+                return false
+            }
+        case .futureObserver:
+            return true
         }
     }
 }
@@ -95,7 +191,10 @@ public struct AccountSnapshot: Codable, Sendable, Equatable {
     public let usage: UsagePresence?
     public let resetCreditCount: Int?
     public let resetCreditDetails: [String]?
-    public init(provenance: Provenance, email: String? = nil, planType: String? = nil, authMode: String? = nil, primaryRateLimit: RateLimitWindow? = nil, secondaryRateLimit: RateLimitWindow? = nil, usage: UsagePresence? = nil, resetCreditCount: Int? = nil, resetCreditDetails: [String]? = nil) {
+    public init?(provenance: Provenance, email: String? = nil, planType: String? = nil, authMode: String? = nil, primaryRateLimit: RateLimitWindow? = nil, secondaryRateLimit: RateLimitWindow? = nil, usage: UsagePresence? = nil, resetCreditCount: Int? = nil, resetCreditDetails: [String]? = nil) {
+        guard provenance.sourceKind == .account,
+              provenance.observationMode == .snapshot,
+              provenance.capability.isCompatible(with: .account) else { return nil }
         self.provenance = provenance; self.email = email; self.planType = planType; self.authMode = authMode
         self.primaryRateLimit = primaryRateLimit; self.secondaryRateLimit = secondaryRateLimit; self.usage = usage
         self.resetCreditCount = resetCreditCount; self.resetCreditDetails = resetCreditDetails
@@ -104,7 +203,12 @@ public struct AccountSnapshot: Codable, Sendable, Equatable {
 
 public enum Availability: String, Codable, Sendable { case available, unavailable, unknown }
 public enum SourceClassification: String, Codable, Sendable { case unclassified, unvalidated, validated }
-public enum SnapshotSummaryError: Error, Equatable { case mustBeSnapshot, validatedClassificationNotAllowed }
+public enum SnapshotSummaryError: Error, Equatable {
+    case mustBeDesktopSnapshot
+    case mustBeSnapshot
+    case incompatibleCapability
+    case validatedClassificationNotAllowed
+}
 
 public struct SnapshotSummary: Codable, Sendable, Equatable {
     public let provenance: Provenance
@@ -116,7 +220,9 @@ public struct SnapshotSummary: Codable, Sendable, Equatable {
     public let sourceClassification: SourceClassification
     public let staleness: Freshness
     public init(provenance: Provenance, readAt: Date, rawStatus: String? = nil, titleAvailability: Availability, previewAvailability: Availability, historyAvailability: Availability, sourceClassification: SourceClassification, staleness: Freshness) throws {
+        guard provenance.sourceKind == .desktopSnapshot else { throw SnapshotSummaryError.mustBeDesktopSnapshot }
         guard provenance.observationMode == .snapshot else { throw SnapshotSummaryError.mustBeSnapshot }
+        guard provenance.capability.isCompatible(with: .desktopSnapshot) else { throw SnapshotSummaryError.incompatibleCapability }
         guard sourceClassification != .validated else { throw SnapshotSummaryError.validatedClassificationNotAllowed }
         self.provenance = provenance; self.readAt = readAt; self.rawStatus = rawStatus; self.titleAvailability = titleAvailability
         self.previewAvailability = previewAvailability; self.historyAvailability = historyAvailability; self.sourceClassification = sourceClassification; self.staleness = staleness
@@ -125,6 +231,35 @@ public struct SnapshotSummary: Codable, Sendable, Equatable {
 
 public enum RuntimeObservationKind: String, Codable, CaseIterable, Sendable {
     case threadStarted, threadStatusChanged, turnStarted, itemStarted, itemCompleted, turnCompletedSuccess, threadTokenUsageUpdated
+}
+
+public extension RuntimeObservationKind {
+    var requiredCapability: CapabilityName {
+        switch self {
+        case .threadStarted: .threadStartObservation
+        case .threadStatusChanged: .threadStatusChangeObservation
+        case .turnStarted: .turnStartObservation
+        case .itemStarted, .itemCompleted: .itemLifecycleObservation
+        case .turnCompletedSuccess: .successTurnCompletionObservation
+        case .threadTokenUsageUpdated: .tokenUsageUpdateShape
+        }
+    }
+
+    /// The retained H1 evidence makes identities optional, but never changes the
+    /// namespace or entity kind of any identity that is actually supplied.
+    func acceptsSuppliedIdentityShape(threadID: NamespacedID?, turnID: NamespacedID?, itemID: NamespacedID?) -> Bool {
+        let validThread = threadID.map { $0.entityKind == .thread } ?? true
+        let validTurn = turnID.map { $0.entityKind == .turn } ?? true
+        let validItem = itemID.map { $0.entityKind == .item } ?? true
+        switch self {
+        case .threadStarted, .threadStatusChanged, .threadTokenUsageUpdated:
+            return validThread && turnID == nil && itemID == nil
+        case .turnStarted, .turnCompletedSuccess:
+            return validThread && validTurn && itemID == nil
+        case .itemStarted, .itemCompleted:
+            return validThread && validTurn && validItem
+        }
+    }
 }
 
 public enum RuntimeItemKind: String, Codable, Sendable { case reasoning, commandExecution, agentMessage, userMessage }
@@ -154,12 +289,33 @@ public struct OwnershipRecord: Codable, Sendable, Equatable {
         self.sourceID = sourceID; self.runtimeInstanceID = runtimeInstanceID; self.namespacedThreadID = namespacedThreadID
         self.creationProvenance = creationProvenance; self.accountEpoch = accountEpoch; self.lifecycleEpoch = lifecycleEpoch
     }
+
+    func isConsistent(with descriptor: AdapterDescriptor) -> Bool {
+        sourceID == descriptor.sourceID &&
+        namespacedThreadID.sourceID == sourceID &&
+        namespacedThreadID.entityKind == .thread &&
+        creationProvenance.sourceID == sourceID &&
+        creationProvenance.sourceKind == .monitorOwnedRuntime &&
+        creationProvenance.adapterID == descriptor.adapterID &&
+        creationProvenance.adapterVersion == descriptor.adapterVersion &&
+        creationProvenance.runtimeInstanceID == runtimeInstanceID &&
+        creationProvenance.accountEpoch == accountEpoch &&
+        creationProvenance.lifecycleEpoch == lifecycleEpoch
+    }
 }
 
 public enum AdapterOutput: Sendable, Equatable {
     case accountSnapshot(AccountSnapshot)
     case candidateRuntimeObservation(CandidateRuntimeObservationEnvelope)
     case snapshotSummary(SnapshotSummary)
+
+    fileprivate var provenance: Provenance {
+        switch self {
+        case .accountSnapshot(let snapshot): snapshot.provenance
+        case .candidateRuntimeObservation(let candidate): candidate.provenance
+        case .snapshotSummary(let summary): summary.provenance
+        }
+    }
 }
 
 /// This is the only H1 extraction point for a future live-admission primitive.
@@ -173,7 +329,11 @@ public enum H1LiveBoundary {
 
 public struct FutureObserverAdapter: Sendable {
     public let descriptor: AdapterDescriptor
-    public init(descriptor: AdapterDescriptor) {
+    public init?(descriptor: AdapterDescriptor) {
+        guard descriptor.sourceKind == .futureObserver,
+              CapabilityName.allCases.allSatisfy({ descriptor.capabilitySnapshot.state(for: $0) == .unsupported }) else {
+            return nil
+        }
         self.descriptor = descriptor
     }
     public var outputs: [AdapterOutput] { [] }

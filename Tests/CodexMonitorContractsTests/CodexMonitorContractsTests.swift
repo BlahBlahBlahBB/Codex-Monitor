@@ -39,13 +39,15 @@ final class CodexMonitorContractsTests: XCTestCase {
     }
 
     private func thread(_ sourceID: SourceID? = nil, raw: String = "synthetic-thread-alpha") -> NamespacedID { NamespacedID(sourceID: sourceID ?? source(), entityKind: .thread, rawID: raw)! }
+    private func turn(_ sourceID: SourceID? = nil, raw: String = "synthetic-turn-alpha", kind: EntityKind = .turn) -> NamespacedID { NamespacedID(sourceID: sourceID ?? source(), entityKind: kind, rawID: raw)! }
+    private func item(_ sourceID: SourceID? = nil, raw: String = "synthetic-item-alpha", kind: EntityKind = .item) -> NamespacedID { NamespacedID(sourceID: sourceID ?? source(), entityKind: kind, rawID: raw)! }
 
-    private func candidate(provenance: Provenance? = nil, threadID: NamespacedID? = nil) -> CandidateRuntimeObservationEnvelope {
-        CandidateRuntimeObservationEnvelope(provenance: provenance ?? runtimeProvenance(), kind: .threadStarted, threadID: threadID ?? thread())!
+    private func candidate(provenance: Provenance? = nil, kind: RuntimeObservationKind = .threadStarted, threadID: NamespacedID? = nil, turnID: NamespacedID? = nil, itemID: NamespacedID? = nil) -> CandidateRuntimeObservationEnvelope {
+        CandidateRuntimeObservationEnvelope(provenance: provenance ?? runtimeProvenance(capability: kind.requiredCapability), kind: kind, threadID: threadID ?? thread(), turnID: turnID, itemID: itemID)!
     }
 
-    private func descriptor(state: CapabilityState, sourceID: SourceID? = nil) -> AdapterDescriptor {
-        AdapterDescriptor(adapterID: adapterID, adapterVersion: adapterVersion, sourceKind: .monitorOwnedRuntime, sourceID: sourceID ?? source(), capabilitySnapshot: CapabilitySnapshot([.threadStartObservation: state]), evidenceMetadata: evidence)
+    private func descriptor(state: CapabilityState, capability: CapabilityName = .threadStartObservation, sourceID: SourceID? = nil) -> AdapterDescriptor {
+        AdapterDescriptor(adapterID: adapterID, adapterVersion: adapterVersion, sourceKind: .monitorOwnedRuntime, sourceID: sourceID ?? source(), capabilitySnapshot: CapabilitySnapshot([capability: state]), evidenceMetadata: evidence)
     }
 
     private func context(descriptor: AdapterDescriptor, threadID: NamespacedID? = nil, connection: ConnectionEpoch? = nil) -> LiveAdmissionContext {
@@ -74,12 +76,12 @@ final class CodexMonitorContractsTests: XCTestCase {
     }
 
     func test05AccountConnectedDoesNotCreateRuntimeAvailabilityOrIdle() {
-        let output = AdapterOutput.accountSnapshot(AccountSnapshot(provenance: accountProvenance()))
+        let output = AdapterOutput.accountSnapshot(AccountSnapshot(provenance: accountProvenance())!)
         XCTAssertNil(H1LiveBoundary.candidate(from: output))
     }
 
     func test06FreshQuotaDoesNotCreateRuntimeStateRingOrAnimationEligibility() {
-        let account = AccountSnapshot(provenance: accountProvenance(), primaryRateLimit: RateLimitWindow(usedPercent: 10))
+        let account = AccountSnapshot(provenance: accountProvenance(), primaryRateLimit: RateLimitWindow(usedPercent: 10))!
         XCTAssertEqual(account.primaryRateLimit?.usedPercent, 10)
         XCTAssertNil(H1LiveBoundary.candidate(from: .accountSnapshot(account)))
     }
@@ -114,20 +116,20 @@ final class CodexMonitorContractsTests: XCTestCase {
     }
 
     func test12FutureObserverIsAllUnsupportedAndZeroOutput() {
-        let future = FutureObserverAdapter(descriptor: H1Baseline.futureObserverDescriptor(sourceID: source("future-source"), evidence: evidence))
+        let future = FutureObserverAdapter(descriptor: H1Baseline.futureObserverDescriptor(sourceID: source("future-source"), evidence: evidence))!
         XCTAssertTrue(future.isAllUnsupported)
         XCTAssertTrue(future.outputs.isEmpty)
     }
 
     func test13MissingSecondaryCostAndDetailsRemainNil() {
-        let account = AccountSnapshot(provenance: accountProvenance(), usage: UsagePresence())
+        let account = AccountSnapshot(provenance: accountProvenance(), usage: UsagePresence())!
         XCTAssertNil(account.secondaryRateLimit)
         XCTAssertNil(account.usage?.costUSD)
         XCTAssertNil(account.resetCreditDetails)
     }
 
     func test14AdapterAndSourceLanesAreIsolated() throws {
-        let account = AdapterOutput.accountSnapshot(AccountSnapshot(provenance: accountProvenance()))
+        let account = AdapterOutput.accountSnapshot(AccountSnapshot(provenance: accountProvenance())!)
         let desktop = AdapterOutput.snapshotSummary(try SnapshotSummary(provenance: desktopProvenance(), readAt: date, titleAvailability: .unknown, previewAvailability: .unknown, historyAvailability: .unknown, sourceClassification: .unclassified, staleness: freshness))
         XCTAssertNil(H1LiveBoundary.candidate(from: account))
         XCTAssertNil(H1LiveBoundary.candidate(from: desktop))
@@ -198,6 +200,105 @@ final class CodexMonitorContractsTests: XCTestCase {
         XCTAssertEqual(gate.admit(wrongAccount, using: context), .failure(.accountEpochMismatch))
         let wrongThread = candidate(provenance: runtimeProvenance(sourceID: descriptor.sourceID), threadID: thread(descriptor.sourceID, raw: "other-thread"))
         XCTAssertEqual(gate.admit(wrongThread, using: context), .failure(.parentIdentityMismatch))
+    }
+
+    func test24EveryRuntimeKindUsesItsOnlyAuthorizedCapability() throws {
+        for kind in RuntimeObservationKind.allCases {
+            let descriptor = descriptor(state: .liveAuthoritative, capability: kind.requiredCapability)
+            let gate = LiveProductAdmissionGate(registry: try AdapterRegistry([descriptor]))
+            let exact = candidate(
+                provenance: runtimeProvenance(sourceID: descriptor.sourceID, capability: kind.requiredCapability),
+                kind: kind
+            )
+            if case .success = gate.admit(exact, using: context(descriptor: descriptor)) {
+                // The test proves that each case is bound to its own mapping.
+            } else {
+                XCTFail("exact capability for \(kind) must be admitted")
+            }
+        }
+
+        let descriptor = descriptor(state: .liveAuthoritative, capability: .itemLifecycleObservation)
+        let gate = LiveProductAdmissionGate(registry: try AdapterRegistry([descriptor]))
+        let mismatched = candidate(
+            provenance: runtimeProvenance(sourceID: descriptor.sourceID, capability: .itemLifecycleObservation),
+            kind: .threadStarted
+        )
+        var callbackCount = 0
+        XCTAssertEqual(
+            gate.deliver(mismatched, using: context(descriptor: descriptor)) { _ in callbackCount += 1 },
+            .failure(.capabilityKindMismatch(required: .threadStartObservation, supplied: .itemLifecycleObservation))
+        )
+        XCTAssertEqual(callbackCount, 0)
+    }
+
+    func test25EverySuppliedIdentityChecksSourceKindAndShapeWithZeroCallbacks() throws {
+        func assertRejected(_ candidate: CandidateRuntimeObservationEnvelope, descriptor: AdapterDescriptor, expected: AdmissionRejection) {
+            let gate = LiveProductAdmissionGate(registry: try! AdapterRegistry([descriptor]))
+            var callbackCount = 0
+            XCTAssertEqual(gate.deliver(candidate, using: context(descriptor: descriptor)) { _ in callbackCount += 1 }, .failure(expected))
+            XCTAssertEqual(callbackCount, 0)
+        }
+
+        let threadDescriptor = descriptor(state: .liveAuthoritative)
+        assertRejected(candidate(provenance: runtimeProvenance(sourceID: threadDescriptor.sourceID), threadID: thread(source("foreign-thread"))), descriptor: threadDescriptor, expected: .suppliedIdentitySourceMismatch)
+        assertRejected(candidate(provenance: runtimeProvenance(sourceID: threadDescriptor.sourceID), threadID: turn(threadDescriptor.sourceID)), descriptor: threadDescriptor, expected: .suppliedIdentityKindMismatch)
+
+        let turnDescriptor = descriptor(state: .liveAuthoritative, capability: .turnStartObservation)
+        assertRejected(candidate(provenance: runtimeProvenance(sourceID: turnDescriptor.sourceID, capability: .turnStartObservation), kind: .turnStarted, turnID: turn(source("foreign-turn"))), descriptor: turnDescriptor, expected: .suppliedIdentitySourceMismatch)
+        assertRejected(candidate(provenance: runtimeProvenance(sourceID: turnDescriptor.sourceID, capability: .turnStartObservation), kind: .turnStarted, turnID: item(turnDescriptor.sourceID)), descriptor: turnDescriptor, expected: .suppliedIdentityKindMismatch)
+
+        let itemDescriptor = descriptor(state: .liveAuthoritative, capability: .itemLifecycleObservation)
+        assertRejected(candidate(provenance: runtimeProvenance(sourceID: itemDescriptor.sourceID, capability: .itemLifecycleObservation), kind: .itemStarted, itemID: item(source("foreign-item"))), descriptor: itemDescriptor, expected: .suppliedIdentitySourceMismatch)
+        assertRejected(candidate(provenance: runtimeProvenance(sourceID: itemDescriptor.sourceID, capability: .itemLifecycleObservation), kind: .itemStarted, itemID: turn(itemDescriptor.sourceID)), descriptor: itemDescriptor, expected: .suppliedIdentityKindMismatch)
+    }
+
+    func test26InconsistentOwnershipProvenanceRejectsWithZeroCallbacks() throws {
+        let descriptor = descriptor(state: .liveAuthoritative)
+        let gate = LiveProductAdmissionGate(registry: try AdapterRegistry([descriptor]))
+        let otherSource = source("ownership-other-source")
+        let otherRuntime = RuntimeInstanceID("ownership-other-runtime")!
+        let otherAccount = AccountEpoch("ownership-other-account")!
+        let otherLifecycle = LifecycleEpoch("ownership-other-lifecycle")!
+        func ownership(recordSource: SourceID = descriptor.sourceID, recordRuntime: RuntimeInstanceID = runtimeID, creationAdapter: AdapterID = adapterID, creationVersion: AdapterVersion = adapterVersion, recordAccount: AccountEpoch? = accountEpoch, recordLifecycle: LifecycleEpoch = lifecycleEpoch) -> OwnershipRecord {
+            let creation = Provenance(sourceID: descriptor.sourceID, sourceKind: .monitorOwnedRuntime, adapterID: creationAdapter, adapterVersion: creationVersion, runtimeInstanceID: runtimeID, observationMode: .live, authority: .partial, observedAt: date, freshness: freshness, accountEpoch: accountEpoch, connectionEpoch: connectionEpoch, lifecycleEpoch: lifecycleEpoch, capability: .threadStartObservation, evidence: evidence, origin: .adapter)!
+            return OwnershipRecord(sourceID: recordSource, runtimeInstanceID: recordRuntime, namespacedThreadID: thread(recordSource), creationProvenance: creation, accountEpoch: recordAccount, lifecycleEpoch: recordLifecycle)
+        }
+        let inconsistent: [OwnershipRecord] = [
+            ownership(recordSource: otherSource),
+            ownership(recordRuntime: otherRuntime),
+            ownership(creationAdapter: AdapterID("other-adapter")!),
+            ownership(creationVersion: AdapterVersion("other-version")!),
+            ownership(recordAccount: otherAccount),
+            ownership(recordLifecycle: otherLifecycle)
+        ]
+        for record in inconsistent {
+            let context = LiveAdmissionContext(descriptor: descriptor, ownership: record, connectionEpoch: connectionEpoch)
+            var callbackCount = 0
+            XCTAssertEqual(gate.deliver(candidate(provenance: runtimeProvenance(sourceID: descriptor.sourceID)), using: context) { _ in callbackCount += 1 }, .failure(.ownershipInconsistent))
+            XCTAssertEqual(callbackCount, 0)
+        }
+    }
+
+    func test27SourceLaneConstructionAndRegistryOutputValidationRejectCrossLaneValues() throws {
+        XCTAssertNil(AccountSnapshot(provenance: runtimeProvenance()))
+        XCTAssertThrowsError(try SnapshotSummary(provenance: accountProvenance(), readAt: date, titleAvailability: .unknown, previewAvailability: .unknown, historyAvailability: .unknown, sourceClassification: .unclassified, staleness: freshness))
+        XCTAssertNil(CandidateRuntimeObservationEnvelope(provenance: desktopProvenance(), kind: .threadStarted, threadID: thread()))
+
+        let accountDescriptor = AdapterDescriptor(adapterID: AdapterID("account")!, adapterVersion: adapterVersion, sourceKind: .account, sourceID: source("account-source"), capabilitySnapshot: CapabilitySnapshot([.accountReturnedFields: .snapshot]), evidenceMetadata: evidence)
+        let registry = try AdapterRegistry([accountDescriptor])
+        let validAccount = AccountSnapshot(provenance: accountProvenance())!
+        XCTAssertNoThrow(try registry.validatedOutput(.accountSnapshot(validAccount)))
+        let foreignAccount = AccountSnapshot(provenance: Provenance(sourceID: source("foreign-account"), sourceKind: .account, adapterID: AdapterID("account")!, adapterVersion: adapterVersion, observationMode: .snapshot, authority: .authoritative, observedAt: date, freshness: freshness, capability: .accountReturnedFields, evidence: evidence, origin: .adapter)!)!
+        XCTAssertThrowsError(try registry.validatedOutput(.accountSnapshot(foreignAccount)))
+
+        let wrongLaneDescriptor = AdapterDescriptor(adapterID: adapterID, adapterVersion: adapterVersion, sourceKind: .account, sourceID: source("wrong-lane-account"), capabilitySnapshot: CapabilitySnapshot([.threadStartObservation: .snapshot]), evidenceMetadata: evidence)
+        XCTAssertThrowsError(try AdapterRegistry([wrongLaneDescriptor]))
+
+        let wrongFutureLane = AdapterDescriptor(adapterID: AdapterID("future-observer")!, adapterVersion: adapterVersion, sourceKind: .account, sourceID: source("future-source"), capabilitySnapshot: CapabilitySnapshot([:]), evidenceMetadata: evidence)
+        XCTAssertNil(FutureObserverAdapter(descriptor: wrongFutureLane))
+        let liveFuture = AdapterDescriptor(adapterID: AdapterID("future-observer")!, adapterVersion: adapterVersion, sourceKind: .futureObserver, sourceID: source("future-source"), capabilitySnapshot: CapabilitySnapshot([.threadStartObservation: .liveAuthoritative]), evidenceMetadata: evidence)
+        XCTAssertNil(FutureObserverAdapter(descriptor: liveFuture))
+        XCTAssertThrowsError(try AdapterRegistry([liveFuture]))
     }
 
     func test23FixturesAreCompleteSanitizedAndBaselineScoped() throws {
