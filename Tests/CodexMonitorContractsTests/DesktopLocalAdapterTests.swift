@@ -169,10 +169,14 @@ final class DesktopLocalAdapterTests: XCTestCase {
         let checkpoint = try XCTUnwrap(try initial.poll(threadID: thread.threadID).cursor)
 
         let resumed = try fixture.adapter(); let recovered = try resumed.open(threadRawID: "thread-a", checkpoint: checkpoint)
+        let epoch = ProcessEpoch(pid: 77, startedAtNanoseconds: 1)!
+        XCTAssertEqual(resumed.health(threadID: recovered.threadID, processEpoch: epoch, writerOwnsSelectedRollout: true).health?.state, .unavailable)
+        XCTAssertEqual(resumed.health(threadID: recovered.threadID, processEpoch: epoch, writerOwnsSelectedRollout: true).health?.reason, .checkpointAdmissionPending)
         let result = try resumed.poll(threadID: recovered.threadID)
         XCTAssertNil(result.invalidation)
         XCTAssertEqual(result.observations.health?.state, .available)
         XCTAssertTrue(result.observations.rollouts.isEmpty)
+        XCTAssertEqual(resumed.health(threadID: recovered.threadID, processEpoch: epoch, writerOwnsSelectedRollout: true).health?.state, .available)
     }
 
     func testCheckpointResumeRestoresTokenAndTerminalExactlyOnce() throws {
@@ -202,12 +206,85 @@ final class DesktopLocalAdapterTests: XCTestCase {
 
         let fresh = try fixture.adapter(); let current = try fresh.open(threadRawID: "thread-a")
         let sameInodeCheckpoint = try XCTUnwrap(try fresh.poll(threadID: current.threadID).cursor)
-        try fixture.replaceContents(at: file, with: fixture.session("thread-b") + "\n")
+        try fixture.replaceContents(at: file, with: fixture.session("thread-b") + "\n" + fixture.started("turn-a") + "\n")
         let mismatch = try fixture.adapter(); let resumed = try mismatch.open(threadRawID: "thread-a", checkpoint: sameInodeCheckpoint)
         let result = try mismatch.poll(threadID: resumed.threadID)
         XCTAssertEqual(result.invalidation, .sessionMismatch)
         XCTAssertTrue(result.observations.containsUnavailable(.rolloutSessionIdentity))
         XCTAssertNil(result.observations.health)
+    }
+
+    func testCheckpointPendingRetainsEpochMismatchUntilExactAdmissionThenRejectsOldEpoch() throws {
+        let file = try fixture.rollout("thread-a", lines: [fixture.session("thread-a"), fixture.started("turn-a")])
+        try fixture.addThread("thread-a", rollout: file)
+        let adapter = try fixture.adapter(); let thread = try adapter.open(threadRawID: "thread-a")
+        let checkpoint = try XCTUnwrap(try adapter.poll(threadID: thread.threadID).cursor)
+        let oldEpoch = ProcessEpoch(pid: 42, startedAtNanoseconds: 1)!
+        let newEpoch = ProcessEpoch(pid: 42, startedAtNanoseconds: 2)!
+        XCTAssertEqual(adapter.health(threadID: thread.threadID, processEpoch: oldEpoch, writerOwnsSelectedRollout: true).health?.state, .available)
+        XCTAssertEqual(adapter.health(threadID: thread.threadID, processEpoch: newEpoch, writerOwnsSelectedRollout: true).health?.reason, .processEpochMismatch)
+
+        _ = try adapter.open(threadRawID: "thread-a", checkpoint: checkpoint)
+        let pending = adapter.health(threadID: thread.threadID, processEpoch: newEpoch, writerOwnsSelectedRollout: true).health
+        XCTAssertEqual(pending?.state, .unavailable)
+        XCTAssertEqual(pending?.reason, .checkpointAdmissionPending)
+
+        XCTAssertNil(try adapter.poll(threadID: thread.threadID).invalidation)
+        XCTAssertEqual(adapter.health(threadID: thread.threadID, processEpoch: newEpoch, writerOwnsSelectedRollout: true).health?.state, .available)
+        XCTAssertEqual(adapter.health(threadID: thread.threadID, processEpoch: oldEpoch, writerOwnsSelectedRollout: true).health?.reason, .processEpochMismatch)
+    }
+
+    func testCheckpointReplacementFailureKeepsEpochLatchUnavailable() throws {
+        let file = try fixture.rollout("thread-a", lines: [fixture.session("thread-a"), fixture.started("turn-a")])
+        try fixture.addThread("thread-a", rollout: file)
+        let adapter = try fixture.adapter(); let thread = try adapter.open(threadRawID: "thread-a")
+        let checkpoint = try XCTUnwrap(try adapter.poll(threadID: thread.threadID).cursor)
+        let oldEpoch = ProcessEpoch(pid: 43, startedAtNanoseconds: 1)!
+        let newEpoch = ProcessEpoch(pid: 43, startedAtNanoseconds: 2)!
+        _ = adapter.health(threadID: thread.threadID, processEpoch: oldEpoch, writerOwnsSelectedRollout: true)
+        _ = adapter.health(threadID: thread.threadID, processEpoch: newEpoch, writerOwnsSelectedRollout: true)
+        try fixture.atomicReplace(at: file, with: fixture.session("thread-a") + "\n")
+
+        _ = try adapter.open(threadRawID: "thread-a", checkpoint: checkpoint)
+        XCTAssertEqual(adapter.health(threadID: thread.threadID, processEpoch: newEpoch, writerOwnsSelectedRollout: true).health?.state, .unavailable)
+        let rejected = try adapter.poll(threadID: thread.threadID)
+        XCTAssertEqual(rejected.invalidation, .fileReplaced)
+        XCTAssertTrue(rejected.observations.rollouts.isEmpty)
+        XCTAssertEqual(adapter.health(threadID: thread.threadID, processEpoch: newEpoch, writerOwnsSelectedRollout: true).health?.state, .unavailable)
+    }
+
+    func testCheckpointSessionMismatchFailureKeepsEpochLatchUnavailable() throws {
+        let file = try fixture.rollout("thread-a", lines: [fixture.session("thread-a"), fixture.started("turn-a")])
+        try fixture.addThread("thread-a", rollout: file)
+        let adapter = try fixture.adapter(); let thread = try adapter.open(threadRawID: "thread-a")
+        let checkpoint = try XCTUnwrap(try adapter.poll(threadID: thread.threadID).cursor)
+        let oldEpoch = ProcessEpoch(pid: 44, startedAtNanoseconds: 1)!
+        let newEpoch = ProcessEpoch(pid: 44, startedAtNanoseconds: 2)!
+        _ = adapter.health(threadID: thread.threadID, processEpoch: oldEpoch, writerOwnsSelectedRollout: true)
+        _ = adapter.health(threadID: thread.threadID, processEpoch: newEpoch, writerOwnsSelectedRollout: true)
+        try fixture.replaceContents(at: file, with: fixture.session("thread-b") + "\n" + fixture.started("turn-a") + "\n")
+
+        _ = try adapter.open(threadRawID: "thread-a", checkpoint: checkpoint)
+        let rejected = try adapter.poll(threadID: thread.threadID)
+        XCTAssertEqual(rejected.invalidation, .sessionMismatch)
+        XCTAssertTrue(rejected.observations.rollouts.isEmpty)
+        XCTAssertEqual(adapter.health(threadID: thread.threadID, processEpoch: newEpoch, writerOwnsSelectedRollout: true).health?.state, .unavailable)
+    }
+
+    func testCheckpointPendingIsIsolatedFromOtherThreadHealth() throws {
+        let a = try fixture.rollout("thread-a", lines: [fixture.session("thread-a")])
+        let b = try fixture.rollout("thread-b", lines: [fixture.session("thread-b")])
+        try fixture.addThread("thread-a", rollout: a); try fixture.addThread("thread-b", rollout: b)
+        let adapter = try fixture.adapter(); let first = try adapter.open(threadRawID: "thread-a"); let second = try adapter.open(threadRawID: "thread-b")
+        let checkpoint = try XCTUnwrap(try adapter.poll(threadID: first.threadID).cursor)
+        let aOld = ProcessEpoch(pid: 1, startedAtNanoseconds: 1)!, aNew = ProcessEpoch(pid: 1, startedAtNanoseconds: 2)!, bEpoch = ProcessEpoch(pid: 2, startedAtNanoseconds: 1)!
+        _ = adapter.health(threadID: first.threadID, processEpoch: aOld, writerOwnsSelectedRollout: true)
+        _ = adapter.health(threadID: first.threadID, processEpoch: aNew, writerOwnsSelectedRollout: true)
+        XCTAssertEqual(adapter.health(threadID: second.threadID, processEpoch: bEpoch, writerOwnsSelectedRollout: true).health?.state, .available)
+
+        _ = try adapter.open(threadRawID: "thread-a", checkpoint: checkpoint)
+        XCTAssertEqual(adapter.health(threadID: first.threadID, processEpoch: aNew, writerOwnsSelectedRollout: true).health?.state, .unavailable)
+        XCTAssertEqual(adapter.health(threadID: second.threadID, processEpoch: bEpoch, writerOwnsSelectedRollout: true).health?.state, .available)
     }
 
     func testCheckpointFirstPollRequiresCurrentExactStateDBBinding() throws {

@@ -62,7 +62,7 @@ public struct ThreadRolloutBinding: Sendable, Equatable {
 
 public enum DesktopSourceHealthState: String, Sendable, Equatable { case available, unavailable }
 public enum DesktopSourceHealthReason: String, Sendable, Equatable {
-    case sourceMissing, processEpochMismatch, writerOwnershipMissing, fileIdentityChanged, fileTruncated, schemaUnavailable
+    case sourceMissing, processEpochMismatch, checkpointAdmissionPending, writerOwnershipMissing, fileIdentityChanged, fileTruncated, schemaUnavailable
 }
 
 /// Health evidence only.  It deliberately has no Failed, Interrupted, or task
@@ -515,6 +515,17 @@ public final class DesktopLocalAdapter: @unchecked Sendable {
     private let roots: [URL]
     private let stateDB: StateDBReader
     private var readers: [NamespacedID: RolloutIncrementalReader] = [:]
+    /// A checkpoint reader is deliberately isolated from the installed reader
+    /// until its first poll has completed every exact rebind validation.  This
+    /// keeps an old epoch mismatch latch authoritative through the admission
+    /// window and prevents checkpoint bytes from being emitted early.
+    private var pendingCheckpointReaders: [NamespacedID: RolloutIncrementalReader] = [:]
+    /// A failed first checkpoint poll is not retried implicitly: a caller must
+    /// explicitly open a fresh checkpoint binding before any bytes can be read.
+    private var rejectedCheckpointAdmissions: Set<NamespacedID> = []
+    /// Health observations made during checkpoint admission are candidates only;
+    /// they never replace the installed epoch until the exact first poll commits.
+    private var pendingCheckpointEpochs: [NamespacedID: ProcessEpoch] = [:]
     private var processEpochs: [NamespacedID: ProcessEpoch] = [:]
     private var processEpochMismatchLatches: Set<NamespacedID> = []
     private let readerBeforeDescriptorOpen: (() -> Void)?
@@ -534,13 +545,20 @@ public final class DesktopLocalAdapter: @unchecked Sendable {
         guard isUnderValidatedRoot(record.rolloutURL) else { throw DesktopLocalAdapterError.rolloutOutsideValidatedRoots }
         guard let binding = ThreadRolloutBinding(sourceID: sourceID, threadRawID: threadRawID, rolloutURL: record.rolloutURL, sessionID: threadRawID) else { throw DesktopLocalAdapterError.threadNotFound }
         let reader = RolloutIncrementalReader(binding: binding, checkpoint: checkpoint, beforeDescriptorOpen: readerBeforeDescriptorOpen)
-        if checkpoint == nil {
-            switch reader.admitExactBinding() {
-            case nil: break
-            case .fileMissing?: throw DesktopLocalAdapterError.threadNotFound
-            case .sessionMismatch?: throw DesktopLocalAdapterError.threadNotFound
-            default: throw DesktopLocalAdapterError.threadNotFound
-            }
+        if checkpoint != nil {
+            // Do not replace the installed reader or touch its epoch state.
+            // `poll` atomically installs this reader only after exact first-poll
+            // State DB, descriptor, cursor, session, and reconstruction checks.
+            pendingCheckpointReaders[binding.threadID] = reader
+            rejectedCheckpointAdmissions.remove(binding.threadID)
+            pendingCheckpointEpochs.removeValue(forKey: binding.threadID)
+            return record.snapshot
+        }
+        switch reader.admitExactBinding() {
+        case nil: break
+        case .fileMissing?: throw DesktopLocalAdapterError.threadNotFound
+        case .sessionMismatch?: throw DesktopLocalAdapterError.threadNotFound
+        default: throw DesktopLocalAdapterError.threadNotFound
         }
         // Only a newly DB/path/file/session-admitted owner clears the per-thread
         // epoch latch.  An invalid attempted rebind leaves the old owner blocked.
@@ -552,6 +570,37 @@ public final class DesktopLocalAdapter: @unchecked Sendable {
 
     public func poll(threadID: NamespacedID) throws -> RolloutReadResult {
         guard !stopped else { throw DesktopLocalAdapterError.shutdown }
+        if rejectedCheckpointAdmissions.contains(threadID) {
+            return pendingAdmissionUnavailable(threadID: threadID)
+        }
+        if let reader = pendingCheckpointReaders[threadID] {
+            guard let record = try stateDB.thread(rawID: threadID.rawID),
+                  record.snapshot.threadID == threadID,
+                  record.rolloutURL.standardizedFileURL == reader.binding.rolloutURL.standardizedFileURL else {
+                return reader.checkpointStateDBUnavailable()
+            }
+            reader.confirmCheckpointStateDBRevalidation()
+            let result = reader.poll()
+            guard result.invalidation == nil else {
+                // Reject this candidate without disturbing the installed reader
+                // or epoch latch.  A new explicit checkpoint open is required.
+                pendingCheckpointReaders.removeValue(forKey: threadID)
+                rejectedCheckpointAdmissions.insert(threadID)
+                pendingCheckpointEpochs.removeValue(forKey: threadID)
+                return result
+            }
+            // This is the single checkpoint-admission commit point: only now is
+            // the replacement reader installed and the old ownership revoked.
+            readers[threadID] = reader
+            pendingCheckpointReaders.removeValue(forKey: threadID)
+            rejectedCheckpointAdmissions.remove(threadID)
+            processEpochs.removeValue(forKey: threadID)
+            processEpochMismatchLatches.remove(threadID)
+            if let admittedEpoch = pendingCheckpointEpochs.removeValue(forKey: threadID) {
+                processEpochs[threadID] = admittedEpoch
+            }
+            return result
+        }
         guard let reader = readers[threadID] else { throw DesktopLocalAdapterError.threadNotFound }
         if reader.requiresCheckpointStateDBRevalidation {
             guard let record = try stateDB.thread(rawID: threadID.rawID),
@@ -568,6 +617,13 @@ public final class DesktopLocalAdapter: @unchecked Sendable {
     /// A changed epoch is unavailable evidence until the caller performs a fresh
     /// exact state-DB/path/session rebind through `open`.
     public func health(threadID: NamespacedID, processEpoch: ProcessEpoch?, writerOwnsSelectedRollout: Bool) -> DesktopObservation {
+        if pendingCheckpointReaders[threadID] != nil || rejectedCheckpointAdmissions.contains(threadID) {
+            if pendingCheckpointReaders[threadID] != nil, let processEpoch, writerOwnsSelectedRollout {
+                pendingCheckpointEpochs[threadID] = processEpoch
+            }
+            let identity = readers[threadID].flatMap { FileIdentity.readOnlyIdentity(of: $0.binding.rolloutURL) }
+            return .sourceHealth(DesktopSourceHealth(threadID: threadID, state: .unavailable, processEpoch: processEpoch, fileIdentity: identity, reason: .checkpointAdmissionPending))
+        }
         guard let reader = readers[threadID] else { return .capabilityUnavailable(threadID: threadID, capability: .rolloutSessionIdentity) }
         let identity = FileIdentity.readOnlyIdentity(of: reader.binding.rolloutURL)
         guard let processEpoch else { return .sourceHealth(DesktopSourceHealth(threadID: threadID, state: .unavailable, processEpoch: nil, fileIdentity: identity, reason: .sourceMissing)) }
@@ -583,7 +639,21 @@ public final class DesktopLocalAdapter: @unchecked Sendable {
         return .sourceHealth(DesktopSourceHealth(threadID: threadID, state: .available, processEpoch: processEpoch, fileIdentity: identity))
     }
 
-    public func shutdown() { stopped = true; readers.removeAll(); processEpochs.removeAll(); processEpochMismatchLatches.removeAll() }
+    public func shutdown() {
+        stopped = true
+        readers.removeAll()
+        pendingCheckpointReaders.removeAll()
+        rejectedCheckpointAdmissions.removeAll()
+        pendingCheckpointEpochs.removeAll()
+        processEpochs.removeAll()
+        processEpochMismatchLatches.removeAll()
+    }
+
+    private func pendingAdmissionUnavailable(threadID: NamespacedID) -> RolloutReadResult {
+        let identity = readers[threadID].flatMap { FileIdentity.readOnlyIdentity(of: $0.binding.rolloutURL) }
+        let health = DesktopSourceHealth(threadID: threadID, state: .unavailable, processEpoch: nil, fileIdentity: identity, reason: .checkpointAdmissionPending)
+        return RolloutReadResult(observations: [.sourceHealth(health)], cursor: nil, invalidation: .sessionMismatch)
+    }
 
     private func isUnderValidatedRoot(_ url: URL) -> Bool {
         let candidate = url.standardizedFileURL.path
