@@ -1,0 +1,212 @@
+[
+  {
+    "file": "00_APPROVED_VISUAL_REFERENCE_v1.9.html",
+    "bytes": 43625,
+    "sha256": "ae4f6861131d2f80102eb637ca2df9ab637053de3ecbbfbeecbf9df57fc3ae45"
+  },
+  {
+    "file": "04_STATE_ENGINE_AND_EVENT_MAPPING_v1.1_FROZEN.md",
+    "bytes": 17221,
+    "sha256": "ca7b57283fa32a9d717c4d4317c2cf60a4e005f7c1e3f81573eab09a9837f312"
+  },
+  {
+    "file": "05_ACCOUNT_USAGE_QUOTA_AND_RESET_MODEL_v1.0.md",
+    "bytes": 22332,
+    "sha256": "4de95b6303be9e930a3b0b6f7db30666f228fb52be8defef0cb0b63bf2300949"
+  },
+  {
+    "file": "06_LOCAL_DATABASE_AND_SWIFT_DATA_LAYER_v1.0.md",
+    "bytes": 22831,
+    "sha256": "02981c32f96dd1b124f873bcd81534e1fc3bd926cdf1629d4f7636c0fead4fa2"
+  },
+  {
+    "file": "07_MACOS_SWIFTUI_APPKIT_ARCHITECTURE_v1.0.md",
+    "bytes": 26180,
+    "sha256": "8eaa732474d790c93b63079b8aed3e6ad92ae4a6617ebe3a44ed441ea75991d4"
+  },
+  {
+    "file": "08_DESIGN_SYSTEM_AND_COMPONENT_SPEC_v1.0.md",
+    "bytes": 27931,
+    "sha256": "6eed211293e53ebdd55dd5601762b177fa89160a9b012e062dcf591815ddeda2"
+  },
+  {
+    "file": "09_USER_FLOWS_INTERACTION_AND_EDGE_CASES_v1.0.md",
+    "bytes": 23459,
+    "sha256": "af90c9c007cb336dbdcf63a783482c60dffd22c8c63e2acdce9a4b2d25b30799"
+  },
+  {
+    "file": "10_P0_PROTOCOL_VALIDATION_AND_IMPLEMENTATION_PLAN_v1.0.md",
+    "bytes": 26965,
+    "sha256": "a5854cb4c7b6a1ed9a59529a473db3c16727e9adfec1b0ae55a37770e630223a"
+  },
+  {
+    "file": "11_MASTER_PRD_AND_CODEX_BUILD_INSTRUCTIONS_v1.0.md",
+    "bytes": 34627,
+    "sha256": "05bfbf709b09fba81d34885569d27f3ceeeccbe26c95d28c36ca5826c4e588ff"
+  },
+  {
+    "file": "12_PHASE_MODEL_SWITCHING_AND_EXECUTION_PLAYBOOK_v1.0.md",
+    "bytes": 17306,
+    "sha256": "8261b39524f6a9d09b6af86118d951267475f8cba3c131bb0b083e4de07c4c5d"
+  },
+  {
+    "file": "13_EXECUTION_PACK/00_START_HERE_EXECUTION.md",
+    "bytes": 3422,
+    "sha256": "97ea0a7ff65380b249185430c87e187abc34b83fc7a75b175bd360f802972688"
+  },
+  {
+    "file": "13_EXECUTION_PACK/01_PHASE_0A_SOL_P0_AUDIT.md",
+    "bytes": 2164,
+    "sha256": "f029f48fdd74e6f70362ba0216472601809ec2ba3b544a60405f51c4634f3ccb"
+  },
+  {
+    "file": "13_EXECUTION_PACK/02_PHASE_0B_TERRA_P0_EXECUTION.md",
+    "bytes": 1637,
+    "sha256": "a95542c5c2ba3d24c32a229b2593b4b34d3054be3abfacdb370fbc951cfb422e"
+  },
+  {
+    "file": "13_EXECUTION_PACK/03_PHASE_0C_SOL_P0_DECISION.md",
+    "bytes": 1336,
+    "sha256": "f465b2b37e7b7a4181f16a55a3a1763b86caf7a5bdd77f6d5c72203e97636cc4"
+  },
+  {
+    "file": "13_EXECUTION_PACK/04_PHASE_1_TERRA_TRANSPORT.md",
+    "bytes": 1282,
+    "sha256": "76551efa6ae1c0a27ea9ea0dd599962900fef3088e345b7c894b1ce5b8428487"
+  },
+  {
+    "file": "13_EXECUTION_PACK/05_PHASE_1R_SOL_TRANSPORT_REVIEW.md",
+    "bytes": 693,
+    "sha256": "55911cb8232d69c309f5d3214bab59f8d322994efdede657c8865118448f95d7"
+  },
+  {
+    "file": "13_EXECUTION_PACK/06_PHASE_2_TERRA_STATE_ENGINE.md",
+    "bytes": 720,
+    "sha256": "5de821d987de1c3254a3f61e848c72957452b4ce21aa26ada9041b5aa49d61a3"
+  },
+  {
+    "file": "13_EXECUTION_PACK/07_PHASE_2R_SOL_STATE_REVIEW.md",
+    "bytes": 465,
+    "sha256": "9605ccff65d6ea1e93bb5567331c17820271f37d46ae075687d4de3ff5463039"
+  },
+  {
+    "file": "13_EXECUTION_PACK/08_PHASE_3_TERRA_ACCOUNT_USAGE_RESET.md",
+    "bytes": 795,
+    "sha256": "80513b6308f716ddc87d043be64ae73e0d88ae2bf0d083759a9b10a46ffa4d84"
+  },
+  {
+    "file": "13_EXECUTION_PACK/09_PHASE_3R_SOL_SAFETY_REVIEW.md",
+    "bytes": 513,
+    "sha256": "c990ef1d52a822ea7430a19cd67963d754bce0711c45987a47721de3764f9259"
+  },
+  {
+    "file": "13_EXECUTION_PACK/10_PHASE_4_TERRA_SQLITE.md",
+    "bytes": 833,
+    "sha256": "8922f17952902964765cdd37f0df8bff357a568ac1c107412c0b4c2348b26794"
+  },
+  {
+    "file": "13_EXECUTION_PACK/11_PHASE_4L_LUNA_TESTS.md",
+    "bytes": 806,
+    "sha256": "ecd9aeb5a5b511982a92ed5750e13096638620ea5d77abc43f9b3df7873524ae"
+  },
+  {
+    "file": "13_EXECUTION_PACK/12_PHASE_5_TERRA_APPKIT_SHELL.md",
+    "bytes": 891,
+    "sha256": "de9ed924a525c53149ee2806fa8917baeb06c041429142420344a529c50ee968"
+  },
+  {
+    "file": "13_EXECUTION_PACK/13_PHASE_5R_SOL_NATIVE_REVIEW.md",
+    "bytes": 640,
+    "sha256": "a619e711e06a41d30546f7ca63bf565ca8e48c5daaa9d0e5054e507ac773d77e"
+  },
+  {
+    "file": "13_EXECUTION_PACK/14_PHASE_6_TERRA_FUNCTIONAL_UI.md",
+    "bytes": 865,
+    "sha256": "6a3872d34060fe926117f82e6775e728e15a7e56c574edabd6128c798657ab29"
+  },
+  {
+    "file": "13_EXECUTION_PACK/15_PHASE_6L_LUNA_UI_SUPPORT.md",
+    "bytes": 524,
+    "sha256": "69f1b6a144455763a987117c1463b39d9989e8df65a7e3f23bec7da4b0edb9f5"
+  },
+  {
+    "file": "13_EXECUTION_PACK/16_PHASE_7_TERRA_LIQUID_GLASS.md",
+    "bytes": 954,
+    "sha256": "81723e24b726a763b867a393797fc0e09595c24ba5aed420aeafbc5ccea77d44"
+  },
+  {
+    "file": "13_EXECUTION_PACK/17_PHASE_7R_SOL_DESIGN_REVIEW.md",
+    "bytes": 714,
+    "sha256": "16d3fa8ce1e9c01416478f839bbfbea0593b89351503ecd865b24c72aff39010"
+  },
+  {
+    "file": "13_EXECUTION_PACK/18_PHASE_8_TERRA_SYSTEM_INTEGRATIONS.md",
+    "bytes": 661,
+    "sha256": "74d76e7720c7e884b244adf875339d55b328860e425abaf73ea8a93e4a9e3efc"
+  },
+  {
+    "file": "13_EXECUTION_PACK/19_PHASE_8L_LUNA_ACCESSIBILITY_TESTS.md",
+    "bytes": 441,
+    "sha256": "897cb4ded8d7a2dbdf74f3eab8a1f7986e723cb6e11b2e421a00ec4f5c43f21a"
+  },
+  {
+    "file": "13_EXECUTION_PACK/20_PHASE_9_TERRA_QA_FIXES.md",
+    "bytes": 865,
+    "sha256": "915ada1fe725851f09649145bb3fae6bac0f67aab1861ecf68e57e48a95e73fc"
+  },
+  {
+    "file": "13_EXECUTION_PACK/21_PHASE_9L_LUNA_REGRESSION.md",
+    "bytes": 401,
+    "sha256": "da66ec54dcdca0820a8c9c627932151b443cd3f179038ad8dd79820302e2aa7d"
+  },
+  {
+    "file": "13_EXECUTION_PACK/22_PHASE_10_SOL_RC_AUDIT.md",
+    "bytes": 752,
+    "sha256": "7dfbd484922a133a356236949d99712fb16cd2a49e2915c5458171e7901236f9"
+  },
+  {
+    "file": "13_EXECUTION_PACK/23_PHASE_11_TERRA_RC_FIXES.md",
+    "bytes": 487,
+    "sha256": "d075038d4402cb5e7ad2059b828ba1f5c33cb8ed386e272151604eebbb1fbd47"
+  },
+  {
+    "file": "13_EXECUTION_PACK/24_FINAL_SOL_SIGNOFF.md",
+    "bytes": 639,
+    "sha256": "64844514c79551e9c0dceec57d5f31bb6788ff6fc9c777d45366c690b924a45c"
+  },
+  {
+    "file": "13_EXECUTION_PACK/90_MODEL_SWITCH_RULES.md",
+    "bytes": 656,
+    "sha256": "b8125b688cabd021bcf2fbbf9162de6049bc707bf8170d4ab0131dcb8b1f4560"
+  },
+  {
+    "file": "13_EXECUTION_PACK/91_PHASE_REPORT_TEMPLATE.md",
+    "bytes": 540,
+    "sha256": "2d97028f62fe1b66c48b6283639eb4d8a9ee3b8cd955d0abadc88a69a1a3ce06"
+  },
+  {
+    "file": "13_EXECUTION_PACK/92_BLOCKER_ESCALATION_RULES.md",
+    "bytes": 640,
+    "sha256": "199db29e5782975416eb513da3ed8520ba294e086c62c4ba00b7a00a1df3fb65"
+  },
+  {
+    "file": "13_EXECUTION_PACK/93_APPLE_DESIGN_SKILL_USAGE.md",
+    "bytes": 675,
+    "sha256": "118e2d9cf2c2e1dba944b45d6fe848abf9b9a88aa340011ccf7d5d09e3d75789"
+  },
+  {
+    "file": "13_EXECUTION_PACK/94_MASTER_CHECKLIST.md",
+    "bytes": 811,
+    "sha256": "8f505e960796b6bcd284d69159105ec77ad7342b8b412f15d6d863340fa2cd3c"
+  },
+  {
+    "file": "APPLE_DESIGN_SKILL_REFERENCE.md",
+    "bytes": 277,
+    "sha256": "7e54165c4b0bad73b0cb996e016612345eba800006e7df0554fad19259c9a558"
+  },
+  {
+    "file": "README_START_HERE.md",
+    "bytes": 793,
+    "sha256": "2187c616526d9adade64206624994e43e95f386a5e9b6fba6be27aa54317e73f"
+  }
+]

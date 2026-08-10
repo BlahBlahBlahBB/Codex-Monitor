@@ -1,0 +1,12 @@
+{
+  "architecture": "arm64",
+  "codexBinary": "/Applications/ChatGPT.app/Contents/Resources/codex",
+  "codexHome": "<HOME>/.codex",
+  "codexVersion": "0.147.0-alpha.6.5",
+  "controlSocket": "<CODEX_HOME>/app-server-control/app-server-control.sock",
+  "controlSocketStatus": "not running / socket absent",
+  "daemonVersion": "unavailable: no such socket",
+  "doctorAuthMode": "chatgpt",
+  "macOS": "26.5.2",
+  "schemaGenerator": "same installed Codex binary; no --experimental flag"
+}

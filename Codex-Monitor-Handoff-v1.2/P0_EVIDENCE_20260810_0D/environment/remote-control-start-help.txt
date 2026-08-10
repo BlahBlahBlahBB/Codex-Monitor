@@ -1,0 +1,11 @@
+command: codex remote-control start --help
+sanitized output:
+
+Start the app-server daemon with remote control enabled
+
+Usage: codex remote-control start [OPTIONS]
+
+Options:
+  --json  Emit machine-readable JSON
+
+The command accepted no socket-path or alternate-runtime argument.

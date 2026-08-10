@@ -1,0 +1,1129 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Codex Monitor Visual Review v1.9</title>
+<style>
+*{box-sizing:border-box}
+:root{
+  --bg:#f3f3f3;--panel:#fff;--soft:#e9e9e9;--line:#c9c9c9;
+  --line2:#999;--text:#161616;--muted:#6c6c6c;
+}
+html{scroll-behavior:smooth}
+body{
+  margin:0;background:var(--bg);color:var(--text);
+  font-family:-apple-system,BlinkMacSystemFont,"SF Pro Text","Helvetica Neue",Arial,sans-serif;
+}
+header{padding:24px 16px 14px;max-width:1100px;margin:auto}
+.eyebrow{font-size:11px;letter-spacing:.12em;color:var(--muted);font-weight:800}
+h1{margin:5px 0 8px;font-size:26px;letter-spacing:-.03em}
+h2{margin:5px 0 8px;font-size:24px}
+p{margin:0;color:var(--muted);line-height:1.45}
+.topnav{
+  position:sticky;top:0;z-index:20;display:flex;gap:8px;overflow-x:auto;
+  padding:10px 12px;background:rgba(243,243,243,.98);
+  border-top:1px solid var(--line);border-bottom:1px solid var(--line);
+  -webkit-overflow-scrolling:touch
+}
+.topnav a{
+  flex:0 0 auto;text-decoration:none;color:#111;background:#fff;
+  border:1px solid var(--line);border-radius:9px;padding:9px 12px;font-size:14px
+}
+main{max-width:1100px;margin:auto;padding:0 12px 50px}
+section{padding:26px 0 42px;border-bottom:1px solid var(--line);scroll-margin-top:70px}
+.section-head{margin-bottom:18px}
+.note{margin-top:14px;border:1px dashed var(--line2);background:#fafafa;padding:12px;border-radius:10px;color:#555;font-size:13px}
+
+/* shared */
+.card{background:#fff;border:1px solid var(--line);border-radius:12px}
+.row{display:flex;align-items:center;justify-content:space-between;gap:14px}
+.strong{font-weight:800}
+.muted{color:var(--muted)}
+.label{font-size:11px;color:var(--muted);font-weight:800;letter-spacing:.06em;text-transform:uppercase}
+.divider{height:1px;background:var(--line);margin:13px 0}
+
+/* orb */
+.orb{
+  width:90px;height:90px;border-radius:50%;border:1px solid var(--line2);
+  background:#fff;display:grid;place-items:center;flex:0 0 auto
+}
+.orb-ring{
+  width:86%;height:86%;border-radius:50%;border:6px solid #666;
+  display:grid;place-items:center
+}
+.orb-value{font-size:24px;font-weight:800;letter-spacing:-.04em}
+.orb.disconnected{background:#eee}
+.orb.disconnected .orb-ring{border-color:#aaa}
+.state-grid{display:grid;grid-template-columns:1fr;gap:12px}
+.state-card{min-height:180px;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:20px}
+.state-title{margin-top:14px;font-weight:800}
+.state-sub{font-size:13px;color:var(--muted);margin-top:4px}
+
+/* dialog popovers */
+.dialog-stage{
+  border:1px solid var(--line);border-radius:14px;background:#e7e7e7;
+  padding:26px 16px;display:flex;flex-direction:column;align-items:center;gap:14px
+}
+.dialog{
+  width:min(100%,380px);background:#fff;border:1px solid var(--line2);
+  border-radius:12px;padding:16px;position:relative
+}
+.dialog .line{margin-top:8px}
+.quick-status{font-size:18px;font-weight:800}
+.quick-task{margin-top:15px}
+.quick-meta{display:grid;gap:7px;font-size:14px}
+.variant-grid{display:grid;grid-template-columns:1fr;gap:10px;margin-top:12px}
+.variant{padding:14px}
+.wire-btn{
+  display:inline-block;margin-top:12px;border:1px solid var(--line2);border-radius:7px;
+  background:#f7f7f7;color:#111;text-decoration:none;padding:8px 10px;font-size:14px
+}
+
+/* desktop */
+.desktop{
+  height:500px;border:2px solid var(--line2);background:#ddd;position:relative;overflow:hidden
+}
+.desktop-menu{
+  height:30px;background:#fff;border-bottom:1px solid var(--line);
+  display:flex;justify-content:space-between;align-items:center;padding:0 8px;font-size:11px
+}
+.lamps{display:inline-flex;gap:4px}
+.lamp{width:8px;height:8px;border-radius:50%;background:#666;border:1px solid #444}
+.desktop-window{
+  position:absolute;left:7%;top:18%;width:67%;height:54%;background:#fff;border:1px solid #aaa;border-radius:11px
+}
+.windowbar{height:34px;border-bottom:1px solid var(--line);padding:8px 10px;text-align:right;font-weight:800}
+.placeholder{padding:20px}
+.ph{height:10px;background:#ddd;border-radius:4px;margin-bottom:10px}.p60{width:60%}.p80{width:80%}.p48{width:48%}
+.phbox{height:150px;border:1px dashed #aaa;margin-top:20px}
+.desktop .orb{position:absolute;right:5%;top:42%}
+.dock{position:absolute;bottom:14px;left:50%;transform:translateX(-50%);display:flex;gap:6px;padding:7px;border:1px solid #aaa;border-radius:14px;background:#eee}
+.dock i{font-style:normal;width:32px;height:32px;background:#fff;border:1px solid #aaa;border-radius:8px;display:grid;place-items:center;font-weight:800}
+
+/* menu bar popup */
+.menu-demo{min-height:570px;background:#e7e7e7;border:1px solid var(--line);position:relative}
+.menu-strip{height:34px;background:#fff;border-bottom:1px solid var(--line);padding:0 10px;display:flex;align-items:center;justify-content:space-between;font-size:12px}
+.menu-popup{width:min(340px,calc(100% - 20px));position:absolute;right:10px;top:50px;padding:16px}
+.menu-block{display:grid;gap:8px}
+.menu-actions{display:grid;gap:3px}
+.menu-action{
+  display:flex;align-items:center;gap:10px;padding:9px 6px;text-decoration:none;color:#111;border-radius:7px
+}
+.flat-icon{width:18px;height:18px;stroke:currentColor;fill:none;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}
+.reset-btn{width:100%;border:1px solid var(--line2);background:#fafafa;border-radius:7px;padding:8px;margin-top:5px}
+
+
+.menu-action .icon-wrap{
+  width:22px;height:22px;display:grid;place-items:center;flex:0 0 22px
+}
+.menu-action .flat-icon{width:20px;height:20px}
+.menu-action .flat-icon.orb-icon{width:22px;height:22px;stroke-width:1.9}
+
+/* usage standalone */
+.usage-page{background:#fff;border:1px solid var(--line2);border-radius:14px;overflow:hidden}
+.usage-head{height:54px;padding:0 16px;display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid var(--line)}
+.usage-title{font-size:20px;font-weight:800}
+.close{
+  width:32px;height:32px;border:1px solid var(--line);border-radius:50%;
+  display:grid;place-items:center;text-decoration:none;color:#111;background:#fafafa;font-size:19px
+}
+.usage-body{padding:15px}
+.u-section{padding-bottom:17px;margin-bottom:17px;border-bottom:1px solid var(--line)}
+.u-section:last-child{border:0;margin:0}
+.u-title{font-size:14px;font-weight:800;margin-bottom:9px}
+.account-box,.session-box,.reset-box{border:1px solid var(--line);border-radius:10px;background:#fafafa;padding:11px}
+.account-id{display:flex;align-items:center;gap:9px}
+.avatar{width:29px;height:29px;border-radius:50%;border:1px solid #999;background:#fff;display:grid;place-items:center;font-weight:800;font-size:12px}
+.email{font-weight:800}
+.tag{font-size:12px;color:var(--muted)}
+.tool-row{display:flex;gap:7px;flex-wrap:wrap;margin-top:9px}
+.small-btn{border:1px solid var(--line);background:#fff;border-radius:7px;padding:7px 9px;font-size:12px}
+.usage-token{border:1px solid var(--line);border-radius:10px;overflow:hidden}
+.metrics{display:grid;grid-template-columns:1fr 1fr}
+.metric{padding:14px;border-bottom:1px solid var(--line)}
+.metric:nth-child(odd){border-right:1px solid var(--line)}
+.metric-label{font-size:13px;color:var(--muted);font-weight:800}
+.metric-value{font-size:21px;font-weight:800;margin-top:6px}
+.chart{padding:24px 14px 15px}
+.bars{height:150px;border-bottom:1px solid #aaa;display:grid;grid-template-columns:repeat(30,1fr);align-items:end;gap:3px}
+.bars span{display:block;background:#999;min-height:6px;border-radius:2px 2px 0 0}
+.chart-labels{display:flex;justify-content:space-between;margin-top:7px;color:var(--muted);font-size:12px}
+.chart-hint{margin-top:14px;color:var(--muted);font-size:13px}
+
+/* settings */
+.settings-shell{background:#fff;border:1px solid var(--line2);border-radius:14px;overflow:hidden}
+.settings-tabs{display:flex;overflow-x:auto;gap:6px;padding:9px;background:#ededed;border-bottom:1px solid var(--line)}
+.settings-tabs span{white-space:nowrap;padding:8px 10px;border-radius:7px;font-size:13px}
+.settings-tabs .active{background:#d5d5d5;font-weight:800}
+.settings-body{padding:15px}
+.setting-group{border:1px solid var(--line);border-radius:10px;overflow:hidden;margin-bottom:16px}
+.setting-row{padding:13px;display:flex;justify-content:space-between;gap:14px;align-items:flex-start;border-bottom:1px solid var(--line)}
+.setting-row:last-child{border:0}
+.control{border:1px solid var(--line2);border-radius:999px;padding:5px 8px;font-size:11px;background:#fafafa;white-space:nowrap}
+
+/* pager */
+.pager{display:flex;justify-content:space-between;gap:10px;margin-top:18px}
+.pager a{text-decoration:none;color:#111;background:#fff;border:1px solid var(--line);border-radius:8px;padding:9px 10px;font-size:13px}
+
+@media(min-width:760px){
+  body{padding-bottom:40px}
+  header{padding-top:40px}
+  main{padding-left:24px;padding-right:24px}
+  .state-grid{grid-template-columns:repeat(5,1fr)}
+  .state-card{min-height:235px}
+  .variant-grid{grid-template-columns:repeat(3,1fr)}
+  .desktop{height:650px}
+  .desktop-window{left:11%;top:15%;width:58%;height:58%}
+  .settings-shell{display:grid;grid-template-columns:200px 1fr}
+  .settings-tabs{display:block;border-bottom:0;border-right:1px solid var(--line)}
+  .settings-tabs span{display:block;margin-bottom:3px}
+}
+
+/* ===== v0.5 Liquid Glass visual review overrides ===== */
+:root{
+  --apple-green:#34C759;
+  --apple-yellow:#FFCC00;
+  --apple-red:#FF3B30;
+  --apple-gray:#8E8E93;
+  --glass-fill:rgba(255,255,255,.56);
+  --glass-fill-strong:rgba(255,255,255,.70);
+  --glass-stroke:rgba(255,255,255,.72);
+  --glass-shadow:0 10px 28px rgba(0,0,0,.12);
+}
+body{
+  background:
+    radial-gradient(circle at 18% 10%,rgba(111,156,255,.18),transparent 32%),
+    radial-gradient(circle at 82% 24%,rgba(255,174,112,.16),transparent 34%),
+    #eef0f3;
+}
+.card,.dialog,.menu-popup,.usage-page,.settings-shell{
+  background:rgba(255,255,255,.76);
+}
+.glass-surface,.dialog,.menu-popup{
+  background:linear-gradient(145deg,rgba(255,255,255,.72),rgba(255,255,255,.42));
+  border:1px solid rgba(255,255,255,.82);
+  box-shadow:
+    inset 0 1px 0 rgba(255,255,255,.90),
+    inset 0 -1px 0 rgba(90,90,90,.10),
+    0 12px 28px rgba(0,0,0,.12);
+  -webkit-backdrop-filter:blur(22px) saturate(1.35);
+  backdrop-filter:blur(22px) saturate(1.35);
+}
+
+/* Liquid Glass orb: slightly larger/thicker state ring */
+.orb{
+  position:relative;
+  border:1px solid rgba(255,255,255,.82)!important;
+  background:
+    radial-gradient(circle at 32% 23%,rgba(255,255,255,.96) 0 4%,rgba(255,255,255,.42) 22%,transparent 42%),
+    linear-gradient(150deg,rgba(255,255,255,.76),rgba(234,237,242,.42));
+  box-shadow:
+    inset 0 1px 2px rgba(255,255,255,.96),
+    inset 0 -3px 7px rgba(40,48,60,.12),
+    0 7px 18px rgba(37,42,50,.16);
+  -webkit-backdrop-filter:blur(18px) saturate(1.35);
+  backdrop-filter:blur(18px) saturate(1.35);
+}
+.orb:after{
+  content:"";
+  position:absolute;inset:5px;border-radius:50%;
+  border-top:1px solid rgba(255,255,255,.85);
+  border-left:1px solid rgba(255,255,255,.46);
+  pointer-events:none;
+}
+.orb-ring{
+  width:90%!important;
+  height:90%!important;
+  border-width:7px!important;
+  border-style:solid!important;
+  border-color:var(--state,var(--apple-green))!important;
+  box-shadow:
+    inset 0 2px 2px rgba(255,255,255,.82),
+    inset 0 -2px 3px rgba(0,0,0,.24),
+    0 1px 1px rgba(255,255,255,.72),
+    0 2px 4px color-mix(in srgb,var(--state,var(--apple-green)) 28%,transparent);
+  background:
+    radial-gradient(circle at 36% 28%,rgba(255,255,255,.22),transparent 48%);
+}
+.orb.idle,.orb.working{--state:var(--apple-green)}
+.orb.idle .orb-ring{filter:saturate(1.06) brightness(1.08)}
+.orb.waiting{--state:var(--apple-yellow)}
+.orb.error{--state:var(--apple-red)}
+.orb.disconnected{--state:var(--apple-gray)}
+.orb.disconnected{
+  background:linear-gradient(145deg,rgba(242,242,247,.78),rgba(220,220,226,.48))!important;
+}
+.orb-value{position:relative;z-index:2}
+.orb.working .orb-ring,.orb.waiting .orb-ring{
+  animation:glass-breathe .80s ease-in-out infinite alternate;
+}
+@keyframes glass-breathe{
+  from{
+    filter:saturate(.88) brightness(.86);
+    box-shadow:
+      inset 0 1px 2px rgba(255,255,255,.66),
+      inset 0 -3px 4px rgba(0,0,0,.30),
+      0 1px 1px rgba(255,255,255,.42);
+  }
+  to{
+    filter:saturate(1.12) brightness(1.12);
+    box-shadow:
+      inset 0 2px 3px rgba(255,255,255,.96),
+      inset 0 -2px 3px rgba(0,0,0,.18),
+      0 1px 1px rgba(255,255,255,.60);
+  }
+}
+  to{filter:saturate(1.08) brightness(1.04);box-shadow:inset 0 2px 2px rgba(255,255,255,.90),inset 0 -2px 3px rgba(0,0,0,.18),0 0 7px color-mix(in srgb,var(--state) 36%,transparent)}
+}
+@media(prefers-reduced-motion:reduce){
+  .orb.working .orb-ring,.orb.waiting .orb-ring{animation:none}
+}
+
+/* State cards get real state tints, but remain restrained */
+.state-card{
+  background:linear-gradient(145deg,rgba(255,255,255,.78),rgba(255,255,255,.50));
+  border:1px solid rgba(255,255,255,.76);
+  box-shadow:0 6px 18px rgba(0,0,0,.07);
+  -webkit-backdrop-filter:blur(14px);
+  backdrop-filter:blur(14px);
+}
+
+/* Status-bar capsule choice board */
+.status-choice-grid{display:grid;grid-template-columns:1fr;gap:14px}
+.status-choice{
+  overflow:hidden;border-radius:14px;border:1px solid rgba(0,0,0,.12);background:#fff
+}
+.status-choice-head{padding:13px 15px;border-bottom:1px solid var(--line);display:flex;justify-content:space-between;align-items:center;gap:12px}
+.status-preview{
+  background:#111318;padding:20px 14px;display:grid;gap:15px
+}
+.status-row{
+  display:grid;grid-template-columns:72px 1fr;align-items:center;gap:14px;color:#fff
+}
+.status-row-label{font-size:12px;color:rgba(255,255,255,.62)}
+.status-pill{
+  display:inline-flex;align-items:center;justify-content:center;
+  border:1.35px solid rgba(255,255,255,.92);
+  background:linear-gradient(180deg,rgba(255,255,255,.09),rgba(255,255,255,.02));
+  box-shadow:
+    inset 0 1px 0 rgba(255,255,255,.20),
+    0 1px 3px rgba(0,0,0,.42);
+  -webkit-backdrop-filter:blur(10px);
+  backdrop-filter:blur(10px);
+}
+.status-pill.compact{width:42px;height:20px;border-radius:12px;gap:4px}
+.status-pill.balanced{width:48px;height:22px;border-radius:13px;gap:5px}
+.status-pill.relaxed{width:56px;height:24px;border-radius:14px;gap:6px}
+.status-pill .dot{display:block;border-radius:50%;background:rgba(255,255,255,.20);box-shadow:inset 0 1px 1px rgba(255,255,255,.28)}
+.status-pill.compact .dot{width:6px;height:6px}
+.status-pill.balanced .dot{width:7px;height:7px}
+.status-pill.relaxed .dot{width:8px;height:8px}
+.status-pill.idle .dot{background:#48D86E}
+.status-pill.working .dot:nth-child(1){background:var(--apple-green);box-shadow:0 0 4px rgba(52,199,89,.55)}
+.status-pill.waiting .dot:nth-child(2){background:var(--apple-yellow);box-shadow:0 0 4px rgba(255,204,0,.50)}
+.status-pill.error .dot:nth-child(3){background:var(--apple-red);box-shadow:0 0 4px rgba(255,59,48,.50)}
+.status-pill-demo{
+  display:flex;align-items:center;gap:10px;
+}
+
+/* actual menu-bar icon in desktop demo */
+.desktop-menu .status-pill{transform:scale(.90);transform-origin:center}
+.desktop-menu{
+  background:rgba(18,18,20,.92)!important;color:#fff!important;
+  border-bottom-color:rgba(255,255,255,.14)!important;
+}
+
+/* Liquid Glass dialogs: no pointer, rounded adaptive floating panel */
+.dialog{
+  border-radius:18px!important;
+}
+.dialog-stage{
+  background:
+    linear-gradient(145deg,rgba(224,229,237,.74),rgba(242,239,235,.70));
+}
+.adaptive-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:12px}
+.edge-demo{
+  position:relative;height:170px;border:1px solid var(--line);border-radius:12px;overflow:hidden;
+  background:linear-gradient(145deg,#e8ebef,#f5f2ee)
+}
+.edge-orb{
+  position:absolute;width:48px;height:48px;border-radius:50%;display:grid;place-items:center;
+  border:1px solid rgba(255,255,255,.8);background:rgba(255,255,255,.62);
+  box-shadow:0 4px 12px rgba(0,0,0,.10);font-size:11px;font-weight:800
+}
+.edge-panel{
+  position:absolute;width:112px;padding:9px;border-radius:12px;
+  background:rgba(255,255,255,.72);border:1px solid rgba(255,255,255,.84);
+  box-shadow:0 6px 14px rgba(0,0,0,.11);font-size:10px;
+  -webkit-backdrop-filter:blur(12px);backdrop-filter:blur(12px)
+}
+.edge-demo.tl .edge-orb{left:8px;top:8px}.edge-demo.tl .edge-panel{left:64px;top:12px}
+.edge-demo.tr .edge-orb{right:8px;top:8px}.edge-demo.tr .edge-panel{right:64px;top:12px}
+.edge-demo.bl .edge-orb{left:8px;bottom:8px}.edge-demo.bl .edge-panel{left:64px;bottom:12px}
+.edge-demo.br .edge-orb{right:8px;bottom:8px}.edge-demo.br .edge-panel{right:64px;bottom:12px}
+
+/* Color keys */
+.color-key{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px}
+.color-chip{
+  display:flex;align-items:center;gap:7px;padding:7px 9px;border-radius:999px;
+  background:rgba(255,255,255,.64);border:1px solid rgba(255,255,255,.82)
+}
+.swatch{width:10px;height:10px;border-radius:50%}
+
+/* Menu icon consistency */
+.menu-action .icon-wrap{
+  width:24px!important;height:24px!important;flex:0 0 24px!important;display:grid!important;place-items:center!important
+}
+.menu-action .flat-icon{width:20px!important;height:20px!important}
+.menu-action .flat-icon.orb-icon{width:22px!important;height:22px!important}
+
+/* Keep content layer restrained per HIG: glass concentrated on functional/navigation surfaces */
+.usage-page,.settings-shell{
+  background:rgba(248,248,250,.88)!important;
+  -webkit-backdrop-filter:blur(12px);backdrop-filter:blur(12px)
+}
+
+
+/* v1.4 complete review fixes */
+.quickview-compact{width:min(100%,350px)!important;padding:14px 15px!important}
+.quickview-compact .quick-status{font-size:17px;margin-top:2px}
+.quickview-compact .quick-task{margin-top:12px}
+.quickview-compact .divider{margin:11px 0}
+.quickview-compact .quick-meta{gap:5px;font-size:13px}
+.quickview-compact .quick-task .muted{margin-top:3px;font-size:13px}
+.menu-popup{padding:13px!important}
+.menu-block{gap:6px!important}
+.menu-popup .divider{margin:10px 0!important}
+.menu-action{padding:7px 5px!important;gap:9px!important}
+.reset-btn{padding:7px!important;margin-top:4px!important}
+.menu-popup .row{min-height:22px}
+.menu-popup .label{margin-bottom:2px}
+.status-choice:nth-of-type(2){
+  border:2px solid rgba(52,199,89,.52)!important;
+  box-shadow:0 0 0 3px rgba(52,199,89,.10),0 8px 22px rgba(0,0,0,.08);
+}
+
+
+/* v1.5 review tweaks */
+.status-preview{
+  background:#111318 !important;
+  border:none !important;
+  box-shadow:none !important;
+}
+.status-choice{
+  overflow:hidden;
+}
+.status-choice .status-preview{
+  border-top:none !important;
+}
+.status-row{
+  padding:2px 0;
+}
+.menu-popup{
+  padding:15px !important;
+}
+.menu-popup .divider{
+  margin:14px 0 !important;
+}
+.menu-block{
+  gap:8px !important;
+}
+.menu-actions{
+  gap:5px !important;
+}
+.menu-action{
+  padding:8px 5px !important;
+}
+.usage-body{
+  padding:18px !important;
+}
+.u-section{
+  padding-bottom:22px !important;
+  margin-bottom:22px !important;
+}
+.u-title{
+  margin-bottom:12px !important;
+}
+.account-box,.session-box,.reset-box{
+  padding:13px !important;
+}
+.tool-row{
+  margin-top:12px !important;
+  gap:8px !important;
+}
+.usage-token .chart{
+  padding:28px 14px 18px !important;
+}
+
+
+/* v1.7 refinement — keep v1.5 capsule outline, refine Usage + Settings only */
+
+/* Usage: more breathing room, clearer grouping */
+.usage-page{
+  border-radius:16px !important;
+}
+.usage-head{
+  min-height:58px !important;
+  padding:0 18px !important;
+}
+.usage-title{
+  font-size:21px !important;
+  letter-spacing:-.02em;
+}
+.usage-body{
+  padding:20px !important;
+}
+.u-section{
+  padding-bottom:24px !important;
+  margin-bottom:24px !important;
+}
+.u-title{
+  margin-bottom:13px !important;
+  font-size:15px !important;
+}
+.account-box,.session-box,.reset-box{
+  padding:14px !important;
+  border-radius:12px !important;
+}
+.account-box .row,
+.session-box.row,
+.reset-box.row{
+  min-height:42px;
+}
+.tool-row{
+  margin-top:13px !important;
+  gap:9px !important;
+}
+.small-btn{
+  padding:8px 10px !important;
+}
+.usage-token{
+  border-radius:12px !important;
+}
+.metric{
+  padding:17px !important;
+}
+.metric-label{
+  font-size:13px !important;
+}
+.metric-value{
+  margin-top:8px !important;
+  font-size:22px !important;
+}
+.chart{
+  padding:32px 16px 20px !important;
+}
+.bars{
+  height:164px !important;
+}
+.chart-hint{
+  margin-top:16px !important;
+}
+
+/* Settings: closer to native macOS rhythm, without changing structure */
+.settings-shell{
+  border-radius:16px !important;
+}
+.settings-tabs{
+  padding:12px !important;
+  gap:7px !important;
+}
+.settings-tabs span{
+  padding:9px 11px !important;
+}
+.settings-body{
+  padding:20px !important;
+}
+.setting-group{
+  border-radius:12px !important;
+  margin-bottom:20px !important;
+}
+.setting-row{
+  min-height:58px;
+  padding:15px 16px !important;
+  align-items:center !important;
+}
+.setting-row .muted{
+  margin-top:4px;
+  line-height:1.35;
+}
+.control{
+  padding:6px 9px !important;
+}
+
+/* Menu popup: retain v1.5 spacing, only slightly normalize row rhythm */
+.menu-popup .row{
+  min-height:24px !important;
+}
+.menu-actions{
+  gap:6px !important;
+}
+
+
+/* v1.8 macOS window + switch refinement */
+
+.mac-window{
+  border-radius:16px !important;
+  overflow:hidden;
+  border:1px solid rgba(0,0,0,.10);
+  background:rgba(248,248,250,.92);
+  -webkit-backdrop-filter:blur(12px);
+  backdrop-filter:blur(12px);
+}
+
+.mac-titlebar{
+  height:52px;
+  display:flex;
+  align-items:center;
+  justify-content:center;
+  position:relative;
+  padding:0 18px;
+  border-bottom:1px solid var(--line);
+  background:rgba(255,255,255,.72);
+}
+
+.traffic-lights{
+  position:absolute;
+  left:14px;
+  display:flex;
+  gap:8px;
+  align-items:center;
+}
+.light{
+  width:12px;height:12px;border-radius:50%;
+  border:1px solid rgba(0,0,0,.12);
+  box-shadow:inset 0 1px 0 rgba(255,255,255,.35);
+}
+.light.red{background:#FF5F57}
+.light.yellow{background:#FEBC2E}
+.light.green{background:#28C840}
+.window-title{
+  font-size:13px;
+  font-weight:700;
+  letter-spacing:.01em;
+  color:#222;
+}
+
+.usage-page{
+  border-radius:16px !important;
+}
+.usage-body{
+  padding:20px !important;
+}
+
+.settings-shell{
+  border-radius:16px !important;
+  overflow:hidden !important;
+}
+.settings-top{
+  border-bottom:1px solid var(--line);
+  background:rgba(255,255,255,.72);
+}
+.settings-main{
+  display:grid;
+  grid-template-columns:1fr;
+}
+@media(min-width:760px){
+  .settings-main{
+    grid-template-columns:200px 1fr;
+  }
+  .settings-tabs{
+    border-right:1px solid var(--line) !important;
+    border-bottom:0 !important;
+  }
+}
+
+.switch{
+  width:42px;height:26px;border-radius:999px;position:relative;flex:0 0 auto;
+  background:#d6d6db;
+  box-shadow:inset 0 0 0 1px rgba(0,0,0,.08);
+}
+.switch::after{
+  content:"";
+  position:absolute;top:2px;left:2px;
+  width:22px;height:22px;border-radius:50%;
+  background:#fff;
+  box-shadow:0 1px 3px rgba(0,0,0,.22), inset 0 1px 0 rgba(255,255,255,.7);
+}
+.switch.on{
+  background:#34C759;
+}
+.switch.on::after{
+  left:18px;
+}
+.switch.off{
+  background:#d6d6db;
+}
+
+.slider-wrap{
+  min-width:176px;
+  display:flex;
+  align-items:center;
+  gap:10px;
+}
+.slider-minmax{
+  font-size:12px;
+  color:var(--muted);
+}
+.slider-track{
+  position:relative;
+  flex:1 1 auto;
+  height:4px;border-radius:999px;
+  background:#d9d9de;
+}
+.slider-fill{
+  position:absolute;left:0;top:0;bottom:0;
+  width:46%;
+  border-radius:999px;
+  background:#34C759;
+}
+.slider-thumb{
+  position:absolute;
+  left:calc(46% - 10px);
+  top:50%;
+  width:20px;height:20px;border-radius:50%;
+  transform:translateY(-50%);
+  background:#fff;
+  border:1px solid rgba(0,0,0,.08);
+  box-shadow:0 1px 4px rgba(0,0,0,.22);
+}
+.slider-value{
+  min-width:44px;
+  text-align:right;
+  font-size:12px;
+  color:#222;
+  font-weight:700;
+}
+.setting-row.top-align{
+  align-items:flex-start !important;
+}
+
+
+/* v1.9 remove top title text from Usage / Settings windows */
+.mac-titlebar{
+  justify-content:flex-start !important;
+}
+.window-title{
+  display:none !important;
+}
+
+</style>
+</head>
+<body>
+
+<header>
+  <div class="eyebrow">CODEX MONITOR</div>
+  <h1>Visual Review v1.9</h1>
+  <p>本轮微调：去掉 Usage 与 Settings 窗口最上方标题栏中的“用量 / 设置”文字，仅保留 Mac 系统窗口控制按钮。其余已确认结构保持不变。</p>
+</header>
+
+<nav class="topnav">
+  <a href="#desktop">桌面场景</a>
+  <a href="#statusicon">状态栏三点</a>
+  <a href="#orb">悬浮球</a>
+  <a href="#quick">单击速览</a>
+  <a href="#menu">菜单栏</a>
+  <a href="#usage">用量</a>
+  <a href="#settings">设置</a>
+</nav>
+
+<main>
+
+<section id="desktop">
+  <div class="section-head">
+    <div class="eyebrow">01 / DESKTOP</div><h2>桌面常驻场景</h2>
+    <p>只判断悬浮球在 macOS 桌面中的存在感。</p>
+  </div>
+  <div class="desktop">
+    <div class="desktop-menu">
+      <span>　Finder　文件　编辑</span>
+      <span class="status-pill-demo"><span class="status-pill balanced working"><i class="dot"></i><i class="dot"></i><i class="dot"></i></span><span>⌁　18:56</span></span>
+    </div>
+    <div class="desktop-window">
+      <div class="windowbar">Codex</div>
+      <div class="placeholder"><div class="ph p60"></div><div class="ph p80"></div><div class="ph p48"></div><div class="phbox"></div></div>
+    </div>
+    <div class="orb working"><div class="orb-ring"><span class="orb-value">42%</span></div></div>
+    <div class="dock"><i>F</i><i>C</i><i>S</i><i>M</i><i>⌘</i><i>▣</i></div>
+  </div>
+</section>
+
+<section id="statusicon">
+  <div class="section-head">
+    <div class="eyebrow">02 / MENU BAR STATUS ICON</div><h2>状态栏三个点 · 3 个比例方案</h2>
+    <p>按照你给的参考：三个状态点统一包在一个胶囊形外线框中。下面只比较尺寸、留白和点距；状态颜色逻辑完全一致。</p>
+  </div>
+
+  <div class="status-choice-grid">
+    <div class="status-choice">
+      <div class="status-choice-head"><strong>A · Compact</strong><span class="muted">42 × 20 · 点 6px</span></div>
+      <div class="status-preview">
+        <div class="status-row"><span class="status-row-label">空闲</span><span class="status-pill compact idle"><i class="dot"></i><i class="dot"></i><i class="dot"></i></span></div>
+        <div class="status-row"><span class="status-row-label">工作</span><span class="status-pill compact working"><i class="dot"></i><i class="dot"></i><i class="dot"></i></span></div>
+        <div class="status-row"><span class="status-row-label">等待</span><span class="status-pill compact waiting"><i class="dot"></i><i class="dot"></i><i class="dot"></i></span></div>
+        <div class="status-row"><span class="status-row-label">中断</span><span class="status-pill compact error"><i class="dot"></i><i class="dot"></i><i class="dot"></i></span></div>
+      </div>
+    </div>
+
+    <div class="status-choice">
+      <div class="status-choice-head"><strong>B · Balanced</strong><span class="muted">48 × 22 · 点 7px · 已选</span></div>
+      <div class="status-preview">
+        <div class="status-row"><span class="status-row-label">空闲</span><span class="status-pill balanced idle"><i class="dot"></i><i class="dot"></i><i class="dot"></i></span></div>
+        <div class="status-row"><span class="status-row-label">工作</span><span class="status-pill balanced working"><i class="dot"></i><i class="dot"></i><i class="dot"></i></span></div>
+        <div class="status-row"><span class="status-row-label">等待</span><span class="status-pill balanced waiting"><i class="dot"></i><i class="dot"></i><i class="dot"></i></span></div>
+        <div class="status-row"><span class="status-row-label">中断</span><span class="status-pill balanced error"><i class="dot"></i><i class="dot"></i><i class="dot"></i></span></div>
+      </div>
+    </div>
+
+    <div class="status-choice">
+      <div class="status-choice-head"><strong>C · Relaxed</strong><span class="muted">56 × 24 · 点 8px</span></div>
+      <div class="status-preview">
+        <div class="status-row"><span class="status-row-label">空闲</span><span class="status-pill relaxed idle"><i class="dot"></i><i class="dot"></i><i class="dot"></i></span></div>
+        <div class="status-row"><span class="status-row-label">工作</span><span class="status-pill relaxed working"><i class="dot"></i><i class="dot"></i><i class="dot"></i></span></div>
+        <div class="status-row"><span class="status-row-label">等待</span><span class="status-pill relaxed waiting"><i class="dot"></i><i class="dot"></i><i class="dot"></i></span></div>
+        <div class="status-row"><span class="status-row-label">中断</span><span class="status-pill relaxed error"><i class="dot"></i><i class="dot"></i><i class="dot"></i></span></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="note">已冻结：状态栏三点采用 B · Balanced。后续所有菜单栏与实现规格统一使用这一比例。</div>
+</section>
+
+
+<section id="orb">
+  <div class="section-head">
+    <div class="eyebrow">03 / FLOATING ORB</div><h2>悬浮球</h2>
+    <p>所有状态使用完全一致的圆环结构；最终只通过颜色与呼吸动画区分。</p>
+  </div>
+  <div class="state-grid">
+    <div class="card state-card"><div class="orb idle"><div class="orb-ring"><span class="orb-value">42%</span></div></div><div class="state-title">空闲 Idle</div><div class="state-sub">绿色常亮</div></div>
+    <div class="card state-card"><div class="orb working"><div class="orb-ring"><span class="orb-value">42%</span></div></div><div class="state-title">工作 Working</div><div class="state-sub">绿色呼吸</div></div>
+    <div class="card state-card"><div class="orb waiting"><div class="orb-ring"><span class="orb-value">42%</span></div></div><div class="state-title">等待 Waiting</div><div class="state-sub">黄色呼吸</div></div>
+    <div class="card state-card"><div class="orb error"><div class="orb-ring"><span class="orb-value">42%</span></div></div><div class="state-title">中断 / 失败</div><div class="state-sub">红色常亮</div></div>
+    <div class="card state-card"><div class="orb disconnected"><div class="orb-ring"><span class="orb-value">--</span></div></div><div class="state-title">未连接</div><div class="state-sub">灰色</div></div>
+  </div>
+  <div class="note">圆环约占悬浮球直径 90%，线宽 7px。颜色使用 Apple 系统色，并用内外高光、内阴影和轻微折射表达凹/凸玻璃质感。工作/等待呼吸只改变颜色亮度，圆环和中央百分比都不缩放，不做外发光；呼吸频率约 0.8s。</div>
+
+  <div class="color-key">
+    <span class="color-chip"><i class="swatch" style="background:#34C759"></i>工作 / 空闲 · System Green</span>
+    <span class="color-chip"><i class="swatch" style="background:#FFCC00"></i>等待授权 · System Yellow</span>
+    <span class="color-chip"><i class="swatch" style="background:#FF3B30"></i>失败 / 中断 · System Red</span>
+    <span class="color-chip"><i class="swatch" style="background:#8E8E93"></i>未连接 · System Gray</span>
+  </div>
+</section>
+
+
+<section id="quick">
+  <div class="section-head">
+    <div class="eyebrow">04 / QUICK VIEW</div><h2>单击悬浮球：状态速览</h2>
+    <p>纯信息弹窗，无按钮、无开关、无操作控件；用于快速确认 Codex 当前状态。</p>
+  </div>
+
+  <div class="dialog-stage">
+    <div class="orb working"><div class="orb-ring"><span class="orb-value">42%</span></div></div>
+    <div class="dialog quickview-compact">
+      <div class="row">
+        <div>
+          <div class="label">Codex</div>
+          <div class="quick-status">● 工作中</div>
+        </div>
+        <div class="muted">18:56</div>
+      </div>
+
+      <div class="quick-task">
+        <div class="strong">Codex Monitor App</div>
+        <div class="muted">正在修改 3 个文件</div>
+      </div>
+
+      <div class="divider"></div>
+
+      <div class="quick-meta">
+        <div>GPT-5.6 Sol · 运行 12:43</div>
+        <div>本会话 644.38万 Token · 剩余额度 42%</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="variant-grid">
+    <div class="card variant">
+      <div class="label">完成态 · 保留 5 秒</div>
+      <div class="strong">✓ 任务完成</div>
+      <div>Codex Monitor App</div>
+      <div class="muted">用时 04:32 · 128.6万 Token · 剩余额度 61%</div>
+    </div>
+    <div class="card variant">
+      <div class="label">等待授权</div>
+      <div class="strong">● 等待授权</div>
+      <div>Codex Monitor App</div>
+      <div class="muted">等待你在 Codex 中确认</div>
+    </div>
+    <div class="card variant">
+      <div class="label">空闲</div>
+      <div class="strong">● 空闲</div>
+      <div>GPT-5.6 Sol</div>
+      <div class="muted">今日 842.3万 Token · 剩余额度 68%</div>
+    </div>
+    <div class="card variant">
+      <div class="label">未连接</div>
+      <div class="strong">○ Codex 未连接</div>
+      <div class="muted">速览仅显示状态，不提供任何按钮。</div>
+    </div>
+  </div>
+
+  <div class="note">Hover 已彻底移除。悬浮球交互固定为：单击＝只读速览；右键＝操作菜单；拖拽＝移动；边缘拖拽＝等比缩放。</div>
+</section>
+
+<section id="menu">
+  <div class="section-head">
+    <div class="eyebrow">05 / MENU BAR</div><h2>菜单栏弹窗</h2>
+    <p>保持三段式结构：实时状态 / 账户与额度 / 四个快捷入口。</p>
+  </div>
+
+  <div class="menu-demo">
+    <div class="menu-strip">
+      <span>Finder　文件　编辑</span>
+      <span class="status-pill balanced working"><i class="dot"></i><i class="dot"></i><i class="dot"></i></span>
+    </div>
+
+    <div class="card menu-popup">
+      <div class="menu-block">
+        <div class="row">
+          <div>
+            <div class="label">Codex</div>
+            <div class="strong">● 工作中</div>
+          </div>
+          <div class="muted">18:56</div>
+        </div>
+        <div class="muted">正在修改 3 个文件</div>
+      </div>
+
+      <div class="divider"></div>
+
+      <div class="menu-block">
+        <div class="row"><span>abc@gmail.com</span><span class="muted">默认</span></div>
+        <div class="row"><span>ChatGPT Plus</span><strong>剩余 42%</strong></div>
+        <div class="row"><span>重置额度</span><strong>2 次</strong></div>
+        <button class="reset-btn">立即重置</button>
+      </div>
+
+      <div class="divider"></div>
+
+      <div class="menu-actions">
+        <a class="menu-action" href="#usage">
+          <span class="icon-wrap">
+            <svg class="flat-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 19V10"/><path d="M9 19V6"/><path d="M14 19v-8"/><path d="M19 19V4"/></svg>
+          </span><span>用量</span>
+        </a>
+        <a class="menu-action" href="#settings">
+          <span class="icon-wrap">
+            <svg class="flat-icon" viewBox="0 0 24 24" aria-hidden="true">
+              <circle cx="12" cy="12" r="3.1"/>
+              <path d="M12 2.8v2.1M12 19.1v2.1M21.2 12h-2.1M4.9 12H2.8M18.5 5.5 17 7M7 17l-1.5 1.5M18.5 18.5 17 17M7 7 5.5 5.5"/>
+              <circle cx="12" cy="12" r="7.2"/>
+            </svg>
+          </span><span>设置</span>
+        </a>
+        <a class="menu-action" href="#orb">
+          <span class="icon-wrap">
+            <svg class="flat-icon orb-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="7.5"/><circle cx="12" cy="12" r="3.2"/></svg>
+          </span><span>显示悬浮窗</span>
+        </a>
+        <div class="menu-action">
+          <span class="icon-wrap">
+            <svg class="flat-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v9"/><path d="M7 5.8a8 8 0 1 0 10 0"/></svg>
+          </span><span>退出</span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="note">状态栏三点固定使用 B · Balanced。四个功能图标保持统一物理尺寸；设置使用二维齿轮图标，“显示悬浮窗”在同一图标框内视觉略饱满。</div>
+</section>
+
+<section id="usage">
+  <div class="section-head">
+    <div class="eyebrow">06 / USAGE</div><h2>用量</h2>
+    <p>从上一级入口点击「用量」后，打开独立页面；窗口头部采用 Mac 系统窗口控制方式。</p>
+  </div>
+
+  <div class="usage-page mac-window">
+    <div class="mac-titlebar">
+      <div class="traffic-lights" aria-hidden="true">
+        <span class="light red"></span>
+        <span class="light yellow"></span>
+        <span class="light green"></span>
+      </div>
+      
+    </div>
+
+    <div class="usage-body">
+
+      <div class="u-section">
+        <div class="u-title">账户</div>
+        <div class="account-box">
+          <div class="row">
+            <div class="account-id">
+              <div class="avatar">A</div>
+              <div><div class="email">abc@gmail.com</div><div class="tag">默认</div></div>
+            </div>
+            <span class="muted">↻</span>
+          </div>
+          <div class="tool-row">
+            <button class="small-btn">添加账号</button>
+            <button class="small-btn">保存当前</button>
+            <button class="small-btn">切换</button>
+            <button class="small-btn">•••</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="u-section">
+        <div class="u-title">会话</div>
+        <div class="session-box row">
+          <div><div class="strong">一周 · 剩余 0%</div><div class="muted">重置 8月11日 19:11</div></div>
+          <div class="muted">更新 16:03</div>
+        </div>
+      </div>
+
+      <div class="u-section">
+        <div class="u-title">限额重置额度</div>
+        <div class="reset-box row"><strong>0 次可用</strong><span class="muted">暂无可用额度</span></div>
+      </div>
+
+      <div class="u-section">
+        <div class="u-title">Token 使用</div>
+        <div class="usage-token">
+          <div class="metrics">
+            <div class="metric"><div class="metric-label">今日</div><div class="metric-value">$--</div></div>
+            <div class="metric"><div class="metric-label">近 30 天费用</div><div class="metric-value">$77.53</div></div>
+            <div class="metric"><div class="metric-label">今日 token 用量</div><div class="metric-value">0 token</div></div>
+            <div class="metric"><div class="metric-label">近 30 天 token 用量</div><div class="metric-value">1.33亿 token</div></div>
+          </div>
+          <div class="chart">
+            <div class="bars">
+              <span style="height:6px"></span><span style="height:6px"></span><span style="height:6px"></span><span style="height:6px"></span><span style="height:6px"></span>
+              <span style="height:6px"></span><span style="height:15px"></span><span style="height:6px"></span><span style="height:6px"></span><span style="height:6px"></span>
+              <span style="height:16px"></span><span style="height:27px"></span><span style="height:6px"></span><span style="height:18px"></span><span style="height:6px"></span>
+              <span style="height:6px"></span><span style="height:20px"></span><span style="height:17px"></span><span style="height:6px"></span><span style="height:6px"></span>
+              <span style="height:6px"></span><span style="height:6px"></span><span style="height:6px"></span><span style="height:6px"></span><span style="height:6px"></span>
+              <span style="height:22px"></span><span style="height:106px"></span><span style="height:88px"></span><span style="height:6px"></span><span style="height:6px"></span>
+            </div>
+            <div class="chart-labels"><span>7月9日</span><span>8月7日</span></div>
+            <div class="chart-hint">悬停在柱形图上查看详情</div>
+          </div>
+        </div>
+      </div>
+
+    </div>
+  </div>
+</section>
+
+<section id="settings">
+  <div class="section-head">
+    <div class="eyebrow">07 / SETTINGS</div><h2>设置</h2>
+    <p>设置页同样使用 Mac 系统窗口头部；所有开关统一改成更接近 Apple 系统设置的切换样式。</p>
+  </div>
+
+  <div class="settings-shell mac-window">
+    <div class="settings-top mac-titlebar">
+      <div class="traffic-lights" aria-hidden="true">
+        <span class="light red"></span>
+        <span class="light yellow"></span>
+        <span class="light green"></span>
+      </div>
+      
+    </div>
+
+    <div class="settings-main">
+      <div class="settings-tabs">
+        <span class="active">通用</span>
+        <span>悬浮窗</span>
+        <span>通知</span>
+        <span>隐私</span>
+        <span>高级</span>
+        <span>关于</span>
+      </div>
+
+      <div class="settings-body">
+        <div class="setting-group">
+          <div class="setting-row">
+            <div>
+              <div class="strong">语言</div>
+              <div class="muted">跟随系统 / 简体中文 / English</div>
+            </div>
+            <span class="control">跟随系统 ▾</span>
+          </div>
+          <div class="setting-row">
+            <div><div class="strong">开机启动</div></div>
+            <span class="switch on" aria-label="开机启动已开启"></span>
+          </div>
+        </div>
+
+        <div class="setting-group">
+          <div class="setting-row">
+            <div><div class="strong">显示悬浮窗</div></div>
+            <span class="switch on" aria-label="显示悬浮窗已开启"></span>
+          </div>
+          <div class="setting-row">
+            <div><div class="strong">始终置顶</div></div>
+            <span class="switch on" aria-label="始终置顶已开启"></span>
+          </div>
+          <div class="setting-row">
+            <div><div class="strong">锁定位置</div></div>
+            <span class="switch off" aria-label="锁定位置已关闭"></span>
+          </div>
+          <div class="setting-row top-align">
+            <div>
+              <div class="strong">悬浮窗尺寸</div>
+              <div class="muted">拖动滑块即可实时调整悬浮窗大小，并记忆用户上次选择。</div>
+            </div>
+            <div class="slider-wrap" aria-label="悬浮窗尺寸滑块">
+              <span class="slider-minmax">64</span>
+              <div class="slider-track">
+                <div class="slider-fill"></div>
+                <div class="slider-thumb"></div>
+              </div>
+              <span class="slider-minmax">180</span>
+              <span class="slider-value">90 px</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="setting-group">
+          <div class="setting-row">
+            <div><div class="strong">暂停监控</div></div>
+            <span class="switch off" aria-label="暂停监控已关闭"></span>
+          </div>
+          <div class="setting-row">
+            <div>
+              <div class="strong">等待授权通知</div>
+              <div class="muted">默认关闭</div>
+            </div>
+            <span class="switch off" aria-label="等待授权通知已关闭"></span>
+          </div>
+          <div class="setting-row">
+            <div>
+              <div class="strong">任务完成通知</div>
+              <div class="muted">默认关闭</div>
+            </div>
+            <span class="switch off" aria-label="任务完成通知已关闭"></span>
+          </div>
+        </div>
+
+        <div class="setting-group">
+          <div class="setting-row">
+            <div><div class="strong">隐藏账户信息</div></div>
+            <span class="switch off" aria-label="隐藏账户信息已关闭"></span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="pager"><a href="#usage">← 用量</a><a href="#desktop">回到顶部 ↑</a></div>
+</section>
+
+</main>
+</body>
+</html>

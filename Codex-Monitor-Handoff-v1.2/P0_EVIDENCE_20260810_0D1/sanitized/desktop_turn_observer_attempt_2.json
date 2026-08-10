@@ -1,0 +1,75 @@
+{
+  "events": [
+    {
+      "has_error": false,
+      "kind": "response",
+      "result_is_object": true,
+      "result_keys": [
+        "codexHome",
+        "platformFamily",
+        "platformOs",
+        "userAgent"
+      ]
+    },
+    {
+      "identity_fields_present": [],
+      "kind": "notification",
+      "method": "remoteControl/status/changed",
+      "param_keys": [
+        "environmentId",
+        "installationId",
+        "serverName",
+        "status"
+      ],
+      "params_is_object": true
+    },
+    {
+      "has_error": false,
+      "kind": "response",
+      "result_is_object": true,
+      "result_keys": [
+        "account",
+        "requiresOpenaiAuth"
+      ]
+    },
+    {
+      "has_error": false,
+      "kind": "response",
+      "result_is_object": true,
+      "result_keys": [
+        "rateLimitResetCredits",
+        "rateLimits",
+        "rateLimitsByLimitId"
+      ]
+    },
+    {
+      "has_error": false,
+      "kind": "response",
+      "result_is_object": true,
+      "result_keys": [
+        "dailyUsageBuckets",
+        "summary"
+      ]
+    },
+    {
+      "has_error": false,
+      "kind": "response",
+      "result_is_object": true,
+      "result_keys": [
+        "data",
+        "nextCursor"
+      ]
+    }
+  ],
+  "initialize": "PASS",
+  "initialized": "PASS",
+  "observer_window_seconds": 45.0,
+  "read_requests": [
+    "account/read",
+    "account/rateLimits/read",
+    "account/usage/read",
+    "thread/loaded/list"
+  ],
+  "socket": "<CODEX_HOME>/app-server-control/app-server-control.sock",
+  "websocket_upgrade": "PASS"
+}

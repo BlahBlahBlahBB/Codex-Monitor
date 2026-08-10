@@ -1,0 +1,10 @@
+command: python3 -m unittest Tools/P0Probe/test_p0_probe.py
+result:
+.....
+----------------------------------------------------------------------
+Ran 5 tests in 0.001s
+
+OK
+
+Scope: offline sanitizer, socket-status, sparse-merge, and epoch-guard helpers only.
+This is not a live transport or observer success.
