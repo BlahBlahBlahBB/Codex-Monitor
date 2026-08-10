@@ -1,4 +1,5 @@
 import Foundation
+import CryptoKit
 
 /// Evidence states are intentionally granular. No composite realtime state exists.
 public enum CapabilityState: String, CaseIterable, Codable, Sendable {
@@ -146,6 +147,23 @@ public struct EvidenceMetadata: Codable, Sendable, Equatable {
         self.limitations = limitations
         self.forwardTransportDecision = forwardTransportDecision
     }
+
+    /// Evidence is useful in memory for the retained AR-P0 audit, but its raw
+    /// strings are never an encoded transport/report boundary.  Encoding uses
+    /// a closed vocabulary so paths, content, titles, e-mail and secrets cannot
+    /// leak through caller-provided metadata.
+    public func encode(to encoder: Encoder) throws {
+        var box = encoder.container(keyedBy: CodingKeys.self)
+        try box.encode("retainedEvidence", forKey: .evidenceRun)
+        try box.encode("pinned0147", forKey: .cliVersion)
+        try box.encode("historicalUnchanged", forKey: .historicalTransportEvidenceLabel)
+        try box.encode("bounded", forKey: .probeOrHarnessAvailability)
+        try box.encode("encodedOutputV1", forKey: .sanitizerAvailability)
+        try box.encode("v1", forKey: .sanitizerVersion)
+        try box.encode("bounded", forKey: .confidence)
+        try box.encode("internalOnly", forKey: .limitations)
+        try box.encode("unixSocketWebSocket", forKey: .forwardTransportDecision)
+    }
 }
 
 public struct Provenance: Codable, Sendable, Equatable {
@@ -175,4 +193,43 @@ public struct Provenance: Codable, Sendable, Equatable {
         self.connectionEpoch = connectionEpoch; self.lifecycleEpoch = lifecycleEpoch; self.capability = capability
         self.evidence = evidence; self.origin = origin
     }
+
+    /// All encoded provenance routes through this sanitizer boundary.  Identity
+    /// values are one-way opaque tags; diagnostics cannot serialize arbitrary
+    /// raw source IDs, account IDs, runtime IDs, paths, or user content.
+    public func encode(to encoder: Encoder) throws {
+        var box = encoder.container(keyedBy: CodingKeys.self)
+        try box.encode(EncodedOutputSanitizer.opaqueID(sourceID.rawValue), forKey: .sourceID)
+        try box.encode(sourceKind, forKey: .sourceKind)
+        try box.encode(EncodedOutputSanitizer.opaqueID(adapterID.rawValue), forKey: .adapterID)
+        try box.encode(EncodedOutputSanitizer.opaqueID(adapterVersion.rawValue), forKey: .adapterVersion)
+        try box.encode(runtimeInstanceID.map { EncodedOutputSanitizer.opaqueID($0.rawValue) }, forKey: .runtimeInstanceID)
+        try box.encode(observationMode, forKey: .observationMode)
+        try box.encode(authority, forKey: .authority)
+        try box.encode(observedAt, forKey: .observedAt)
+        try box.encode(EncodedFreshness(state: freshness.state, assessedAt: freshness.assessedAt, observedAt: freshness.observedAt), forKey: .freshness)
+        try box.encode(accountEpoch.map { EncodedOutputSanitizer.opaqueID($0.rawValue) }, forKey: .accountEpoch)
+        try box.encode(connectionEpoch.map { EncodedOutputSanitizer.opaqueID($0.rawValue) }, forKey: .connectionEpoch)
+        try box.encode(lifecycleEpoch.map { EncodedOutputSanitizer.opaqueID($0.rawValue) }, forKey: .lifecycleEpoch)
+        try box.encode(capability, forKey: .capability)
+        try box.encode(evidence, forKey: .evidence)
+        try box.encode(origin, forKey: .origin)
+    }
+}
+
+/// One mandatory encoded-output boundary shared by SourceHealth, Provenance
+/// and EvidenceMetadata.  It is intentionally not a general redactor: only
+/// closed machine values and deterministic opaque identifiers leave process
+/// memory.
+public enum EncodedOutputSanitizer {
+    public static func opaqueID(_ raw: String) -> String {
+        let digest = SHA256.hash(data: Data(raw.utf8)).map { String(format: "%02x", $0) }.joined()
+        return "opaque-" + digest.prefix(16)
+    }
+}
+
+private struct EncodedFreshness: Codable {
+    let state: FreshnessState
+    let assessedAt: Date
+    let observedAt: Date
 }

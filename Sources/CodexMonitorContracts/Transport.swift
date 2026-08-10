@@ -1,6 +1,7 @@
 import Foundation
 import Network
 import Darwin
+import CryptoKit
 
 /// Values exist only while a single wire message is decoded and routed. They
 /// never cross the transport boundary as diagnostics or persisted data.
@@ -169,7 +170,7 @@ public enum JSONRPCTransportError: Error, Sendable, Equatable {
 
 public enum TransportFailureCode: String, Sendable, Equatable { case socketOpenFailed, socketSendFailed, socketReceiveFailed, nonTextFrame, incompleteFrame, socketClosed }
 
-public enum SocketPathProvenance: Sendable, Equatable { case officialDefault, monitorOwnedRuntimeLaunch(RuntimeInstanceID) }
+public enum SocketPathProvenance: Sendable, Equatable { case officialDefault, monitorOwnedRuntimeLaunch(RuntimeInstanceID), testHarness }
 
 /// An opaque, validated authority to use one Unix socket.  Its initializer and
 /// path are intentionally unavailable outside this module; a path string can
@@ -183,12 +184,26 @@ public struct SocketPathCapability: Sendable, Equatable {
 /// public API takes no caller supplied path. The internal initializer exists
 /// solely for controlled Unix-socket integration tests.
 public struct OfficialSocketResolver: Sendable {
-    private let source: @Sendable () throws -> String
-    public init() { self.source = { throw UnixSocketValidationError.inaccessible } }
-    init(source: @escaping @Sendable () throws -> String) { self.source = source }
+    /// This is the CLI 0.147.0 daemon's documented/default control-socket
+    /// mechanism.  There is deliberately no path-taking public initializer.
+    private let source: @Sendable () -> String
+    public init() {
+        self.source = {
+            FileManager.default.homeDirectoryForCurrentUser
+                .appendingPathComponent(".codex/app-server-control/app-server-control.sock").path
+        }
+    }
+    /// Test-only seam.  It deliberately produces test provenance, never an
+    /// official-default capability, so a fixture cannot prove production
+    /// socket origin by supplying an arbitrary path.
+    init(testSocketPath: @escaping @Sendable () -> String) { self.source = testSocketPath }
     public func resolve(expectedOwner: uid_t = getuid()) throws -> SocketPathCapability {
-        let path = try source(); _ = try UnixSocketValidator.validate(path: path, expectedOwner: expectedOwner)
+        let path = source(); _ = try UnixSocketValidator.validate(path: path, expectedOwner: expectedOwner)
         return SocketPathCapability(path: path, provenance: .officialDefault)
+    }
+    func resolveTestSocket(expectedOwner: uid_t = getuid()) throws -> SocketPathCapability {
+        let path = source(); _ = try UnixSocketValidator.validate(path: path, expectedOwner: expectedOwner)
+        return SocketPathCapability(path: path, provenance: .testHarness)
     }
 }
 
@@ -196,12 +211,33 @@ public struct OfficialSocketResolver: Sendable {
 /// opaque socket authority rather than accepting a runtime id as proof.
 public struct MonitorOwnedLaunchRecord: Sendable, Equatable {
     public let runtimeInstanceID: RuntimeInstanceID; fileprivate let socketCapability: SocketPathCapability
-    init(runtimeInstanceID: RuntimeInstanceID, verifiedSocketPath: String, expectedOwner: uid_t = getuid()) throws {
+    /// Only `MonitorOwnedRuntimeLaunchOperation` may construct a production
+    /// record after it has observed a successful launch.  A runtime ID and a
+    /// path are never evidence of launch provenance by themselves.
+    fileprivate init(runtimeInstanceID: RuntimeInstanceID, verifiedSocketPath: String, expectedOwner: uid_t = getuid()) throws {
         _ = try UnixSocketValidator.validate(path: verifiedSocketPath, expectedOwner: expectedOwner)
         self.runtimeInstanceID = runtimeInstanceID
         self.socketCapability = SocketPathCapability(path: verifiedSocketPath, provenance: .monitorOwnedRuntimeLaunch(runtimeInstanceID))
     }
     func endpoint(expectedOwner: uid_t = getuid()) throws -> UnixSocketWebSocketEndpoint { try UnixSocketWebSocketEndpoint(capability: socketCapability, expectedOwner: expectedOwner) }
+}
+
+/// Minimal H2 ownership-proof operation.  A record can be obtained only after
+/// this object itself launched a Monitor-owned process and then validates the
+/// socket path while that process is still alive.  It does not attach to,
+/// terminate, or control any Desktop process.
+struct MonitorOwnedRuntimeLaunchOperation {
+    private let process: Process
+    private let runtimeInstanceID: RuntimeInstanceID
+    init(executableURL: URL, arguments: [String], runtimeInstanceID: RuntimeInstanceID) throws {
+        let process = Process(); process.executableURL = executableURL; process.arguments = arguments
+        try process.run()
+        self.process = process; self.runtimeInstanceID = runtimeInstanceID
+    }
+    func verifiedLaunchRecord(socketPath: String, expectedOwner: uid_t = getuid()) throws -> MonitorOwnedLaunchRecord {
+        guard process.isRunning else { throw UnixSocketValidationError.inaccessible }
+        return try MonitorOwnedLaunchRecord(runtimeInstanceID: runtimeInstanceID, verifiedSocketPath: socketPath, expectedOwner: expectedOwner)
+    }
 }
 
 /// The only H2 endpoint type. A path is accepted only through an explicit
@@ -300,10 +336,12 @@ public actor UnixSocketWebSocketChannel: JSONRPCByteChannel {
         let connected = withUnsafePointer(to: &address) { pointer in pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { Darwin.connect(candidate, $0, socklen_t(MemoryLayout<sockaddr_un>.size)) } }
         guard connected == 0 else { Darwin.close(candidate); throw JSONRPCTransportError.transportFailure(.socketOpenFailed) }
         do {
-            let key = UUID().uuidString.replacingOccurrences(of: "-", with: "")
+            var nonce = [UInt8](repeating: 0, count: 16)
+            for index in nonce.indices { nonce[index] = UInt8.random(in: .min ... .max) }
+            let key = Data(nonce).base64EncodedString()
             try unixWriteAll(candidate, Data("GET / HTTP/1.1\r\nHost: localhost\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: \(key)\r\n\r\n".utf8))
             let response = try unixReadHTTPHeader(candidate)
-            guard response.hasPrefix("HTTP/1.1 101") || response.hasPrefix("HTTP/1.0 101") else { throw JSONRPCTransportError.transportFailure(.socketOpenFailed) }
+            guard isConformingUpgradeResponse(response, clientKey: key) else { throw JSONRPCTransportError.transportFailure(.socketOpenFailed) }
             socketFD = candidate
         } catch { Darwin.close(candidate); throw error }
     }
@@ -317,7 +355,10 @@ public actor UnixSocketWebSocketChannel: JSONRPCByteChannel {
     public func receive() async throws -> JSONRPCFrame? {
         guard socketFD >= 0 else { throw JSONRPCTransportError.connectionClosed }
         do {
-            let frame = try unixReadFrame(socketFD)
+            // `recv` must not occupy this actor: close/reconnect needs to
+            // shutdown the exact FD while a silent peer is blocking here.
+            let fd = socketFD
+            let frame = try await Task.detached(priority: nil) { try unixReadFrame(fd) }.value
             guard frame.fin else { return JSONRPCFrame(kind: .binary, data: frame.payload, isComplete: false) }
             switch frame.opcode {
             case 0x1: return JSONRPCFrame(kind: .text, data: frame.payload)
@@ -330,11 +371,29 @@ public actor UnixSocketWebSocketChannel: JSONRPCByteChannel {
         } catch { throw JSONRPCTransportError.transportFailure(.socketReceiveFailed) }
     }
 
-    public func close() async { if socketFD >= 0 { Darwin.close(socketFD); socketFD = -1 } }
+    public func close() async {
+        let fd = socketFD; socketFD = -1
+        if fd >= 0 { _ = Darwin.shutdown(fd, SHUT_RDWR); Darwin.close(fd) }
+    }
     public func sentTextFrameCount() -> Int { sentTextFrames }
 }
 
 private func unixReadHTTPHeader(_ fd: Int32) throws -> String { var bytes: [UInt8] = []; while bytes.suffix(4) != [13, 10, 13, 10] { var byte: UInt8 = 0; guard recv(fd, &byte, 1, 0) == 1 else { throw POSIXError(.ECONNRESET) }; bytes.append(byte); if bytes.count > 16_384 { throw POSIXError(.EMSGSIZE) } }; return String(decoding: bytes, as: UTF8.self) }
+private func isConformingUpgradeResponse(_ response: String, clientKey: String) -> Bool {
+    let lines = response.components(separatedBy: "\r\n")
+    guard let status = lines.first, status.split(separator: " ").dropFirst().first == "101" else { return false }
+    var headers: [String: String] = [:]
+    for line in lines.dropFirst() {
+        guard let colon = line.firstIndex(of: ":") else { continue }
+        headers[String(line[..<colon]).lowercased()] = String(line[line.index(after: colon)...]).trimmingCharacters(in: .whitespaces)
+    }
+    guard headers["upgrade"]?.lowercased() == "websocket",
+          (headers["connection"]?.lowercased().split(separator: ",").map({ $0.trimmingCharacters(in: .whitespaces) }).contains("upgrade") == true),
+          let accept = headers["sec-websocket-accept"] else { return false }
+    let guid = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+    let expected = Data(Insecure.SHA1.hash(data: Data((clientKey + guid).utf8))).base64EncodedString()
+    return accept == expected
+}
 private func unixReadFrame(_ fd: Int32) throws -> (fin: Bool, opcode: UInt8, payload: Data) { var head = [UInt8](repeating: 0, count: 2); try unixReadExact(fd, &head); var length = Int(head[1] & 0x7f); if length == 126 { var extended = [UInt8](repeating: 0, count: 2); try unixReadExact(fd, &extended); length = Int(UInt16(extended[0]) << 8 | UInt16(extended[1])) }; guard length <= 1_048_576 else { throw POSIXError(.EMSGSIZE) }; var mask = [UInt8](); if head[1] & 0x80 != 0 { mask = [UInt8](repeating: 0, count: 4); try unixReadExact(fd, &mask) }; var payload = [UInt8](repeating: 0, count: length); try unixReadExact(fd, &payload); if !mask.isEmpty { for index in payload.indices { payload[index] ^= mask[index % 4] } }; return (head[0] & 0x80 != 0, head[0] & 0x0f, Data(payload)) }
 private func unixWriteFrame(_ fd: Int32, opcode: UInt8, payload: Data, masked: Bool) throws { guard payload.count <= 65_535 else { throw POSIXError(.EMSGSIZE) }; var header = [UInt8(0x80 | opcode)]; if payload.count < 126 { header.append(UInt8(payload.count) | (masked ? 0x80 : 0)) } else { header += [masked ? 0xfe : 126, UInt8(payload.count >> 8), UInt8(payload.count & 0xff)] }; var body = [UInt8](payload); if masked { let mask = [arc4random_uniform(256), arc4random_uniform(256), arc4random_uniform(256), arc4random_uniform(256)].map(UInt8.init); header += mask; for index in body.indices { body[index] ^= mask[index % 4] } }; try unixWriteAll(fd, Data(header + body)) }
 private func unixReadExact(_ fd: Int32, _ bytes: inout [UInt8]) throws { var offset = 0; let total = bytes.count; while offset < total { let remaining = total - offset; let count = bytes.withUnsafeMutableBytes { recv(fd, $0.baseAddress!.advanced(by: offset), remaining, 0) }; guard count > 0 else { throw POSIXError(.ECONNRESET) }; offset += count } }

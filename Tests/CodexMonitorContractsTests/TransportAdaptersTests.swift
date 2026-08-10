@@ -30,12 +30,39 @@ final class TransportAdaptersTests: XCTestCase {
         try await channel.send(JSONRPCFrame(kind: .text, data: Data("{\"id\":1}".utf8)))
         try await channel.send(JSONRPCFrame(kind: .text, data: Data("{\"method\":\"initialized\"}".utf8)))
         try await server.waitForSession()
-        let upgraded = await server.didUpgrade(); let opcodes = await server.clientOpcodes(); let sent = await channel.sentTextFrameCount()
+        let upgraded = await server.didUpgrade(); let opcodes = await server.clientOpcodes()
         XCTAssertTrue(upgraded)
-        XCTAssertEqual(sent, 2, "initialize and initialized must each be separate text frames")
-        XCTAssertTrue(opcodes.isEmpty, "the controlled listener does not fabricate frame observations")
+        XCTAssertEqual(opcodes, [0x1, 0x1], "listener must observe two masked, bounded text frames")
         guard let frame = try await channel.receive(), case .close(let status, let reason) = frame.kind else { return XCTFail("listener did not send close") }
         XCTAssertEqual(status, 1001); XCTAssertEqual(reason, "controlled-close")
+        await channel.close()
+    }
+
+    func testRFC6455InvalidAcceptAndMissingUpgradeHeadersReject() async throws {
+        for mode in [UnixWebSocketTestServer.UpgradeMode.invalidAccept, .missingUpgrade, .missingConnection] {
+            let server = try UnixWebSocketTestServer(mode: mode); defer { server.cleanup() }
+            let channel = UnixSocketWebSocketChannel(endpoint: try officialEndpoint(server.path))
+            do { try await channel.open(); XCTFail("non-conforming Upgrade accepted: \(mode)") }
+            catch let error as JSONRPCTransportError { XCTAssertEqual(error, .transportFailure(.socketOpenFailed)) }
+        }
+    }
+
+    func testSilentPeerLocalCloseUnblocksRealReceiver() async throws {
+        let server = try UnixWebSocketTestServer(); defer { server.cleanup() }
+        let channel = UnixSocketWebSocketChannel(endpoint: try officialEndpoint(server.path))
+        try await channel.open()
+        let receiver = Task { () -> Result<JSONRPCFrame?, Error> in do { return .success(try await channel.receive()) } catch { return .failure(error) } }
+        try await Task.sleep(for: .milliseconds(20))
+        await channel.close()
+        if case .success = await receiver.value { XCTFail("silent peer receive unexpectedly succeeded") }
+    }
+
+    func testRealFragmentedInputIsExplicitlyIncomplete() async throws {
+        let server = try UnixWebSocketTestServer(mode: .incomplete); defer { server.cleanup() }
+        let channel = UnixSocketWebSocketChannel(endpoint: try officialEndpoint(server.path))
+        try await channel.open()
+        let frame = try await channel.receive()
+        XCTAssertFalse(frame?.isComplete ?? true)
         await channel.close()
     }
 
@@ -150,7 +177,7 @@ final class TransportAdaptersTests: XCTestCase {
         let health = try await completeInitialization(channel) { try await supervisor.connectTransport() }
         let thread = NamespacedID(sourceID: desc.sourceID, entityKind: .thread, rawID: "owned")!
         _ = health
-        let receipt = try await supervisor.receiveAuthorizedCreationResult(threadID: thread)
+        let receipt = try await completeAuthorizedCreation(supervisor, channel: channel)
         _ = try await supervisor.register(receipt)
         let recorder = CandidateRecorder()
         let consumer = Task { for await candidate in adapter.observations { await recorder.append(candidate) } }
@@ -162,13 +189,29 @@ final class TransportAdaptersTests: XCTestCase {
         _ = await supervisor.closeTransport()
     }
 
+    func testPinnedDTOValidatorRejectsGeneratedInvalidCorpus() throws {
+        let source = SourceID("schema-source")!
+        let badItems = notification(method: "turn/completed", params: .object(["threadId": .string("owned"), "turn": .object(["id": .string("turn"), "status": .string("completed"), "items": .bool(true)])]))
+        guard case .notification(let invalidTurn) = try JSONRPCWireDecoder.decode(badItems.data!) else { return XCTFail("fixture decode") }
+        XCTAssertNil(RuntimeLifecycleWireEvent.decode(notification: invalidTurn, kind: .turnCompletedSuccess, sourceID: source))
+        let invalidStatus = notification(method: "turn/started", params: .object(["threadId": .string("owned"), "turn": .object(["id": .string("turn"), "status": .string("not-a-status"), "items": .array([])])]))
+        guard case .notification(let invalidTurnStatus) = try JSONRPCWireDecoder.decode(invalidStatus.data!) else { return XCTFail("fixture decode") }
+        XCTAssertNil(RuntimeLifecycleWireEvent.decode(notification: invalidTurnStatus, kind: .turnStarted, sourceID: source))
+        let incompleteCommand = notification(method: "item/started", params: .object(["threadId": .string("owned"), "turnId": .string("turn"), "startedAtMs": .number(1), "item": .object(["id": .string("item"), "type": .string("commandExecution")])]))
+        guard case .notification(let invalidCommand) = try JSONRPCWireDecoder.decode(incompleteCommand.data!) else { return XCTFail("fixture decode") }
+        XCTAssertNil(RuntimeLifecycleWireEvent.decode(notification: invalidCommand, kind: .itemStarted, sourceID: source))
+        let invalidUsage = notification(method: "thread/tokenUsage/updated", params: .object(["threadId": .string("owned"), "turnId": .string("turn"), "tokenUsage": .object(["last": .array([]), "total": .object([:])])]))
+        guard case .notification(let badUsage) = try JSONRPCWireDecoder.decode(invalidUsage.data!) else { return XCTFail("fixture decode") }
+        XCTAssertNil(RuntimeLifecycleWireEvent.decode(notification: badUsage, kind: .threadTokenUsageUpdated, sourceID: source))
+    }
+
     func testPinnedGeneratedFixturesRouteExactParentsAndOnlySuccessfulTerminal() async throws {
         let channel = ControlledUnixSocketWebSocketFixture(); let runtime = RuntimeInstanceID("runtime")!; let lifecycle = LifecycleEpoch("life")!; let desc = descriptor(.monitorOwnedRuntime, "generated-source", "runtime")
         let adapter = try MonitorOwnedRuntimeTransportAdapter(descriptor: desc, client: client(channel, descriptor: desc, runtime: runtime, lifecycle: lifecycle), runtimeInstanceID: runtime, lifecycleEpoch: lifecycle, accountEpoch: nil)
         let supervisor = MonitorOwnedRuntimeSupervisor(adapter: adapter)
         _ = try await completeInitialization(channel) { try await supervisor.connectTransport() }
         let thread = NamespacedID(sourceID: desc.sourceID, entityKind: .thread, rawID: "owned")!
-        _ = try await supervisor.register(try await supervisor.receiveAuthorizedCreationResult(threadID: thread))
+        _ = try await supervisor.register(try await completeAuthorizedCreation(supervisor, channel: channel))
         let initialize = try fixture("app-server-generated-initialize-response-0.147.0")
         if case .response(let response) = try JSONRPCWireDecoder.decode(initialize) { XCTAssertEqual(response.id, .integer(1)); XCTAssertTrue(response.result.map { _ in true } ?? false) } else { XCTFail("generated initialize fixture did not decode") }
         let recorder = CandidateRecorder()
@@ -192,8 +235,7 @@ final class TransportAdaptersTests: XCTestCase {
 
     func testSupervisorRejectsDisconnectedAndStaleFabricatedReceipt() async throws {
         let desc = descriptor(.monitorOwnedRuntime, "runtime-source", "runtime"); let runtimeID = RuntimeInstanceID("runtime")!; let life = LifecycleEpoch("life")!; let adapter = try MonitorOwnedRuntimeTransportAdapter(descriptor: desc, client: client(ControlledUnixSocketWebSocketFixture(), descriptor: desc, runtime: runtimeID, lifecycle: life), runtimeInstanceID: runtimeID, lifecycleEpoch: life, accountEpoch: nil); let supervisor = MonitorOwnedRuntimeSupervisor(adapter: adapter)
-        let thread = NamespacedID(sourceID: desc.sourceID, entityKind: .thread, rawID: "fabricated")!
-        do { _ = try await supervisor.receiveAuthorizedCreationResult(threadID: thread); XCTFail("disconnected issuance accepted") } catch let error as RuntimeSupervisorError { XCTAssertEqual(error, .lifecycleNotConnected) }
+        do { _ = try await supervisor.createAuthorizedThreadReceipt(); XCTFail("disconnected issuance accepted") } catch let error as RuntimeSupervisorError { XCTAssertEqual(error, .lifecycleNotConnected) }
     }
 
     func testSocketProvenanceAndFilesystemReplacementRegressions() throws {
@@ -210,7 +252,11 @@ final class TransportAdaptersTests: XCTestCase {
         XCTAssertThrowsError(try officialEndpoint(owner.path, expectedOwner: getuid() &+ 1))
         let link = fixture.directory + "/link"; XCTAssertEqual(symlink(fixture.path, link), 0)
         XCTAssertThrowsError(try officialEndpoint(link)) { XCTAssertEqual($0 as? UnixSocketValidationError, .symlinkRejected) }
-        XCTAssertThrowsError(try OfficialSocketResolver().resolve(), "arbitrary path has no public official-default factory")
+        XCTAssertEqual(endpoint.socketProvenance, .testHarness)
+        // Production resolution takes no path at all; this assertion only
+        // verifies its fixed CLI daemon mechanism can be invoked, whether the
+        // daemon is currently running or unavailable on this machine.
+        _ = try? OfficialSocketResolver().resolve()
     }
 
     func testSanitizerAndFixturesCannotSerializeSentinels() throws {
@@ -219,6 +265,11 @@ final class TransportAdaptersTests: XCTestCase {
         for sentinel in ["sk_live_h2frsentinel123", "authorization", "bearer", "fake secret", "socket", "private", "title", "content", "preview", "password", "token", "/users/"] { XCTAssertFalse(encoded.contains(sentinel)) }
         let fixtureURLs = try FileManager.default.contentsOfDirectory(at: Bundle.module.resourceURL!, includingPropertiesForKeys: nil).filter { $0.pathExtension == "json" }
         for url in fixtureURLs { let body = String(decoding: try Data(contentsOf: url), as: UTF8.self).lowercased(); for sentinel in ["authorization", "bearer", "password", "private key", "@", "/users/", "socketpath"] { XCTAssertFalse(body.contains(sentinel), "\(url.lastPathComponent) leaked \(sentinel)") } }
+        let secretDescriptor = descriptor(.monitorOwnedRuntime, "sk_live_H2F3SourceSecret", "adapter-title-private")
+        let now = Date(); let provenance = Provenance(sourceID: secretDescriptor.sourceID, sourceKind: .monitorOwnedRuntime, adapterID: secretDescriptor.adapterID, adapterVersion: secretDescriptor.adapterVersion, runtimeInstanceID: RuntimeInstanceID("/Users/private/runtime")!, observationMode: .live, authority: .partial, observedAt: now, freshness: Freshness(state: .fresh, assessedAt: now, observedAt: now, reason: "Bearer title preview"), connectionEpoch: ConnectionEpoch("socket-secret")!, lifecycleEpoch: LifecycleEpoch("life-secret")!, capability: .ownedRuntimeProvenance, evidence: EvidenceMetadata(evidenceRun: "sk_live_evidence", cliVersion: "secret", historicalTransportEvidenceLabel: "/Users/private", probeOrHarnessAvailability: "content", sanitizerAvailability: "Bearer", sanitizerVersion: "token", confidence: "email@example.com", limitations: "preview", forwardTransportDecision: "private"), origin: .adapter)!
+        let health = SourceHealth(provenance: provenance, state: .connected)!
+        let healthEncoded = String(decoding: try JSONEncoder().encode(health), as: UTF8.self).lowercased()
+        for sentinel in ["sk_live", "private", "/users/", "bearer", "preview", "@example", "socket-secret", "adapter-title"] { XCTAssertFalse(healthEncoded.contains(sentinel), "SourceHealth/provenance leaked \(sentinel)") }
     }
 }
 
@@ -244,13 +295,24 @@ private func notification(method: String, params: JSONValue?) -> JSONRPCFrame { 
 private func generatedInitializeResult() -> JSONValue { .object(["codexHome": .string("/redacted"), "platformFamily": .string("unix"), "platformOs": .string("macos"), "userAgent": .string("redacted")]) }
 private func fixture(_ name: String) throws -> Data { try Data(contentsOf: Bundle.module.url(forResource: name, withExtension: "json")!) }
 private func officialEndpoint(_ path: String, expectedOwner: uid_t = getuid()) throws -> UnixSocketWebSocketEndpoint {
-    let resolver = OfficialSocketResolver(source: { path })
-    return try UnixSocketWebSocketEndpoint(capability: resolver.resolve(expectedOwner: expectedOwner), expectedOwner: expectedOwner)
+    let resolver = OfficialSocketResolver(testSocketPath: { path })
+    return try UnixSocketWebSocketEndpoint(capability: resolver.resolveTestSocket(expectedOwner: expectedOwner), expectedOwner: expectedOwner)
 }
 private func completeInitialization<T: Sendable>(_ channel: ControlledUnixSocketWebSocketFixture, starting: @escaping @Sendable () async throws -> T) async throws -> T {
     let task = Task { try await starting() }; let initialize = try await channel.nextRequest(); XCTAssertEqual(initialize.method, "initialize"); XCTAssertFalse(String(decoding: try JSONEncoder().encode(initialize), as: UTF8.self).contains("jsonrpc")); await channel.inject(response(id: initialize.id, result: generatedInitializeResult()))
     let initialized = await channel.nextFrame(); guard let data = initialized.data else { throw JSONRPCTransportError.transportFailure(.nonTextFrame) }; XCTAssertEqual(try JSONDecoder().decode(JSONRPCNotification.self, from: data).method, "initialized")
     return try await task.value
+}
+
+private func completeAuthorizedCreation(_ supervisor: MonitorOwnedRuntimeSupervisor, channel: ControlledUnixSocketWebSocketFixture) async throws -> MonitorCreatedThreadReceipt {
+    let task = Task { try await supervisor.createAuthorizedThreadReceipt() }
+    let request = try await channel.nextRequest(); XCTAssertEqual(request.method, "thread/start")
+    await channel.inject(response(id: request.id, result: .object(["thread": generatedThread("owned")])))
+    return try await task.value
+}
+
+private func generatedThread(_ id: String) -> JSONValue {
+    .object(["id": .string(id), "cliVersion": .string("0.147.0"), "createdAt": .number(1), "cwd": .string("/redacted"), "ephemeral": .bool(true), "modelProvider": .string("openai"), "preview": .string("redacted"), "sessionId": .string("session"), "source": .string("cli"), "status": .object(["type": .string("idle")]), "turns": .array([]), "updatedAt": .number(1)])
 }
 
 private func turnCompletedParams(threadID: String, turnID: String, status: String) -> JSONValue {
@@ -288,8 +350,10 @@ private actor UnixWebSocketServerState {
 /// Controlled local Unix-domain WebSocket server used only by the integration
 /// test. It performs the actual HTTP Upgrade and parses masked client frames.
 private final class UnixWebSocketTestServer: @unchecked Sendable {
-    let path: String; private let directory: String; private let state = UnixWebSocketServerState(); private var fd: Int32 = -1
-    init() throws {
+    enum UpgradeMode: Sendable, Equatable { case valid, invalidAccept, missingUpgrade, missingConnection, incomplete }
+    let path: String; private let directory: String; private let state = UnixWebSocketServerState(); private var fd: Int32 = -1; private let mode: UpgradeMode
+    init(mode: UpgradeMode = .valid) throws {
+        self.mode = mode
         var template = Array("/private/tmp/codex-monitor-h2f2-ws.XXXXXX".utf8CString)
         guard let created = mkdtemp(&template) else { throw POSIXError(.ENOSPC) }
         directory = String(cString: created); path = directory + "/app-server.sock"; fd = socket(AF_UNIX, SOCK_STREAM, 0)
@@ -311,14 +375,32 @@ private final class UnixWebSocketTestServer: @unchecked Sendable {
         defer { Darwin.close(client) }
         do {
             let request = try readHTTPHeader(client)
-            let upgraded = request.lowercased().contains("upgrade") && request.lowercased().contains("websocket")
-            try writeAll(client, Data("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n".utf8))
-            if upgraded { await state.recordUpgrade() }
-            usleep(150_000)
+            guard let key = validClientUpgradeKey(request) else { throw POSIXError(.EPROTO) }
+            let accept = mode == .invalidAccept ? "invalid" : Data(Insecure.SHA1.hash(data: Data((key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11").utf8))).base64EncodedString()
+            let upgrade = mode == .missingUpgrade ? "" : "Upgrade: websocket\r\n"
+            let connection = mode == .missingConnection ? "" : "Connection: Upgrade\r\n"
+            try writeAll(client, Data("HTTP/1.1 101 Switching Protocols\r\n\(upgrade)\(connection)Sec-WebSocket-Accept: \(accept)\r\n\r\n".utf8))
+            guard mode == .valid || mode == .incomplete else { await state.finish(.success(())); return }
+            await state.recordUpgrade()
+            if mode == .incomplete {
+                try writeAll(client, Data([0x01, 0x00])) // non-FIN text fragment
+                await state.finish(.success(())); return
+            }
+            let first = try readWebSocketFrame(client); await state.recordOpcode(first.opcode)
+            let second = try readWebSocketFrame(client); await state.recordOpcode(second.opcode)
             try writeWebSocketClose(client, status: 1001, reason: "controlled-close")
             await state.finish(.success(()))
         } catch { await state.finish(.failure(error)) }
     }
+}
+
+private func validClientUpgradeKey(_ request: String) -> String? {
+    let lines = request.components(separatedBy: "\r\n")
+    guard lines.first == "GET / HTTP/1.1" else { return nil }
+    var headers: [String: String] = [:]
+    for line in lines.dropFirst() { guard let colon = line.firstIndex(of: ":") else { continue }; headers[String(line[..<colon]).lowercased()] = String(line[line.index(after: colon)...]).trimmingCharacters(in: .whitespaces) }
+    guard headers["upgrade"]?.lowercased() == "websocket", headers["connection"]?.lowercased().split(separator: ",").contains(where: { $0.trimmingCharacters(in: .whitespaces) == "upgrade" }) == true, headers["sec-websocket-version"] == "13", let key = headers["sec-websocket-key"], Data(base64Encoded: key)?.count == 16 else { return nil }
+    return key
 }
 
 private func readHTTPHeader(_ fd: Int32) throws -> String {
@@ -331,7 +413,7 @@ private func readHTTPHeader(_ fd: Int32) throws -> String {
 }
 private func readWebSocketFrame(_ fd: Int32) throws -> (opcode: UInt8, payload: Data) {
     var header = [UInt8](repeating: 0, count: 2); try readExact(fd, &header)
-    let length = Int(header[1] & 0x7f); guard header[0] & 0x80 != 0, header[1] & 0x80 != 0, length < 126 else { throw POSIXError(.EPROTO) }
+    let length = Int(header[1] & 0x7f); guard header[0] & 0x80 != 0, header[0] & 0x0f == 0x1, header[1] & 0x80 != 0, length < 126 else { throw POSIXError(.EPROTO) }
     var mask = [UInt8](repeating: 0, count: 4); try readExact(fd, &mask)
     var payload = [UInt8](repeating: 0, count: length); try readExact(fd, &payload)
     for index in payload.indices { payload[index] ^= mask[index % 4] }

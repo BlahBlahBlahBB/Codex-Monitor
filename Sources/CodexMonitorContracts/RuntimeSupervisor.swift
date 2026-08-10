@@ -10,14 +10,25 @@ public struct MonitorCreatedThreadReceipt: Sendable, Equatable {
     fileprivate init(threadID: NamespacedID, creationProvenance: Provenance, issuanceToken: UUID) { self.threadID = threadID; self.creationProvenance = creationProvenance; self.issuanceToken = issuanceToken }
 }
 
+/// Opaque result of the one separately-authorized Monitor-owned `thread/start`
+/// operation.  It cannot be reconstructed from a thread id or copied fields.
+public struct AuthorizedThreadCreationResult: Sendable, Equatable {
+    fileprivate let threadID: NamespacedID
+    fileprivate let operationToken: UUID
+    init(threadID: NamespacedID, operationToken: UUID) { self.threadID = threadID; self.operationToken = operationToken }
+}
+
 /// Issuance state is kept by the boundary, not derivable from receipt fields.
 /// This boundary represents the authorized creation-operation result; it does
 /// not expose any Desktop or process lifecycle operation in H2.
 actor MonitorOwnedThreadCreationBoundary {
     private var issuances: [UUID: Provenance] = [:]
-    func issueAuthorizedCreationResult(threadID: NamespacedID, provenance: Provenance) -> MonitorCreatedThreadReceipt {
+    private var authorizedResults: [UUID: NamespacedID] = [:]
+    func recordAuthorizedCreationResult(_ result: AuthorizedThreadCreationResult) { authorizedResults[result.operationToken] = result.threadID }
+    func issueAuthorizedCreationResult(_ result: AuthorizedThreadCreationResult, provenance: Provenance) -> MonitorCreatedThreadReceipt? {
+        guard authorizedResults.removeValue(forKey: result.operationToken) == result.threadID else { return nil }
         let token = UUID(); issuances[token] = provenance
-        return MonitorCreatedThreadReceipt(threadID: threadID, creationProvenance: provenance, issuanceToken: token)
+        return MonitorCreatedThreadReceipt(threadID: result.threadID, creationProvenance: provenance, issuanceToken: token)
     }
     func validates(_ receipt: MonitorCreatedThreadReceipt, current: ConnectionContext) -> Bool {
         guard let issued = issuances[receipt.issuanceToken] else { return false }
@@ -26,7 +37,7 @@ actor MonitorOwnedThreadCreationBoundary {
 }
 
 public enum RuntimeSupervisorError: Error, Sendable, Equatable {
-    case desktopOrForeignThreadRejected, invalidCreationProvenance, duplicateOwnedThread, lifecycleNotConnected, staleReceipt, forgedReceipt
+    case desktopOrForeignThreadRejected, invalidCreationProvenance, duplicateOwnedThread, lifecycleNotConnected, staleReceipt, forgedReceipt, unauthorizedCreationResult
 }
 
 /// Monitor-owned lifecycle bookkeeping only. Reconnect produces a new transport
@@ -67,13 +78,16 @@ public actor MonitorOwnedRuntimeSupervisor {
     public func ownership(for threadID: NamespacedID) -> OwnershipRecord? { ownershipByThread[threadID] }
     public func sourceHealth() -> SourceHealth? { latestHealth }
 
-    /// Internal bridge used only by the separately authorized Monitor-owned
-    /// creation operation. It derives all provenance from the current connected
-    /// adapter context, so a caller cannot mint a receipt from matching fields.
-    func receiveAuthorizedCreationResult(threadID: NamespacedID) async throws -> MonitorCreatedThreadReceipt {
+    /// Executes the separately-authorized Monitor-owned creation operation and
+    /// consumes its authoritative response exactly once to mint a receipt.
+    /// There is intentionally no `threadID`-taking issuance method.
+    public func createAuthorizedThreadReceipt() async throws -> MonitorCreatedThreadReceipt {
         guard latestHealth?.state == .connected, let context = await adapter.currentConnectionContext() else { throw RuntimeSupervisorError.lifecycleNotConnected }
+        let result = try await adapter.performAuthorizedThreadCreation()
+        await creationBoundary.recordAuthorizedCreationResult(result)
         let descriptor = adapter.descriptor; let now = Date()
         guard let provenance = Provenance(sourceID: descriptor.sourceID, sourceKind: .monitorOwnedRuntime, adapterID: descriptor.adapterID, adapterVersion: descriptor.adapterVersion, runtimeInstanceID: context.binding.runtimeInstanceID, observationMode: .live, authority: .partial, observedAt: now, freshness: Freshness(state: .fresh, assessedAt: now, observedAt: now), accountEpoch: context.binding.accountEpoch, connectionEpoch: context.epoch, lifecycleEpoch: context.binding.lifecycleEpoch, capability: .threadStartObservation, evidence: descriptor.evidenceMetadata, origin: .adapter) else { throw RuntimeSupervisorError.invalidCreationProvenance }
-        return await creationBoundary.issueAuthorizedCreationResult(threadID: threadID, provenance: provenance)
+        guard let receipt = await creationBoundary.issueAuthorizedCreationResult(result, provenance: provenance) else { throw RuntimeSupervisorError.unauthorizedCreationResult }
+        return receipt
     }
 }
