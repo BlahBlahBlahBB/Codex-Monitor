@@ -40,11 +40,28 @@ public indirect enum JSONValue: Codable, Sendable, Equatable {
 
 /// Official app-server wire DTO: intentionally headerless. `jsonrpc` is not
 /// emitted and is not required when decoding received app-server messages.
+/// Exact pinned 0.147.0 `RequestId`: a JSON integer or string.  This is not
+/// collapsed to `Int`, because app-server may send a valid string id.
+public enum RequestID: Codable, Sendable, Equatable, Hashable {
+    case integer(Int)
+    case string(String)
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.singleValueContainer()
+        if let integer = try? container.decode(Int.self) { self = .integer(integer) }
+        else { self = .string(try container.decode(String.self)) }
+    }
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.singleValueContainer()
+        switch self { case .integer(let value): try container.encode(value); case .string(let value): try container.encode(value) }
+    }
+}
+
 public struct JSONRPCRequest: Codable, Sendable, Equatable {
-    public let id: Int
+    public let id: RequestID
     public let method: String
     public let params: JSONValue?
-    public init(id: Int, method: String, params: JSONValue?) { self.id = id; self.method = method; self.params = params }
+    public init(id: RequestID, method: String, params: JSONValue?) { self.id = id; self.method = method; self.params = params }
 }
 
 public struct JSONRPCNotification: Codable, Sendable, Equatable {
@@ -56,16 +73,16 @@ public struct JSONRPCNotification: Codable, Sendable, Equatable {
 public struct JSONRPCError: Codable, Sendable, Equatable {
     public let code: Int
     /// This is deliberately never surfaced outside request-local failure.
-    public let message: String?
+    public let message: String
     public let data: JSONValue?
-    public init(code: Int, message: String? = nil, data: JSONValue? = nil) { self.code = code; self.message = message; self.data = data }
+    public init(code: Int, message: String, data: JSONValue? = nil) { self.code = code; self.message = message; self.data = data }
 }
 
 public struct JSONRPCResponse: Codable, Sendable, Equatable {
-    public let id: Int
+    public let id: RequestID
     public let result: JSONValue?
     public let error: JSONRPCError?
-    public init(id: Int, result: JSONValue? = nil, error: JSONRPCError? = nil) { self.id = id; self.result = result; self.error = error }
+    public init(id: RequestID, result: JSONValue? = nil, error: JSONRPCError? = nil) { self.id = id; self.result = result; self.error = error }
 }
 
 public enum JSONRPCWireMessage: Sendable, Equatable {
@@ -90,14 +107,14 @@ public enum JSONRPCWireDecoder {
         if let method {
             guard !method.isEmpty, !hasResult, !hasError else { throw JSONRPCWireRejection.malformedShape }
             if hasID {
-                guard let id = object["id"]?.integerValue else { throw JSONRPCWireRejection.malformedID }
+                guard let id = requestID(object["id"]) else { throw JSONRPCWireRejection.malformedID }
                 _ = id
                 throw JSONRPCWireRejection.serverRequestUnsupported
             }
             return .notification(JSONRPCNotification(method: method, params: object["params"]))
         }
         guard hasID else { throw JSONRPCWireRejection.malformedShape }
-        guard let id = object["id"]?.integerValue else { throw JSONRPCWireRejection.malformedID }
+        guard let id = requestID(object["id"]) else { throw JSONRPCWireRejection.malformedID }
         guard hasResult != hasError else { throw JSONRPCWireRejection.responseMustContainExactlyOneResultOrError }
         if hasError {
             guard let errorValue = object["error"], let error = try? JSONDecoder().decode(JSONRPCError.self, from: JSONEncoder().encode(errorValue)) else {
@@ -107,6 +124,12 @@ public enum JSONRPCWireDecoder {
         }
         return .response(JSONRPCResponse(id: id, result: object["result"]))
     }
+
+    private static func requestID(_ value: JSONValue?) -> RequestID? {
+        if let integer = value?.integerValue { return .integer(integer) }
+        if let string = value?.stringValue { return .string(string) }
+        return nil
+    }
 }
 
 public struct JSONRPCClientInfo: Codable, Sendable, Equatable {
@@ -115,12 +138,22 @@ public struct JSONRPCClientInfo: Codable, Sendable, Equatable {
     public static let h2TransportBoundary = JSONRPCClientInfo(name: "codex_monitor_h2", title: "Codex Monitor H2", version: "h2")
 }
 
+/// Selected required fields from generated `v1/InitializeResponse.json` in the
+/// pinned 0.147.0 schema. Values are validated transiently and never retained.
+private enum GeneratedInitializeResponse {
+    static func isValid(_ value: JSONValue) -> Bool {
+        guard let object = value.objectValue else { return false }
+        return object["codexHome"]?.stringValue != nil && object["platformFamily"]?.stringValue != nil && object["platformOs"]?.stringValue != nil && object["userAgent"]?.stringValue != nil
+    }
+}
+
 public struct JSONRPCClientBinding: Sendable, Equatable {
-    public let sourceID: SourceID; public let sourceKind: SourceKind; public let adapterID: AdapterID; public let adapterVersion: AdapterVersion; public let runtimeInstanceID: RuntimeInstanceID?
-    public init(descriptor: AdapterDescriptor, runtimeInstanceID: RuntimeInstanceID? = nil) throws {
+    public let sourceID: SourceID; public let sourceKind: SourceKind; public let adapterID: AdapterID; public let adapterVersion: AdapterVersion; public let runtimeInstanceID: RuntimeInstanceID?; public let accountEpoch: AccountEpoch?; public let lifecycleEpoch: LifecycleEpoch?
+    public init(descriptor: AdapterDescriptor, runtimeInstanceID: RuntimeInstanceID? = nil, accountEpoch: AccountEpoch? = nil, lifecycleEpoch: LifecycleEpoch? = nil) throws {
         guard descriptor.sourceKind != .futureObserver,
-              (descriptor.sourceKind == .monitorOwnedRuntime) == (runtimeInstanceID != nil) else { throw JSONRPCTransportError.sourceBindingRejected }
-        self.sourceID = descriptor.sourceID; self.sourceKind = descriptor.sourceKind; self.adapterID = descriptor.adapterID; self.adapterVersion = descriptor.adapterVersion; self.runtimeInstanceID = runtimeInstanceID
+              (descriptor.sourceKind == .monitorOwnedRuntime) == (runtimeInstanceID != nil),
+              (descriptor.sourceKind == .monitorOwnedRuntime) == (lifecycleEpoch != nil) else { throw JSONRPCTransportError.sourceBindingRejected }
+        self.sourceID = descriptor.sourceID; self.sourceKind = descriptor.sourceKind; self.adapterID = descriptor.adapterID; self.adapterVersion = descriptor.adapterVersion; self.runtimeInstanceID = runtimeInstanceID; self.accountEpoch = accountEpoch; self.lifecycleEpoch = lifecycleEpoch
     }
 }
 
@@ -131,12 +164,45 @@ public struct ConnectionContext: Sendable, Equatable {
 public enum JSONRPCTransportError: Error, Sendable, Equatable {
     case endpointRejected(UnixSocketValidationError), malformedMessage(JSONRPCWireRejection)
     case connectionClosed, requestCancelled, requestTimedOut, sourceBindingRejected, lifecycleUnavailable
-    case protocolError(code: Int), transportFailure(TransportFailureCode)
+    case protocolError(code: Int), transportFailure(TransportFailureCode), webSocketClosed(status: Int?, reason: String?)
 }
 
 public enum TransportFailureCode: String, Sendable, Equatable { case socketOpenFailed, socketSendFailed, socketReceiveFailed, nonTextFrame, incompleteFrame, socketClosed }
 
 public enum SocketPathProvenance: Sendable, Equatable { case officialDefault, monitorOwnedRuntimeLaunch(RuntimeInstanceID) }
+
+/// An opaque, validated authority to use one Unix socket.  Its initializer and
+/// path are intentionally unavailable outside this module; a path string can
+/// never self-attest as official or Monitor-owned.
+public struct SocketPathCapability: Sendable, Equatable {
+    fileprivate let path: String; fileprivate let provenance: SocketPathProvenance; fileprivate let issuance: UUID
+    fileprivate init(path: String, provenance: SocketPathProvenance) { self.path = path; self.provenance = provenance; self.issuance = UUID() }
+}
+
+/// Resolves the daemon/control socket through the one official mechanism.  The
+/// public API takes no caller supplied path. The internal initializer exists
+/// solely for controlled Unix-socket integration tests.
+public struct OfficialSocketResolver: Sendable {
+    private let source: @Sendable () throws -> String
+    public init() { self.source = { throw UnixSocketValidationError.inaccessible } }
+    init(source: @escaping @Sendable () throws -> String) { self.source = source }
+    public func resolve(expectedOwner: uid_t = getuid()) throws -> SocketPathCapability {
+        let path = try source(); _ = try UnixSocketValidator.validate(path: path, expectedOwner: expectedOwner)
+        return SocketPathCapability(path: path, provenance: .officialDefault)
+    }
+}
+
+/// Created only by a verified Monitor-owned launch operation. It carries the
+/// opaque socket authority rather than accepting a runtime id as proof.
+public struct MonitorOwnedLaunchRecord: Sendable, Equatable {
+    public let runtimeInstanceID: RuntimeInstanceID; fileprivate let socketCapability: SocketPathCapability
+    init(runtimeInstanceID: RuntimeInstanceID, verifiedSocketPath: String, expectedOwner: uid_t = getuid()) throws {
+        _ = try UnixSocketValidator.validate(path: verifiedSocketPath, expectedOwner: expectedOwner)
+        self.runtimeInstanceID = runtimeInstanceID
+        self.socketCapability = SocketPathCapability(path: verifiedSocketPath, provenance: .monitorOwnedRuntimeLaunch(runtimeInstanceID))
+    }
+    func endpoint(expectedOwner: uid_t = getuid()) throws -> UnixSocketWebSocketEndpoint { try UnixSocketWebSocketEndpoint(capability: socketCapability, expectedOwner: expectedOwner) }
+}
 
 /// The only H2 endpoint type. A path is accepted only through an explicit
 /// official-default or Monitor-owned-launch provenance boundary.
@@ -147,18 +213,11 @@ public struct UnixSocketWebSocketEndpoint: Sendable, Equatable {
     public let socketProvenance: SocketPathProvenance
     public let provenance: TransportProvenance
 
-    init(authorizedPath path: String, socketProvenance: SocketPathProvenance, expectedOwner: uid_t = getuid()) throws {
+    public init(capability: SocketPathCapability, expectedOwner: uid_t = getuid()) throws {
+        let path = capability.path
         let identity = try UnixSocketValidator.validate(path: path, expectedOwner: expectedOwner)
-        self.path = path; self.expectedOwner = expectedOwner; self.identity = identity; self.socketProvenance = socketProvenance
+        self.path = path; self.expectedOwner = expectedOwner; self.identity = identity; self.socketProvenance = capability.provenance
         self.provenance = TransportProvenance(kind: .unixSocketWebSocket)
-    }
-
-    public static func officialDefault(path: String, expectedOwner: uid_t = getuid()) throws -> Self {
-        try Self(authorizedPath: path, socketProvenance: .officialDefault, expectedOwner: expectedOwner)
-    }
-
-    public static func monitorOwnedLaunch(path: String, runtimeInstanceID: RuntimeInstanceID, expectedOwner: uid_t = getuid()) throws -> Self {
-        try Self(authorizedPath: path, socketProvenance: .monitorOwnedRuntimeLaunch(runtimeInstanceID), expectedOwner: expectedOwner)
     }
 
     func validateImmediatelyBeforeOpen() throws {
@@ -229,68 +288,71 @@ private final class ConnectionOpenContinuation: @unchecked Sendable {
 }
 
 public actor UnixSocketWebSocketChannel: JSONRPCByteChannel {
-    private let endpoint: UnixSocketWebSocketEndpoint; private var connection: NWConnection?
+    private let endpoint: UnixSocketWebSocketEndpoint; private var socketFD: Int32 = -1; private var sentTextFrames = 0
     public init(endpoint: UnixSocketWebSocketEndpoint) { self.endpoint = endpoint }
 
     public func open() async throws {
-        guard connection == nil else { return }
+        guard socketFD < 0 else { return }
         try endpoint.validateImmediatelyBeforeOpen()
-        let webSocket = NWProtocolWebSocket.Options(); webSocket.autoReplyPing = true
-        let parameters = NWParameters(tls: nil, tcp: NWProtocolTCP.Options()); parameters.defaultProtocolStack.applicationProtocols.insert(webSocket, at: 0)
-        let candidate = NWConnection(to: .unix(path: endpoint.path), using: parameters)
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-            let completion = ConnectionOpenContinuation(continuation)
-            candidate.stateUpdateHandler = { state in
-                switch state {
-                case .ready: completion.resolve(.success(()))
-                case .failed: completion.resolve(.failure(JSONRPCTransportError.transportFailure(.socketOpenFailed)))
-                case .cancelled: completion.resolve(.failure(JSONRPCTransportError.connectionClosed))
-                default: break
-                }
-            }
-            candidate.start(queue: .global(qos: .utility))
-        }
-        connection = candidate
+        let candidate = socket(AF_UNIX, SOCK_STREAM, 0); guard candidate >= 0 else { throw JSONRPCTransportError.transportFailure(.socketOpenFailed) }
+        var address = sockaddr_un(); address.sun_family = sa_family_t(AF_UNIX)
+        _ = endpoint.path.withCString { source in withUnsafeMutablePointer(to: &address.sun_path) { destination in strcpy(UnsafeMutableRawPointer(destination).assumingMemoryBound(to: CChar.self), source) } }
+        let connected = withUnsafePointer(to: &address) { pointer in pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { Darwin.connect(candidate, $0, socklen_t(MemoryLayout<sockaddr_un>.size)) } }
+        guard connected == 0 else { Darwin.close(candidate); throw JSONRPCTransportError.transportFailure(.socketOpenFailed) }
+        do {
+            let key = UUID().uuidString.replacingOccurrences(of: "-", with: "")
+            try unixWriteAll(candidate, Data("GET / HTTP/1.1\r\nHost: localhost\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: \(key)\r\n\r\n".utf8))
+            let response = try unixReadHTTPHeader(candidate)
+            guard response.hasPrefix("HTTP/1.1 101") || response.hasPrefix("HTTP/1.0 101") else { throw JSONRPCTransportError.transportFailure(.socketOpenFailed) }
+            socketFD = candidate
+        } catch { Darwin.close(candidate); throw error }
     }
 
     public func send(_ frame: JSONRPCFrame) async throws {
-        guard case .text = frame.kind, let data = frame.data, frame.isComplete, let connection else { throw JSONRPCTransportError.transportFailure(.socketSendFailed) }
-        let metadata = NWProtocolWebSocket.Metadata(opcode: .text)
-        let context = NWConnection.ContentContext(identifier: "app-server-text", metadata: [metadata])
-        try await withCheckedThrowingContinuation { continuation in
-            connection.send(content: data, contentContext: context, isComplete: true, completion: .contentProcessed { error in
-                error == nil ? continuation.resume() : continuation.resume(throwing: JSONRPCTransportError.transportFailure(.socketSendFailed))
-            })
-        }
+        guard case .text = frame.kind, let data = frame.data, frame.isComplete, socketFD >= 0 else { throw JSONRPCTransportError.transportFailure(.socketSendFailed) }
+        do { try unixWriteFrame(socketFD, opcode: 0x1, payload: data, masked: true); sentTextFrames += 1 }
+        catch { throw JSONRPCTransportError.transportFailure(.socketSendFailed) }
     }
 
     public func receive() async throws -> JSONRPCFrame? {
-        guard let connection else { throw JSONRPCTransportError.connectionClosed }
-        return try await withCheckedThrowingContinuation { continuation in
-            connection.receiveMessage { data, context, complete, error in
-                if error != nil { continuation.resume(throwing: JSONRPCTransportError.transportFailure(.socketReceiveFailed)); return }
-                guard complete else { continuation.resume(returning: JSONRPCFrame(kind: .binary, data: data, isComplete: false)); return }
-                let metadata = context?.protocolMetadata(definition: NWProtocolWebSocket.definition) as? NWProtocolWebSocket.Metadata
-                switch metadata?.opcode {
-                case .text: continuation.resume(returning: JSONRPCFrame(kind: .text, data: data))
-                case .close: continuation.resume(returning: JSONRPCFrame(kind: .close(status: nil, reason: nil)))
-                default: continuation.resume(returning: JSONRPCFrame(kind: .binary, data: data))
-                }
+        guard socketFD >= 0 else { throw JSONRPCTransportError.connectionClosed }
+        do {
+            let frame = try unixReadFrame(socketFD)
+            guard frame.fin else { return JSONRPCFrame(kind: .binary, data: frame.payload, isComplete: false) }
+            switch frame.opcode {
+            case 0x1: return JSONRPCFrame(kind: .text, data: frame.payload)
+            case 0x8:
+                let bytes = [UInt8](frame.payload); let status = bytes.count >= 2 ? Int(UInt16(bytes[0]) << 8 | UInt16(bytes[1])) : nil
+                let reason = bytes.count > 2 ? String(decoding: bytes.dropFirst(2), as: UTF8.self) : nil
+                return JSONRPCFrame(kind: .close(status: status, reason: reason))
+            default: return JSONRPCFrame(kind: .binary, data: frame.payload)
             }
-        }
+        } catch { throw JSONRPCTransportError.transportFailure(.socketReceiveFailed) }
     }
 
-    public func close() async { connection?.cancel(); connection = nil }
+    public func close() async { if socketFD >= 0 { Darwin.close(socketFD); socketFD = -1 } }
+    public func sentTextFrameCount() -> Int { sentTextFrames }
 }
 
+private func unixReadHTTPHeader(_ fd: Int32) throws -> String { var bytes: [UInt8] = []; while bytes.suffix(4) != [13, 10, 13, 10] { var byte: UInt8 = 0; guard recv(fd, &byte, 1, 0) == 1 else { throw POSIXError(.ECONNRESET) }; bytes.append(byte); if bytes.count > 16_384 { throw POSIXError(.EMSGSIZE) } }; return String(decoding: bytes, as: UTF8.self) }
+private func unixReadFrame(_ fd: Int32) throws -> (fin: Bool, opcode: UInt8, payload: Data) { var head = [UInt8](repeating: 0, count: 2); try unixReadExact(fd, &head); var length = Int(head[1] & 0x7f); if length == 126 { var extended = [UInt8](repeating: 0, count: 2); try unixReadExact(fd, &extended); length = Int(UInt16(extended[0]) << 8 | UInt16(extended[1])) }; guard length <= 1_048_576 else { throw POSIXError(.EMSGSIZE) }; var mask = [UInt8](); if head[1] & 0x80 != 0 { mask = [UInt8](repeating: 0, count: 4); try unixReadExact(fd, &mask) }; var payload = [UInt8](repeating: 0, count: length); try unixReadExact(fd, &payload); if !mask.isEmpty { for index in payload.indices { payload[index] ^= mask[index % 4] } }; return (head[0] & 0x80 != 0, head[0] & 0x0f, Data(payload)) }
+private func unixWriteFrame(_ fd: Int32, opcode: UInt8, payload: Data, masked: Bool) throws { guard payload.count <= 65_535 else { throw POSIXError(.EMSGSIZE) }; var header = [UInt8(0x80 | opcode)]; if payload.count < 126 { header.append(UInt8(payload.count) | (masked ? 0x80 : 0)) } else { header += [masked ? 0xfe : 126, UInt8(payload.count >> 8), UInt8(payload.count & 0xff)] }; var body = [UInt8](payload); if masked { let mask = [arc4random_uniform(256), arc4random_uniform(256), arc4random_uniform(256), arc4random_uniform(256)].map(UInt8.init); header += mask; for index in body.indices { body[index] ^= mask[index % 4] } }; try unixWriteAll(fd, Data(header + body)) }
+private func unixReadExact(_ fd: Int32, _ bytes: inout [UInt8]) throws { var offset = 0; let total = bytes.count; while offset < total { let remaining = total - offset; let count = bytes.withUnsafeMutableBytes { recv(fd, $0.baseAddress!.advanced(by: offset), remaining, 0) }; guard count > 0 else { throw POSIXError(.ECONNRESET) }; offset += count } }
+private func unixWriteAll(_ fd: Int32, _ data: Data) throws { try data.withUnsafeBytes { raw in var offset = 0; while offset < raw.count { let count = Darwin.send(fd, raw.baseAddress!.advanced(by: offset), raw.count - offset, 0); guard count > 0 else { throw POSIXError(.EPIPE) }; offset += count } } }
+
 public enum JSONRPCLifecycleState: Sendable, Equatable { case closed, opening, initializing, initialized, closing }
+
+/// A unique adapter-instance owner token. A client accepts exactly one token
+/// for its lifetime, preventing handler takeover even for equal bindings.
+public struct JSONRPCAdapterLease: Sendable, Equatable, Hashable { fileprivate let token: UUID; public init() { token = UUID() } }
 
 public actor JSONRPCClient {
     public typealias NotificationHandler = @Sendable (JSONRPCNotification, ConnectionContext) async -> Void
     public nonisolated let binding: JSONRPCClientBinding
     private let channel: any JSONRPCByteChannel; private let clientInfo: JSONRPCClientInfo; private let requestTimeout: Duration
-    private var nextRequestID = 1; private var pending: [Int: PendingRequest] = [:]; private var receiver: Task<Void, Never>?
-    private var handler: NotificationHandler?; private var state: JSONRPCLifecycleState = .closed; private var context: ConnectionContext?; private var epochNumber = 0
+    private var nextRequestID = 1; private var pending: [RequestID: PendingRequest] = [:]; private var receiver: Task<Void, Never>?
+    private var handler: NotificationHandler?; private var lease: JSONRPCAdapterLease?; private var state: JSONRPCLifecycleState = .closed; private var context: ConnectionContext?; private var epochNumber = 0
+    private var lastTerminalError: JSONRPCTransportError?
     private var connectFlight: Task<ConnectionEpoch, Error>?
 
     private struct PendingRequest { let context: ConnectionContext; let continuation: CheckedContinuation<JSONValue, Error>; let timeout: Task<Void, Never> }
@@ -299,9 +361,13 @@ public actor JSONRPCClient {
         self.channel = channel; self.binding = binding; self.clientInfo = clientInfo; self.requestTimeout = requestTimeout
     }
 
-    public func setNotificationHandler(_ handler: NotificationHandler?) { self.handler = handler }
+    public func installNotificationHandler(owner: JSONRPCAdapterLease, _ handler: @escaping NotificationHandler) throws {
+        guard lease == nil || lease == owner else { throw JSONRPCTransportError.sourceBindingRejected }
+        lease = owner; self.handler = handler
+    }
     public func lifecycleState() -> JSONRPCLifecycleState { state }
     public func currentConnectionContext() -> ConnectionContext? { context }
+    public func terminalError() -> JSONRPCTransportError? { lastTerminalError }
 
     /// Reconnection creates a fresh transport context only. It never reads or
     /// reconstructs runtime state.
@@ -330,7 +396,8 @@ public actor JSONRPCClient {
         context = opened; state = .initializing
         receiver = Task { [weak self, opened] in await self?.receiveLoop(context: opened) }
         do {
-            _ = try await sendRequest(method: "initialize", params: .object(["clientInfo": .object(["name": .string(clientInfo.name), "title": .string(clientInfo.title), "version": .string(clientInfo.version)])]), context: opened)
+            let initializeResponse = try await sendRequest(method: "initialize", params: .object(["clientInfo": .object(["name": .string(clientInfo.name), "title": .string(clientInfo.title), "version": .string(clientInfo.version)])]), context: opened)
+            guard GeneratedInitializeResponse.isValid(initializeResponse) else { throw JSONRPCTransportError.malformedMessage(.malformedShape) }
             guard context == opened, state == .initializing else { throw JSONRPCTransportError.connectionClosed }
             try await sendNotification(method: "initialized", params: .object([:]), context: opened)
             guard context == opened, state == .initializing else { throw JSONRPCTransportError.connectionClosed }
@@ -350,7 +417,7 @@ public actor JSONRPCClient {
     private func sendRequest(method: String, params: JSONValue?, context: ConnectionContext) async throws -> JSONValue {
         guard self.context == context, state == .initializing || state == .initialized else { throw JSONRPCTransportError.connectionClosed }
         guard !Task.isCancelled else { throw JSONRPCTransportError.requestCancelled }
-        let id = nextRequestID; nextRequestID += 1
+        let id = RequestID.integer(nextRequestID); nextRequestID += 1
         let data = try JSONEncoder().encode(JSONRPCRequest(id: id, method: method, params: params))
         return try await withTaskCancellationHandler(operation: {
             try await withCheckedThrowingContinuation { continuation in
@@ -380,26 +447,37 @@ public actor JSONRPCClient {
     private func transitionToClosed(error: JSONRPCTransportError) async {
         guard state != .closed else { return }
         state = .closing
+        lastTerminalError = error
         let oldReceiver = receiver; receiver = nil; oldReceiver?.cancel()
         context = nil
         await channel.close()
         failAll(with: error)
+        // A reconnect cannot install a new authoritative receiver until every
+        // old receive task has terminated. `closeFromReceiver` clears itself
+        // first, so this never awaits the currently executing task.
+        if let oldReceiver { await oldReceiver.value }
         state = .closed
+    }
+
+    private func closeFromReceiver(context receiverContext: ConnectionContext, error: JSONRPCTransportError) async {
+        guard self.context == receiverContext else { return }
+        receiver = nil
+        await transitionToClosed(error: error)
     }
 
     private func receiveLoop(context receiverContext: ConnectionContext) async {
         while !Task.isCancelled, self.context == receiverContext {
             do {
-                guard let frame = try await channel.receive() else { await transitionToClosed(error: .connectionClosed); return }
-                guard frame.isComplete else { await transitionToClosed(error: .transportFailure(.incompleteFrame)); return }
+                guard let frame = try await channel.receive() else { await closeFromReceiver(context: receiverContext, error: .connectionClosed); return }
+                guard frame.isComplete else { await closeFromReceiver(context: receiverContext, error: .transportFailure(.incompleteFrame)); return }
                 switch frame.kind {
                 case .text:
                     guard let data = frame.data else { recordMalformed(); continue }
                     await route(data: data, context: receiverContext)
-                case .binary: await transitionToClosed(error: .transportFailure(.nonTextFrame)); return
-                case .close: await transitionToClosed(error: .connectionClosed); return
+                case .binary: await closeFromReceiver(context: receiverContext, error: .transportFailure(.nonTextFrame)); return
+                case .close(let status, let reason): await closeFromReceiver(context: receiverContext, error: .webSocketClosed(status: status, reason: reason)); return
                 }
-            } catch { await transitionToClosed(error: .transportFailure(.socketReceiveFailed)); return }
+            } catch { await closeFromReceiver(context: receiverContext, error: .transportFailure(.socketReceiveFailed)); return }
         }
     }
 
@@ -426,7 +504,7 @@ public actor JSONRPCClient {
     /// cannot fail unrelated pending requests or be delivered to an Adapter.
     private func recordMalformed() {}
 
-    private func failRequest(id: Int, context: ConnectionContext, error: JSONRPCTransportError) {
+    private func failRequest(id: RequestID, context: ConnectionContext, error: JSONRPCTransportError) {
         guard let pending = pending[id], pending.context == context else { return }
         self.pending.removeValue(forKey: id)?.timeout.cancel(); pending.continuation.resume(throwing: error)
     }

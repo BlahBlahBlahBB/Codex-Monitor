@@ -30,7 +30,14 @@ public struct SanitizedDiagnostic: Codable, Sendable, Equatable {
 }
 
 public enum DiagnosticSanitizer {
-    private static let sensitiveFragments = ["authorization", "bearer", "credential", "secret", "password", "token", "email", "content", "text", "preview", "title", "path", "cookie", "key"]
+    /// Closed machine-readable vocabulary. Unknown names are dropped even when
+    /// they look harmless; a negative secret blacklist is not a security gate.
+    private static let allowedFieldNames: Set<String> = [
+        "id", "threadId", "turnId", "item", "thread", "turn", "type", "status",
+        "startedAtMs", "completedAtMs", "tokenUsage", "last", "total",
+        "cachedInputTokens", "inputTokens", "outputTokens", "reasoningOutputTokens", "totalTokens",
+        "platformFamily", "platformOs"
+    ]
     public static func summarize(sourceKind: SourceKind, code: DiagnosticCode, method: SanitizedMethod? = nil, payload: JSONValue? = nil, transport: TransportProvenance? = nil) -> SanitizedDiagnostic {
         SanitizedDiagnostic(sourceKind: sourceKind, code: code, method: method, safeFieldNames: safeNames(in: payload).sorted(), transport: transport)
     }
@@ -48,7 +55,6 @@ public enum DiagnosticSanitizer {
         }
     }
     private static func isSafeFieldName(_ key: String) -> Bool {
-        let lower = key.lowercased()
-        return !sensitiveFragments.contains { lower.contains($0) } && key.allSatisfy { $0.isLetter || $0.isNumber || $0 == "_" || $0 == "-" }
+        allowedFieldNames.contains(key)
     }
 }

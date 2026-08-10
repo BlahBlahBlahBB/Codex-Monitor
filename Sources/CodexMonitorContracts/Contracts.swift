@@ -256,8 +256,10 @@ public extension RuntimeObservationKind {
         let validTurn = turnID.map { $0.entityKind == .turn } ?? true
         let validItem = itemID.map { $0.entityKind == .item } ?? true
         switch self {
-        case .threadStarted, .threadStatusChanged, .threadTokenUsageUpdated:
+        case .threadStarted, .threadStatusChanged:
             return validThread && turnID == nil && itemID == nil
+        case .threadTokenUsageUpdated:
+            return validThread && validTurn && itemID == nil
         case .turnStarted, .turnCompletedSuccess:
             return validThread && validTurn && itemID == nil
         case .itemStarted, .itemCompleted:

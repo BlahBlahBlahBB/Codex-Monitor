@@ -1,0 +1,1 @@
+{"method":"thread/started","params":{"thread":{"id":"owned","cliVersion":"0.147.0","createdAt":1,"cwd":"/redacted","ephemeral":true,"modelProvider":"openai","preview":"redacted","sessionId":"session","source":"cli","status":{"type":"idle"},"turns":[],"updatedAt":1}}}

@@ -316,7 +316,7 @@ final class CodexMonitorContractsTests: XCTestCase {
 
     private func loadFixtures() throws -> [FixtureAuditRecord] {
         let urls = try FileManager.default.contentsOfDirectory(at: Bundle.module.resourceURL!, includingPropertiesForKeys: nil).filter { $0.pathExtension == "json" }
-        return try urls.filter { !$0.lastPathComponent.hasPrefix("app-server-headerless-") }.map { url in try FixtureAuditRecord(data: Data(contentsOf: url)) }
+        return try urls.filter { !$0.lastPathComponent.hasPrefix("app-server-headerless-") && !$0.lastPathComponent.hasPrefix("generated-") && !$0.lastPathComponent.hasPrefix("app-server-generated-") }.map { url in try FixtureAuditRecord(data: Data(contentsOf: url)) }
     }
 }
 
