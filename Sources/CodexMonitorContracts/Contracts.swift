@@ -333,15 +333,20 @@ public enum SourceHealthState: String, Codable, Sendable, Equatable {
     case closed
 }
 
+public enum SourceHealthReasonCode: String, Codable, Sendable, Equatable {
+    case socketClosed
+    case sourceUnavailable
+    case malformedMessage
+}
+
 public struct SourceHealth: Codable, Sendable, Equatable {
     public let provenance: Provenance
     public let state: SourceHealthState
     /// A sanitizer-produced machine-readable reason, never a raw socket path,
     /// JSON-RPC payload, credential, or server error message.
-    public let reasonCode: String?
+    public let reasonCode: SourceHealthReasonCode?
 
-    public init?(provenance: Provenance, state: SourceHealthState, reasonCode: String? = nil) {
-        guard reasonCode?.range(of: "[\\n\\r]", options: .regularExpression) == nil else { return nil }
+    public init?(provenance: Provenance, state: SourceHealthState, reasonCode: SourceHealthReasonCode? = nil) {
         self.provenance = provenance
         self.state = state
         self.reasonCode = reasonCode
