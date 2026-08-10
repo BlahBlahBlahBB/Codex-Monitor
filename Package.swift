@@ -8,10 +8,16 @@ let package = Package(
         .library(name: "CodexMonitorContracts", targets: ["CodexMonitorContracts"])
     ],
     targets: [
-        .target(name: "CodexMonitorContracts"),
+        .target(
+            name: "CSQLite",
+            path: "Sources/CSQLite",
+            publicHeadersPath: "include",
+            linkerSettings: [.linkedLibrary("sqlite3")]
+        ),
+        .target(name: "CodexMonitorContracts", dependencies: ["CSQLite"]),
         .testTarget(
             name: "CodexMonitorContractsTests",
-            dependencies: ["CodexMonitorContracts"],
+            dependencies: ["CodexMonitorContracts", "CSQLite"],
             resources: [.process("Fixtures")]
         )
     ]
