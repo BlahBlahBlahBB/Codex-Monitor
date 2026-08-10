@@ -112,8 +112,22 @@ public struct RolloutRecordEnvelope: Sendable, Equatable {
     public let tokenSnapshot: TokenSnapshot?
     public let model: String?
     public let reasoningEffort: String?
+    /// Stable per-record identity when the rollout source exposes one.  It is
+    /// used only in-memory/checkpoints for terminal replay admission.
+    public let eventID: String?
+    /// Source event time, distinct from the time the monitor decoded it.
+    /// Retention always uses this value when supplied.
+    public let authoritativeEventAt: Date?
     public let observedAt: Date
     public let fileOffset: UInt64
+
+    public init(threadID: NamespacedID, turnID: NamespacedID?, itemID: NamespacedID?, kind: RolloutEventKind, activity: RolloutActivityCategory?, tokenSnapshot: TokenSnapshot?, model: String?, reasoningEffort: String?, eventID: String? = nil, authoritativeEventAt: Date? = nil, observedAt: Date, fileOffset: UInt64) {
+        self.threadID = threadID; self.turnID = turnID; self.itemID = itemID
+        self.kind = kind; self.activity = activity; self.tokenSnapshot = tokenSnapshot
+        self.model = model; self.reasoningEffort = reasoningEffort
+        self.eventID = eventID; self.authoritativeEventAt = authoritativeEventAt
+        self.observedAt = observedAt; self.fileOffset = fileOffset
+    }
 }
 
 public enum DesktopCapability: String, Sendable, Equatable { case stateDatabase, rolloutFormat, rolloutSessionIdentity, sessionToken }

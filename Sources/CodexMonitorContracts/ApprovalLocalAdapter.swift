@@ -32,10 +32,10 @@ public struct ApprovalLogSchema: Sendable, Equatable {
         tableName: String = "logs",
         idColumn: String = "id",
         threadIDColumn: String = "thread_id",
-        timestampColumn: String = "timestamp",
+        timestampColumn: String = "ts",
         targetColumn: String = "target",
         levelColumn: String = "level",
-        bodyColumn: String = "body"
+        bodyColumn: String = "feedback_log_body"
     ) {
         self.acceptedUserVersions = acceptedUserVersions
         self.tableName = tableName; self.idColumn = idColumn; self.threadIDColumn = threadIDColumn
@@ -84,6 +84,18 @@ public struct ApprovalResolved: Sendable, Equatable {
     public let observedAt: Date
 }
 
+/// Persisted by the Monitor alongside the cursor so a restart cannot forget an
+/// already-admitted, unresolved approval that lies before the next cursor.
+/// It intentionally contains identities and timestamps only, never log text.
+public struct ApprovalLifecycleCheckpoint: Sendable, Equatable {
+    public let cursor: ApprovalLogCursor?
+    public let unresolved: [ApprovalRequested]
+    public init(cursor: ApprovalLogCursor?, unresolved: [ApprovalRequested]) {
+        self.cursor = cursor
+        self.unresolved = unresolved.sorted { $0.requestID.rawID < $1.requestID.rawID }
+    }
+}
+
 public enum ApprovalSourceHealthState: String, Sendable, Equatable { case available, unavailable }
 public enum ApprovalSourceHealthReason: String, Sendable, Equatable {
     case sourceMissing, fileIdentityChanged, schemaMismatch, busyExhausted, malformedRecord, cursorInvalid
@@ -103,6 +115,7 @@ public struct ApprovalSourceHealth: Sendable, Equatable {
 public enum ApprovalObservation: Sendable, Equatable {
     case requested(ApprovalRequested)
     case resolved(ApprovalResolved)
+    case sourceHealth(ApprovalSourceHealth)
     case sourceUnavailable(ApprovalSourceHealth)
 }
 
@@ -126,12 +139,17 @@ public final class ApprovalLocalAdapter: @unchecked Sendable {
     private let schema: ApprovalLogSchema
     private let retryPolicy: ApprovalDBRetryPolicy
     private var cursor: ApprovalLogCursor?
-    private var seenLogIDs: Set<Int64> = []
+    private var unresolved: [NamespacedID: ApprovalRequested] = [:]
     private var stopped = false
 
     public init(databaseURL: URL, sourceID: ApprovalLocalSourceID, schema: ApprovalLogSchema, checkpoint: ApprovalLogCursor? = nil, retryPolicy: ApprovalDBRetryPolicy = .init()) {
         self.databaseURL = databaseURL; self.sourceID = sourceID; self.schema = schema
         self.cursor = checkpoint; self.retryPolicy = retryPolicy
+    }
+
+    public convenience init(databaseURL: URL, sourceID: ApprovalLocalSourceID, schema: ApprovalLogSchema, lifecycleCheckpoint: ApprovalLifecycleCheckpoint, retryPolicy: ApprovalDBRetryPolicy = .init()) {
+        self.init(databaseURL: databaseURL, sourceID: sourceID, schema: schema, checkpoint: lifecycleCheckpoint.cursor, retryPolicy: retryPolicy)
+        self.unresolved = Dictionary(uniqueKeysWithValues: lifecycleCheckpoint.unresolved.map { ($0.requestID, $0) })
     }
 
     public func poll() throws -> ApprovalPollResult {
@@ -155,7 +173,8 @@ public final class ApprovalLocalAdapter: @unchecked Sendable {
     }
 
     public func checkpoint() -> ApprovalLogCursor? { cursor }
-    public func shutdown() { stopped = true; seenLogIDs.removeAll() }
+    public func lifecycleCheckpoint() -> ApprovalLifecycleCheckpoint { ApprovalLifecycleCheckpoint(cursor: cursor, unresolved: Array(unresolved.values)) }
+    public func shutdown() { stopped = true; unresolved.removeAll() }
 
     private func readOnce(identity: FileIdentity, at now: Date) throws -> ApprovalPollResult {
         var database: OpaquePointer?
@@ -173,17 +192,30 @@ public final class ApprovalLocalAdapter: @unchecked Sendable {
         sqlite3_bind_int(statement, 2, Int32(retryPolicy.maximumRowsPerPoll))
         var observations: [ApprovalObservation] = []
         var advancedID = lastID
+        var nextUnresolved = unresolved
         while true {
             let stepped = sqlite3_step(statement)
             if stepped == SQLITE_DONE { break }
             guard stepped == SQLITE_ROW else { throw error(for: database) }
             guard let row = parseRow(statement) else { throw ApprovalReadError.malformed }
+            // No cursor or lifecycle mutation occurs until the entire bounded
+            // batch has decoded and been admitted.  A repeated malformed row
+            // therefore stays unavailable rather than self-healing on poll 2.
+            guard let observation = try decode(row: row) else { advancedID = row.id; continue }
+            switch observation {
+            case .requested(let request): nextUnresolved[request.requestID] = request
+            case .resolved(let resolution):
+                guard nextUnresolved[resolution.requestID]?.threadID == resolution.threadID,
+                      nextUnresolved[resolution.requestID]?.turnID == resolution.turnID else { break }
+                nextUnresolved.removeValue(forKey: resolution.requestID)
+            case .sourceHealth, .sourceUnavailable: break
+            }
+            observations.append(observation)
             advancedID = row.id
-            guard seenLogIDs.insert(row.id).inserted else { continue }
-            if let observation = try decode(row: row) { observations.append(observation) }
         }
         let next = ApprovalLogCursor(fileIdentity: identity, lastLogID: advancedID)
-        cursor = next
+        // This is the single successful admission commit point.
+        cursor = next; unresolved = nextUnresolved
         let health = ApprovalSourceHealth(state: .available, observedAt: now)
         return ApprovalPollResult(observations: observations, cursor: next, health: health)
     }
@@ -221,24 +253,25 @@ public final class ApprovalLocalAdapter: @unchecked Sendable {
     }
 
     private func decode(row: ApprovalLogRow) throws -> ApprovalObservation? {
-        // `body` exists only inside this function and is discarded before the
-        // observation escapes.  A non-allow-listed target/shape creates no
-        // lifecycle fact; it can never be interpreted as a resolved approval.
-        guard requestTargets.contains(row.target) || resolutionTargets.contains(row.target) else { return nil }
-        guard let object = try? JSONSerialization.jsonObject(with: Data(row.body.utf8)) as? [String: Any],
-              let threadID = NamespacedID(sourceID: sourceID.value, entityKind: .thread, rawID: row.threadRawID),
-              let event = approvalEvent(in: object),
-              let requestRaw = string(in: object, keys: ["request_id", "requestId", "call_id", "callId"]),
-              let turnRaw = string(in: object, keys: ["turn_id", "turnId"]),
-              let requestID = NamespacedID(sourceID: sourceID.value, entityKind: .item, rawID: requestRaw),
-              let turnID = NamespacedID(sourceID: sourceID.value, entityKind: .turn, rawID: turnRaw) else { throw ApprovalReadError.malformed }
-        switch event {
-        case .request where requestTargets.contains(row.target):
+        // Installed 0.147 evidence pins this exact logger target.  The body is
+        // structured text, not a whole-body JSON contract.  It is inspected
+        // transiently by a closed marker parser and discarded immediately.
+        guard row.target == installedLoggerTarget else { return nil }
+        guard let structured = StructuredApprovalBody.parse(row.body) else {
+            // Ordinary stream-event rows are irrelevant.  A row that claims an
+            // approval marker but is not one pinned observed shape fails closed.
+            if StructuredApprovalBody.mentionsApproval(row.body) { throw ApprovalReadError.malformed }
+            return nil
+        }
+        guard let threadID = NamespacedID(sourceID: sourceID.value, entityKind: .thread, rawID: row.threadRawID),
+              let requestID = NamespacedID(sourceID: sourceID.value, entityKind: .item, rawID: structured.requestID),
+              let turnID = NamespacedID(sourceID: sourceID.value, entityKind: .turn, rawID: structured.turnID) else { throw ApprovalReadError.malformed }
+        if let bodyThread = structured.threadID, bodyThread != row.threadRawID { throw ApprovalReadError.malformed }
+        switch structured.variant {
+        case .request:
             return .requested(ApprovalRequested(threadID: threadID, turnID: turnID, requestID: requestID, observedAt: row.observedAt))
-        case .resolution(let status) where resolutionTargets.contains(row.target):
+        case .resolution(let status):
             return .resolved(ApprovalResolved(threadID: threadID, turnID: turnID, requestID: requestID, status: status, observedAt: row.observedAt))
-        default:
-            throw ApprovalReadError.malformed
         }
     }
 
@@ -255,32 +288,59 @@ public final class ApprovalLocalAdapter: @unchecked Sendable {
 
 private enum ApprovalReadError: Error { case source, busy, schema, malformed }
 private struct ApprovalLogRow { let id: Int64; let threadRawID: String; let observedAt: Date; let target: String; let level: String; let body: String }
-private enum ApprovalEvent { case request, resolution(ApprovalResolutionStatus) }
-private let requestTargets: Set<String> = ["item/commandExecution/requestApproval", "item/fileChange/requestApproval", "item/permissions/requestApproval", "autoReview/requestApproval"]
-private let resolutionTargets: Set<String> = ["serverRequest/resolved", "item/commandExecution/approvalResolved", "item/fileChange/approvalResolved", "item/permissions/approvalResolved", "autoReview/approvalResolved"]
+private let installedLoggerTarget = "codex_core::stream_events_utils"
 
 private func sqliteText(_ statement: OpaquePointer, _ column: Int32) -> String? {
     guard sqlite3_column_type(statement, column) != SQLITE_NULL, let value = sqlite3_column_text(statement, column) else { return nil }
     return String(cString: value)
 }
 
-private func approvalEvent(in object: [String: Any]) -> ApprovalEvent? {
-    let value = string(in: object, keys: ["event", "type", "method", "status"])
-    switch value {
-    case "requestApproval", "waitingOnApproval": return .request
-    case "approved", "approve": return .resolution(.approved)
-    case "declined", "deny": return .resolution(.declined)
-    case "cancelled", "canceled": return .resolution(.cancelled)
-    case "itemCompleted", "item_completed": return .resolution(.itemCompleted)
-    case "terminal": return .resolution(.terminal)
-    default: return nil
-    }
-}
+private enum StructuredApprovalVariant { case request, resolution(ApprovalResolutionStatus) }
+private struct StructuredApprovalBody {
+    let variant: StructuredApprovalVariant
+    let threadID: String?
+    let turnID: String
+    let requestID: String
 
-private func string(in object: [String: Any], keys: [String]) -> String? {
-    for key in keys { if let value = object[key] as? String, !value.isEmpty { return value } }
-    for nestedKey in ["params", "payload", "data"] {
-        if let nested = object[nestedKey] as? [String: Any], let value = string(in: nested, keys: keys) { return value }
+    static func mentionsApproval(_ body: String) -> Bool {
+        ["requestApproval", "waitingOnApproval", "approvalResolved", "approvalApproved", "approvalDeclined", "approvalCancelled", "itemCompleted", "approvalTerminal"].contains { containsMarker($0, in: body) }
     }
-    return nil
+
+    static func parse(_ body: String) -> StructuredApprovalBody? {
+        // Pinned observed structured-text grammar: recognized variant marker +
+        // exact correlation key/value markers.  Delimiters may be logfmt (=)
+        // or an embedded structured fragment (:); accepting neither JSON as a
+        // whole nor arbitrary nested maps prevents target-lookalike admission.
+        let fields = [
+            "thread_id": field("thread_id", in: body),
+            "turn_id": field("turn_id", in: body),
+            "request_id": field("request_id", in: body) ?? field("call_id", in: body) ?? field("item_id", in: body)
+        ]
+        guard let turn = fields["turn_id"]!, let request = fields["request_id"]! else { return nil }
+        let requestMarkers = containsMarker("requestApproval", in: body) && containsMarker("waitingOnApproval", in: body)
+        let resolution: ApprovalResolutionStatus? = containsMarker("approvalApproved", in: body) ? .approved :
+            (containsMarker("approvalDeclined", in: body) ? .declined :
+            (containsMarker("approvalCancelled", in: body) ? .cancelled :
+            (containsMarker("itemCompleted", in: body) ? .itemCompleted : (containsMarker("approvalTerminal", in: body) ? .terminal : nil))))
+        if requestMarkers, resolution == nil { return StructuredApprovalBody(variant: .request, threadID: fields["thread_id"]!, turnID: turn, requestID: request) }
+        if !requestMarkers, let resolution { return StructuredApprovalBody(variant: .resolution(resolution), threadID: fields["thread_id"]!, turnID: turn, requestID: request) }
+        return nil
+    }
+
+    private static func field(_ key: String, in body: String) -> String? {
+        // Closed, bounded ID grammar.  It keeps arbitrary structured-body text
+        // from being transported and rejects partial/ambiguous values.
+        let pattern = "(?:\\\"|\\b)" + NSRegularExpression.escapedPattern(for: key) + "(?:\\\")?\\s*(?:=|:)\\s*(?:\\\")?([A-Za-z0-9._:-]{1,256})"
+        guard let regex = try? NSRegularExpression(pattern: pattern) else { return nil }
+        let matches = regex.matches(in: body, range: NSRange(body.startIndex..., in: body))
+        guard matches.count == 1, let match = matches.first,
+              let range = Range(match.range(at: 1), in: body) else { return nil }
+        return String(body[range])
+    }
+
+    private static func containsMarker(_ marker: String, in body: String) -> Bool {
+        let pattern = "(?<![A-Za-z0-9_])" + NSRegularExpression.escapedPattern(for: marker) + "(?![A-Za-z0-9_])"
+        guard let regex = try? NSRegularExpression(pattern: pattern) else { return false }
+        return regex.firstMatch(in: body, range: NSRange(body.startIndex..., in: body)) != nil
+    }
 }
