@@ -80,6 +80,10 @@ public struct AdapterRegistry: Sendable {
                   provenance.observationMode == .snapshot else {
                 throw AdapterOutputRejection.laneMismatch
             }
+        case .sourceHealth:
+            guard provenance.sourceKind != .futureObserver else {
+                throw AdapterOutputRejection.laneMismatch
+            }
         }
         return output
     }
@@ -308,13 +312,39 @@ public enum AdapterOutput: Sendable, Equatable {
     case accountSnapshot(AccountSnapshot)
     case candidateRuntimeObservation(CandidateRuntimeObservationEnvelope)
     case snapshotSummary(SnapshotSummary)
+    case sourceHealth(SourceHealth)
 
     fileprivate var provenance: Provenance {
         switch self {
         case .accountSnapshot(let snapshot): snapshot.provenance
         case .candidateRuntimeObservation(let candidate): candidate.provenance
         case .snapshotSummary(let summary): summary.provenance
+        case .sourceHealth(let health): health.provenance
         }
+    }
+}
+
+/// Transport health is strictly source-local.  It is intentionally not a task
+/// state and has no route through `H1LiveBoundary`.
+public enum SourceHealthState: String, Codable, Sendable, Equatable {
+    case connecting
+    case connected
+    case unavailable
+    case closed
+}
+
+public struct SourceHealth: Codable, Sendable, Equatable {
+    public let provenance: Provenance
+    public let state: SourceHealthState
+    /// A sanitizer-produced machine-readable reason, never a raw socket path,
+    /// JSON-RPC payload, credential, or server error message.
+    public let reasonCode: String?
+
+    public init?(provenance: Provenance, state: SourceHealthState, reasonCode: String? = nil) {
+        guard reasonCode?.range(of: "[\\n\\r]", options: .regularExpression) == nil else { return nil }
+        self.provenance = provenance
+        self.state = state
+        self.reasonCode = reasonCode
     }
 }
 
