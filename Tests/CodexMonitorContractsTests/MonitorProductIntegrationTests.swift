@@ -1,0 +1,63 @@
+import CoreGraphics
+import Foundation
+import XCTest
+@testable import CodexMonitorApp
+
+@MainActor
+final class MonitorProductIntegrationTests: XCTestCase {
+    func testFloatingWindowPreferencesPersistAndClampSize() {
+        let suite = "CodexMonitorTests.preferences.\(UUID().uuidString)"
+        guard let defaults = UserDefaults(suiteName: suite) else {
+            return XCTFail("Could not create isolated preferences")
+        }
+        defer { defaults.removePersistentDomain(forName: suite) }
+
+        let preferences = MonitorPreferences(defaults: defaults)
+        preferences.showOrb = false
+        preferences.showUsageMenu = false
+        preferences.showSettingsMenu = false
+        preferences.orbSize = 240
+        preferences.orbOrigin = CGPoint(x: 225, y: 340)
+
+        let restored = MonitorPreferences(defaults: defaults)
+        XCTAssertFalse(restored.showOrb)
+        XCTAssertFalse(restored.showUsageMenu)
+        XCTAssertFalse(restored.showSettingsMenu)
+        XCTAssertEqual(restored.orbSize, 180)
+        XCTAssertEqual(restored.orbOrigin, CGPoint(x: 225, y: 340))
+    }
+
+    func testRestoredFloatingWindowOriginStaysInsideAnAvailableScreen() {
+        let screens = [CGRect(x: 0, y: 0, width: 1_200, height: 900)]
+        let origin = FloatingPanelLayout.clampedOrigin(
+            CGPoint(x: -50, y: 1_100),
+            size: CGSize(width: 120, height: 120),
+            screens: screens
+        )
+
+        XCTAssertEqual(origin, CGPoint(x: 12, y: 768))
+    }
+
+    func testQuickViewIsPlacedBesideOrbAndNeverClipped() {
+        let visible = CGRect(x: 0, y: 0, width: 1_200, height: 800)
+        let desired = CGSize(width: 300, height: 270)
+
+        let left = FloatingPanelLayout.quickViewFrame(
+            orbFrame: CGRect(x: 20, y: 20, width: 96, height: 96),
+            desiredSize: desired,
+            visibleFrame: visible
+        )
+        let right = FloatingPanelLayout.quickViewFrame(
+            orbFrame: CGRect(x: 1_084, y: 680, width: 96, height: 96),
+            desiredSize: desired,
+            visibleFrame: visible
+        )
+
+        XCTAssertGreaterThanOrEqual(left.minX, 12)
+        XCTAssertEqual(left.minX, 128)
+        XCTAssertGreaterThanOrEqual(right.minX, 12)
+        XCTAssertLessThanOrEqual(right.maxX, visible.maxX - 12)
+        XCTAssertGreaterThanOrEqual(right.minY, 12)
+        XCTAssertLessThanOrEqual(right.maxY, visible.maxY - 12)
+    }
+}
