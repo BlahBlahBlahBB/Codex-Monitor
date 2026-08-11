@@ -16,17 +16,34 @@ final class ProductionPathValidationTests: XCTestCase {
         )
 
         var requests = 0
+        var resolutions = 0
+        var reducerResolutionTransitions = 0
         var lastCursor: ApprovalLogCursor?
         var sawUnavailable = false
         var recoveredAfterUnavailable = false
+        let engine = RuntimeStateEngine(initialPhase: .live)
         for _ in 0..<128 {
             let result = try adapter.poll()
             if result.health.state == .unavailable { sawUnavailable = true }
             if sawUnavailable && result.health.state == .available { recoveredAfterUnavailable = true }
             for value in result.observations {
                 switch value {
-                case .requested: requests += 1
-                case .resolved: break
+                case .requested(let request):
+                    requests += 1
+                    // The approval log is the sole source under test.  This
+                    // envelope only establishes the reducer's exact active
+                    // turn context; no prompt, body, or identifier leaves the
+                    // typed boundary.
+                    engine.ingest(RolloutRecordEnvelope(threadID: request.threadID, turnID: request.turnID, itemID: nil, kind: .taskStarted, activity: nil, tokenSnapshot: nil, model: nil, reasoningEffort: nil, eventID: nil, authoritativeEventAt: request.observedAt, observedAt: request.observedAt, fileOffset: 0))
+                    engine.ingest(value)
+                    XCTAssertEqual(engine.snapshot().threads.first { $0.threadID == request.threadID }?.state, .waitingApproval)
+                case .resolved(let resolution):
+                    resolutions += 1
+                    let before = engine.snapshot().threads.first { $0.threadID == resolution.threadID }?.state
+                    engine.ingest(value)
+                    let after = engine.snapshot().threads.first { $0.threadID == resolution.threadID }?.state
+                    if before == .waitingApproval && after != .waitingApproval { reducerResolutionTransitions += 1 }
+                    XCTAssertFalse(adapter.lifecycleCheckpoint().unresolved.contains { $0.threadID == resolution.threadID && $0.turnID == resolution.turnID && $0.requestID == resolution.requestID })
                 case .sourceHealth, .sourceUnavailable: break
                 }
             }
@@ -34,6 +51,8 @@ final class ProductionPathValidationTests: XCTestCase {
             lastCursor = result.cursor
         }
         XCTAssertGreaterThan(requests, 0, "must admit at least one installed request")
+        XCTAssertGreaterThan(resolutions, 0, "must admit at least one installed exact resolution")
+        XCTAssertGreaterThan(reducerResolutionTransitions, 0, "an installed resolution must clear its exact Waiting Approval state")
         XCTAssertTrue(recoveredAfterUnavailable, "a malformed historical row must not leave the source permanently unavailable")
         XCTAssertNotNil(lastCursor, "read-only source must advance a cursor")
     }
@@ -64,5 +83,23 @@ final class ProductionPathValidationTests: XCTestCase {
         XCTAssertNotNil(terminal.eventID)
         XCTAssertNotNil(terminal.authoritativeEventAt)
         XCTAssertNotEqual(terminal.authoritativeEventAt, terminal.observedAt)
+    }
+
+    func testInstalledApprovalInstallerCatchesUpBeforeLive() throws {
+        guard let path = ProcessInfo.processInfo.environment["CODEX_MONITOR_REAL_APPROVAL_DB"] else {
+            throw XCTSkip("Set CODEX_MONITOR_REAL_APPROVAL_DB to run the local read-only probe")
+        }
+        let root = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("codex-monitor-installed-approval-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = ApprovalLifecycleCheckpointStore(url: root.appendingPathComponent("checkpoint.json"))
+        let approvals = try ApprovalLifecycleRuntimeOwner(databaseURL: URL(fileURLWithPath: path), sourceID: ApprovalLocalSourceID("production-installer-probe")!, schema: .init(acceptedUserVersions: [0]), store: store)
+        let desktopSource = DesktopLocalSourceID("production-installer-probe")!
+        let desktop = DesktopLocalAdapter(sourceID: desktopSource, validatedSessionRoots: [], stateDB: StateDBReader(databaseURL: root.appendingPathComponent("unused-state.sqlite"), sourceID: desktopSource, schema: .init(acceptedUserVersions: [0])))
+        let engine = RuntimeStateEngine()
+        let installer = LocalRuntimeReconciliationInstaller(desktop: desktop, approvals: approvals, engine: engine)
+
+        XCTAssertTrue(try installer.install(threadCheckpoints: []).isEmpty)
+        XCTAssertGreaterThan(try XCTUnwrap(installer.lastApprovalCatchUp).polls, 1, "a fresh installed source must not become live after one approval poll")
+        XCTAssertNotEqual(engine.snapshot().state, .paused)
     }
 }

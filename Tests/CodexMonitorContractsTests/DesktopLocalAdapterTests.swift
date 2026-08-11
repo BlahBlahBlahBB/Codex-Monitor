@@ -215,18 +215,42 @@ final class DesktopLocalAdapterTests: XCTestCase {
         let initial = try fixture.adapter(); let thread = try initial.open(threadRawID: "thread-a")
         let checkpoint = try XCTUnwrap(try initial.poll(threadID: thread.threadID).cursor)
 
+        let approvalDatabase = fixture.root.appendingPathComponent("logs.sqlite")
+        var approvalDB: OpaquePointer?
+        XCTAssertEqual(sqlite3_open(approvalDatabase.path, &approvalDB), SQLITE_OK)
+        defer { sqlite3_close(approvalDB) }
+        try execute(approvalDB, "PRAGMA user_version = 0")
+        try execute(approvalDB, "CREATE TABLE logs (id INTEGER PRIMARY KEY, thread_id TEXT NOT NULL, ts REAL NOT NULL, target TEXT NOT NULL, level TEXT NOT NULL, feedback_log_body TEXT NOT NULL)")
+        // These are deliberately non-approval target rows.  A one-row page
+        // forces several source pages while preserving a known-not-waiting
+        // snapshot; the installer must reach the final cursor before live.
+        for id in 1...3 { try execute(approvalDB, "INSERT INTO logs VALUES (\(id), 'thread-a', 1, 'codex_core::stream_events_utils', 'info', 'ordinary')") }
         let approvalStore = ApprovalLifecycleCheckpointStore(url: fixture.root.appendingPathComponent("approval-checkpoint.json"))
-        let approvals = try ApprovalLifecycleRuntimeOwner(databaseURL: fixture.root.appendingPathComponent("missing-logs.sqlite"), sourceID: ApprovalLocalSourceID("test-desktop-source")!, schema: .init(acceptedUserVersions: [0]), store: approvalStore)
+        let approvals = try ApprovalLifecycleRuntimeOwner(databaseURL: approvalDatabase, sourceID: ApprovalLocalSourceID("test-desktop-source")!, schema: .init(acceptedUserVersions: [0]), store: approvalStore, retryPolicy: .init(maximumRowsPerPoll: 1))
         let engine = RuntimeStateEngine()
         XCTAssertEqual(engine.snapshot().state, .paused)
-        let installer = LocalRuntimeReconciliationInstaller(desktop: try fixture.adapter(), approvals: approvals, engine: engine)
+        let installer = LocalRuntimeReconciliationInstaller(desktop: try fixture.adapter(), approvals: approvals, engine: engine, approvalCatchUpPolicy: .init(maximumPolls: 8))
         let rebuilt = try installer.install(threadCheckpoints: [try XCTUnwrap(LocalRuntimeThreadCheckpoint(threadRawID: "thread-a", rolloutCursor: checkpoint))])
 
         XCTAssertEqual(rebuilt.count, 1)
+        XCTAssertEqual(approvals.adapter.checkpoint()?.lastLogID, 3, "installer must catch up beyond the first approval page before entering live")
+        XCTAssertGreaterThan(try XCTUnwrap(installer.lastApprovalCatchUp).polls, 2)
         let snapshot = try XCTUnwrap(engine.snapshot().threads.first)
         XCTAssertEqual(snapshot.state, .thinking)
         XCTAssertEqual(snapshot.sessionTokenCumulative, 100)
         XCTAssertEqual(snapshot.sessionTokenProvenance, .rolloutCumulativeAuthoritative)
+    }
+
+    func testProductionInstallerFailsClosedWhenApprovalCatchUpCannotStabilize() throws {
+        let store = ApprovalLifecycleCheckpointStore(url: fixture.root.appendingPathComponent("approval-checkpoint.json"))
+        let approvals = try ApprovalLifecycleRuntimeOwner(databaseURL: fixture.root.appendingPathComponent("missing-logs.sqlite"), sourceID: ApprovalLocalSourceID("test-desktop-source")!, schema: .init(acceptedUserVersions: [0]), store: store)
+        let engine = RuntimeStateEngine()
+        let installer = LocalRuntimeReconciliationInstaller(desktop: try fixture.adapter(), approvals: approvals, engine: engine, approvalCatchUpPolicy: .init(maximumPolls: 2))
+
+        XCTAssertThrowsError(try installer.install(threadCheckpoints: [])) {
+            XCTAssertEqual($0 as? ApprovalCatchUpError, .sourceUnavailable(.sourceMissing))
+        }
+        XCTAssertEqual(engine.snapshot().state, .paused)
     }
 
     func testFunctionOutputUsesCompletionBranchAndTerminalNeverUsesDecodeTime() throws {

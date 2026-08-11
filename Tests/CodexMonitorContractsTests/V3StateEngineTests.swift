@@ -272,6 +272,42 @@ final class ApprovalLocalAdapterTests: XCTestCase {
         XCTAssertTrue(restarted.adapter.lifecycleCheckpoint().unresolved.isEmpty)
     }
 
+    func testResolutionRetainingRequestMarkersAdmitsOnlyExactLifecycleTriple() throws {
+        try fixture.insert(id: 1, thread: "a", target: fixture.realTarget, body: fixture.requestBody(thread: "a", request: "r", turn: "t"))
+        let adapter = fixture.adapter()
+        XCTAssertTrue(try adapter.poll().observations.contains { if case .requested = $0 { return true }; return false })
+        // Resolution envelopes may retain the request context and repeat their
+        // exact correlation values.  Neither property relaxes lifecycle
+        // attribution: the pending triple remains the admission gate.
+        let retained = "stream_event requestApproval waitingOnApproval turn_id=t turn_id=t turn_id=t turn_id=t approvalApproved call_id=r call_id=r"
+        try fixture.insert(id: 2, thread: "a", target: fixture.realTarget, body: retained)
+        XCTAssertTrue(try adapter.poll().observations.contains { if case .resolved(let value) = $0 { return value.requestID.rawID == "r" && value.turnID.rawID == "t" }; return false })
+        XCTAssertTrue(adapter.lifecycleCheckpoint().unresolved.isEmpty)
+
+        try fixture.insert(id: 3, thread: "a", target: fixture.realTarget, body: fixture.requestBody(thread: "a", request: "other", turn: "next"))
+        _ = try adapter.poll()
+        try fixture.insert(id: 4, thread: "a", target: fixture.realTarget, body: "stream_event requestApproval waitingOnApproval turn_id=next turn_id=wrong approvalApproved call_id=other")
+        let ambiguous = try adapter.poll()
+        XCTAssertFalse(ambiguous.observations.contains { if case .resolved = $0 { return true }; return false })
+        XCTAssertEqual(ambiguous.health.reason, .malformedRecord)
+        XCTAssertEqual(adapter.lifecycleCheckpoint().unresolved.map(\.requestID.rawID), ["other"])
+    }
+
+    func testCatchUpIsBoundedAndResolvedCheckpointDoesNotResurrectAfterRestart() throws {
+        try fixture.insert(id: 1, thread: "a", target: fixture.realTarget, body: fixture.requestBody(thread: "a", request: "r", turn: "t"))
+        try fixture.insert(id: 2, thread: "a", target: fixture.realTarget, body: fixture.resolutionBody(thread: "a", request: "r", turn: "t", variant: "approvalApproved"))
+        try fixture.insert(id: 3, thread: "b", target: fixture.realTarget, body: fixture.requestBody(thread: "b", request: "pending", turn: "turn-b"))
+        let store = ApprovalLifecycleCheckpointStore(url: fixture.root.appendingPathComponent("approval-catchup.json"))
+        let owner = try ApprovalLifecycleRuntimeOwner(databaseURL: fixture.database, sourceID: fixture.source, schema: .init(acceptedUserVersions: [0]), store: store, retryPolicy: .init(maximumRowsPerPoll: 1))
+        let caughtUp = try owner.catchUpToStable(policy: .init(maximumPolls: 8))
+        XCTAssertGreaterThan(caughtUp.polls, 2)
+        XCTAssertEqual(caughtUp.checkpoint.unresolved.map(\.requestID.rawID), ["pending"])
+
+        let restarted = try ApprovalLifecycleRuntimeOwner(databaseURL: fixture.database, sourceID: fixture.source, schema: .init(acceptedUserVersions: [0]), store: store, retryPolicy: .init(maximumRowsPerPoll: 1))
+        let afterRestart = try restarted.catchUpToStable(policy: .init(maximumPolls: 4))
+        XCTAssertEqual(afterRestart.checkpoint.unresolved.map(\.requestID.rawID), ["pending"])
+    }
+
     func testUnknownSchemaMalformedAndRotationFailClosedWithoutContent() throws {
         try fixture.insert(id: 1, thread: "a", target: fixture.realTarget, body: "requestApproval waitingOnApproval turn_id=missing-request")
         let reader = fixture.adapter()

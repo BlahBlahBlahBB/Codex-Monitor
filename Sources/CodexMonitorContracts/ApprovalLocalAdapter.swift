@@ -345,12 +345,12 @@ private struct StructuredApprovalBody {
         // exact correlation key/value markers.  Delimiters may be logfmt (=)
         // or an embedded structured fragment (:); accepting neither JSON as a
         // whole nor arbitrary nested maps prevents target-lookalike admission.
-        // Privacy-bounded installed-source probe (V3-2FR) pinned this exact
-        // diagnostic wrapper shape: four ordered `turn_id` fields and two
-        // duplicate `call_id` fields.  The first turn field belongs to the
-        // stream event envelope; the two call IDs must agree.  Other apparent
-        // approval words/field layouts are unavailable evidence, not a loose
-        // fallback grammar.
+        // Privacy-bounded installed-source inspection pins the request wrapper
+        // below.  Resolution wrappers are not assumed to discard the request
+        // markers or use a particular duplicate-field count: some installed
+        // diagnostic envelopes retain their request context.  They must still
+        // carry one unambiguous turn and call identity, and are correlated to
+        // an already-admitted exact lifecycle key before exposure.
         guard let turns = fields("turn_id", in: body), let calls = fields("call_id", in: body) else { return nil }
         let turn = turns[0], request = calls[0]
         let requestMarkers = containsMarker("requestApproval", in: body) && containsMarker("waitingOnApproval", in: body)
@@ -361,14 +361,19 @@ private struct StructuredApprovalBody {
         ]
         let matches = resolutionMarkers.filter { containsMarker($0.0, in: body) }
         // The request wrapper has four event-context turns and two equal call
-        // IDs.  The independently observed resolution wrapper has three
-        // event-context turns and one call ID.  Both forms are closed and
-        // correlation is exact against the lifecycle map before admission.
+        // IDs.  Keep that observed request admission contract unchanged.
         if requestMarkers, matches.isEmpty, turns.count == 4, calls.count == 2, calls[0] == calls[1] {
             return StructuredApprovalBody(variant: .request, turnID: turn, requestID: request)
         }
-        if !requestMarkers, matches.count == 1, turns.count == 3, calls.count == 1 {
-            return StructuredApprovalBody(variant: .resolution(matches[0].1), turnID: turn, requestID: request)
+        // Resolution identity is deliberately value- rather than
+        // wrapper-cardinality-based.  A repeated field is allowed only when it
+        // repeats the same opaque identity; a second distinct turn or call is
+        // malformed evidence.  The adapter's lifecycle map subsequently
+        // requires the exact source-thread + turn + request triple.
+        let uniqueTurns = Set(turns), uniqueCalls = Set(calls)
+        if matches.count == 1, uniqueTurns.count == 1, uniqueCalls.count == 1,
+           let exactTurn = uniqueTurns.first, let exactCall = uniqueCalls.first {
+            return StructuredApprovalBody(variant: .resolution(matches[0].1), turnID: exactTurn, requestID: exactCall)
         }
         return nil
     }

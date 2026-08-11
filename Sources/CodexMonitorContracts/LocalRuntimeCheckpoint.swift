@@ -9,7 +9,16 @@ public final class ApprovalLifecycleRuntimeOwner: @unchecked Sendable {
 
     public init(databaseURL: URL, sourceID: ApprovalLocalSourceID, schema: ApprovalLogSchema, store: ApprovalLifecycleCheckpointStore, retryPolicy: ApprovalDBRetryPolicy = .init()) throws {
         self.store = store
-        adapter = ApprovalLocalAdapter(databaseURL: databaseURL, sourceID: sourceID, schema: schema, lifecycleCheckpoint: try store.load(), retryPolicy: retryPolicy)
+        // A lost/corrupt Monitor-owned checkpoint is recoverable only by
+        // replaying the immutable Codex source from zero.  Do not make a
+        // caller manufacture a potentially stale pending set or go live.
+        let checkpoint: ApprovalLifecycleCheckpoint
+        do { checkpoint = try store.load() }
+        catch ApprovalLifecycleCheckpointStoreError.invalidCheckpoint,
+              ApprovalLifecycleCheckpointStoreError.unreadable {
+            checkpoint = ApprovalLifecycleCheckpoint(cursor: nil, unresolved: [])
+        }
+        adapter = ApprovalLocalAdapter(databaseURL: databaseURL, sourceID: sourceID, schema: schema, lifecycleCheckpoint: checkpoint, retryPolicy: retryPolicy)
     }
 
     /// The only production poll path commits the durable lifecycle checkpoint
@@ -20,7 +29,65 @@ public final class ApprovalLifecycleRuntimeOwner: @unchecked Sendable {
         return result
     }
 
+    /// Replays the incremental approval source until two consecutive available
+    /// polls report the same cursor.  This proves the bounded reader has
+    /// reached its current snapshot; it never treats a single page as an
+    /// authoritative restart reconstruction.
+    public func catchUpToStable(policy: ApprovalCatchUpPolicy = .init()) throws -> ApprovalCatchUpResult {
+        var previousCursor: ApprovalLogCursor?
+        var unchangedAvailablePolls = 0
+        var lastResult: ApprovalPollResult?
+
+        for pollNumber in 1...policy.maximumPolls {
+            let result = try poll()
+            lastResult = result
+            if result.health.state == .unavailable {
+                // A malformed historical row may have advanced the durable
+                // cursor.  Continue within the bound so later valid rows can
+                // recover; a non-progressing unavailable source is fail-closed.
+                guard result.cursor != previousCursor else {
+                    throw ApprovalCatchUpError.sourceUnavailable(result.health.reason)
+                }
+                previousCursor = result.cursor
+                unchangedAvailablePolls = 0
+                continue
+            }
+            if result.cursor == previousCursor { unchangedAvailablePolls += 1 }
+            else { previousCursor = result.cursor; unchangedAvailablePolls = 0 }
+            if unchangedAvailablePolls >= policy.requiredUnchangedAvailablePolls {
+                return ApprovalCatchUpResult(polls: pollNumber, cursor: result.cursor, checkpoint: adapter.lifecycleCheckpoint())
+            }
+        }
+        if let lastResult, lastResult.health.state == .unavailable {
+            throw ApprovalCatchUpError.sourceUnavailable(lastResult.health.reason)
+        }
+        throw ApprovalCatchUpError.safetyBoundReached
+    }
+
     public func shutdown() { adapter.shutdown() }
+}
+
+/// Bounded reconciliation policy for first start, checkpoint loss, and
+/// pause/resume.  The default accommodates multiple normal SQLite pages while
+/// retaining a finite fail-closed upper bound.
+public struct ApprovalCatchUpPolicy: Sendable, Equatable {
+    public let maximumPolls: Int
+    public let requiredUnchangedAvailablePolls: Int
+    public init(maximumPolls: Int = 256, requiredUnchangedAvailablePolls: Int = 1) {
+        self.maximumPolls = max(2, maximumPolls)
+        self.requiredUnchangedAvailablePolls = max(1, requiredUnchangedAvailablePolls)
+    }
+}
+
+public struct ApprovalCatchUpResult: Sendable, Equatable {
+    public let polls: Int
+    public let cursor: ApprovalLogCursor?
+    public let checkpoint: ApprovalLifecycleCheckpoint
+}
+
+public enum ApprovalCatchUpError: Error, Equatable {
+    case sourceUnavailable(ApprovalSourceHealthReason?)
+    case safetyBoundReached
 }
 
 public enum ApprovalLifecycleCheckpointStoreError: Error, Equatable { case unreadable, invalidCheckpoint, writeFailed }
@@ -101,17 +168,24 @@ public final class LocalRuntimeReconciliationInstaller: @unchecked Sendable {
     private let desktop: DesktopLocalAdapter
     private let approvals: ApprovalLifecycleRuntimeOwner
     private let engine: RuntimeStateEngine
+    private let approvalCatchUpPolicy: ApprovalCatchUpPolicy
+    /// Aggregate reconciliation diagnostic only; it contains no log content.
+    public private(set) var lastApprovalCatchUp: ApprovalCatchUpResult?
 
-    public init(desktop: DesktopLocalAdapter, approvals: ApprovalLifecycleRuntimeOwner, engine: RuntimeStateEngine) {
-        self.desktop = desktop; self.approvals = approvals; self.engine = engine
+    public init(desktop: DesktopLocalAdapter, approvals: ApprovalLifecycleRuntimeOwner, engine: RuntimeStateEngine, approvalCatchUpPolicy: ApprovalCatchUpPolicy = .init()) {
+        self.desktop = desktop; self.approvals = approvals; self.engine = engine; self.approvalCatchUpPolicy = approvalCatchUpPolicy
     }
 
     @discardableResult
     public func install(threadCheckpoints: [LocalRuntimeThreadCheckpoint]) throws -> [RuntimeReconciliationThread] {
         engine.beginReconciliation()
-        let approvalPoll = try approvals.poll()
-        let approvalCheckpoint = approvals.adapter.lifecycleCheckpoint()
-        let approvalHealth: ApprovalCapabilityHealth = approvalPoll.health.state == .available ? .availableKnownNotWaiting : .unavailable
+        // Do not install a one-page approval projection.  If catch-up cannot
+        // establish a current source snapshot, this throws while the engine
+        // remains reconciling/paused rather than fabricating live certainty.
+        let approvalCatchUp = try approvals.catchUpToStable(policy: approvalCatchUpPolicy)
+        lastApprovalCatchUp = approvalCatchUp
+        let approvalCheckpoint = approvalCatchUp.checkpoint
+        let approvalHealth: ApprovalCapabilityHealth = .availableKnownNotWaiting
         let now = Date()
         var rebuilt: [RuntimeReconciliationThread] = []
         for checkpoint in threadCheckpoints {
