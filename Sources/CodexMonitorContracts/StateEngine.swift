@@ -33,6 +33,10 @@ public struct SystemStateEngineClock: StateEngineClock { public init() {}; publi
 
 public struct ThreadRuntimeSnapshot: Sendable, Equatable {
     public let threadID: NamespacedID
+    /// The active turn is the only runtime-session attribution exposed by the
+    /// reducer. It is absent when no exact local turn is active; consumers
+    /// must not infer or manufacture one from a thread title or status.
+    public let activeTurnID: NamespacedID?
     public let taskTitle: String?
     public let model: String?
     public let state: MonitorRuntimeState
@@ -40,6 +44,7 @@ public struct ThreadRuntimeSnapshot: Sendable, Equatable {
     public let turnRuntimeStartedAt: Date?
     public let sessionTokenCumulative: Int64?
     public let sessionTokenProvenance: SessionTokenProvenance?
+    public let sessionTokenAvailable: Bool
     public let sourceFreshness: Freshness
     public let approvalHealth: ApprovalCapabilityHealth
     public let approvalFreshness: Freshness
@@ -288,7 +293,7 @@ public final class RuntimeStateEngine: @unchecked Sendable {
         let threadSnapshots = records.values.map { snapshot(for: $0, now: now) }.sorted { stableID($0.threadID) < stableID($1.threadID) }
         if pausePhase != .live {
             let since = pauseSince ?? now
-            let pausedThreads = threadSnapshots.map { value in ThreadRuntimeSnapshot(threadID: value.threadID, taskTitle: value.taskTitle, model: value.model, state: .paused, stateSince: since, turnRuntimeStartedAt: value.turnRuntimeStartedAt, sessionTokenCumulative: value.sessionTokenCumulative, sessionTokenProvenance: value.sessionTokenProvenance, sourceFreshness: stale(value.sourceFreshness, at: now), approvalHealth: .stale, approvalFreshness: stale(value.approvalFreshness, at: now), currentActivityCategory: value.currentActivityCategory) }
+            let pausedThreads = threadSnapshots.map { value in ThreadRuntimeSnapshot(threadID: value.threadID, activeTurnID: value.activeTurnID, taskTitle: value.taskTitle, model: value.model, state: .paused, stateSince: since, turnRuntimeStartedAt: value.turnRuntimeStartedAt, sessionTokenCumulative: value.sessionTokenCumulative, sessionTokenProvenance: value.sessionTokenProvenance, sessionTokenAvailable: value.sessionTokenAvailable, sourceFreshness: stale(value.sourceFreshness, at: now), approvalHealth: .stale, approvalFreshness: stale(value.approvalFreshness, at: now), currentActivityCategory: value.currentActivityCategory) }
             return GlobalRuntimeSnapshot(state: .paused, stateSince: since, representativeThreadID: nil, currentActivityCategory: .idle, currentActivityShortSafeLabel: RuntimeActivityCategory.idle.shortSafeLabel, sourceFreshness: Freshness(state: .stale, assessedAt: now, observedAt: since, reason: "monitorPausedOrRevalidating"), activeThreadCount: 0, waitingApprovalCount: 0, representativeThread: nil, threads: pausedThreads)
         }
         let ranked = threadSnapshots.sorted { lhs, rhs in
@@ -354,7 +359,7 @@ public final class RuntimeStateEngine: @unchecked Sendable {
         let runtimeFreshness = Freshness(state: record.runtimeSourceAvailable ? .fresh : .unknown, assessedAt: now, observedAt: record.runtimeObservedAt, reason: record.runtimeSourceAvailable ? nil : "runtimeSourceUnavailable")
         let approvalFreshness = Freshness(state: record.approvalHealth == .unavailable ? .unknown : (record.approvalHealth == .stale ? .stale : .fresh), assessedAt: now, observedAt: record.approvalObservedAt, reason: record.approvalHealth == .unavailable ? "approvalSourceUnavailable" : nil)
         let category = state == .waitingApproval ? .waitingApproval : ([.thinking, .working].contains(state) ? record.lastActivity : activity(for: state))
-        return ThreadRuntimeSnapshot(threadID: record.threadID, taskTitle: record.title, model: record.model, state: state, stateSince: since, turnRuntimeStartedAt: record.turnStartedAt, sessionTokenCumulative: record.tokens, sessionTokenProvenance: record.tokenProvenance, sourceFreshness: runtimeFreshness, approvalHealth: record.approvalHealth, approvalFreshness: approvalFreshness, currentActivityCategory: category)
+        return ThreadRuntimeSnapshot(threadID: record.threadID, activeTurnID: record.activeTurnID, taskTitle: record.title, model: record.model, state: state, stateSince: since, turnRuntimeStartedAt: record.turnStartedAt, sessionTokenCumulative: record.tokens, sessionTokenProvenance: record.tokenProvenance, sessionTokenAvailable: record.sessionTokenAvailable, sourceFreshness: runtimeFreshness, approvalHealth: record.approvalHealth, approvalFreshness: approvalFreshness, currentActivityCategory: category)
     }
 
     private func state(for record: ThreadRecord, now: Date) -> MonitorRuntimeState {
