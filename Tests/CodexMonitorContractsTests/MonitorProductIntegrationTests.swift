@@ -52,6 +52,20 @@ final class MonitorProductIntegrationTests: XCTestCase {
         XCTAssertFalse(ownership.owns(.usage))
     }
 
+    func testSettingsAlwaysHasAStableDefaultDetailRoute() {
+        XCTAssertEqual(SettingsSection.defaultSection, .floating)
+        XCTAssertEqual(SettingsSection.allCases.count, 6)
+        XCTAssertEqual(SettingsSection.defaultSection.title, L10n.tr("settings.floating"))
+    }
+
+    func testActionRowAndBilingualLocalizationContracts() {
+        XCTAssertEqual(UIInteractionContract.minimumActionRowHeight, 36)
+        XCTAssertEqual(UIInteractionContract.disabledOpacity, 0.42)
+        XCTAssertEqual(L10n.tr("menu.refresh", languageCode: "en"), "Refresh")
+        XCTAssertEqual(L10n.tr("menu.refresh", languageCode: "zh-Hans"), "刷新")
+        XCTAssertEqual(L10n.tr("menu.alwaysOnTopUnavailable", languageCode: "zh-Hans"), "始终置顶（不可用）")
+    }
+
     func testRestoredFloatingWindowOriginStaysInsideAnAvailableScreen() {
         let screens = [CGRect(x: 0, y: 0, width: 1_200, height: 900)]
         let origin = FloatingPanelLayout.clampedOrigin(

@@ -3,6 +3,7 @@ import PackageDescription
 
 let package = Package(
     name: "CodexMonitorContracts",
+    defaultLocalization: "en",
     platforms: [.macOS(.v13)],
     products: [
         .library(name: "CodexMonitorContracts", targets: ["CodexMonitorContracts"]),
@@ -16,7 +17,11 @@ let package = Package(
             linkerSettings: [.linkedLibrary("sqlite3")]
         ),
         .target(name: "CodexMonitorContracts", dependencies: ["CSQLite"]),
-        .executableTarget(name: "CodexMonitorApp", dependencies: ["CodexMonitorContracts"]),
+        .executableTarget(
+            name: "CodexMonitorApp",
+            dependencies: ["CodexMonitorContracts"],
+            resources: [.process("Resources")]
+        ),
         .testTarget(
             name: "CodexMonitorContractsTests",
             dependencies: ["CodexMonitorContracts", "CodexMonitorApp", "CSQLite"],

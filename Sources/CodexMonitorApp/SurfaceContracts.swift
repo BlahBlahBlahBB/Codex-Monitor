@@ -24,3 +24,9 @@ enum FloatingOrbSurfaceConfiguration {
     static let hasPanelShadow = false
     static let quickViewSize = CGSize(width: 350, height: 214)
 }
+
+enum UIInteractionContract {
+    static let minimumActionRowHeight: CGFloat = 36
+    static let actionRowCornerRadius: CGFloat = 8
+    static let disabledOpacity: Double = 0.42
+}

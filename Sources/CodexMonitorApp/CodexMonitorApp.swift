@@ -6,11 +6,15 @@ import CodexMonitorContracts
 struct CodexMonitorApp: App {
     @NSApplicationDelegateAdaptor(CodexMonitorAppDelegate.self) private var appDelegate
 
-    // All user-facing windows are explicitly owned by native window controllers.
-    // This inert settings scene keeps SwiftUI's app lifecycle valid without
-    // recreating the rejected main dashboard WindowGroup.
+    // The system Settings scene must never be blank. Popover/context actions
+    // still focus the reusable AppKit Settings window owned by the coordinator.
     var body: some Scene {
-        Settings { EmptyView() }
+        Settings {
+            NativeSettingsWindowView(
+                preferences: appDelegate.preferences,
+                showDiagnostics: { appDelegate.showDiagnostics() }
+            )
+        }
     }
 }
 
@@ -19,7 +23,7 @@ final class CodexMonitorAppDelegate: NSObject, NSApplicationDelegate {
     private let runtime = MonitorRuntimeStore()
     private lazy var driver = CodexLocalMonitorDriver(runtime: runtime)
     private let model = MonitorAppModel()
-    private let preferences = MonitorPreferences()
+    let preferences = MonitorPreferences()
     private var surfaces: MonitorSurfaceCoordinator?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -46,6 +50,10 @@ final class CodexMonitorAppDelegate: NSObject, NSApplicationDelegate {
         // This is a safe UI-level request to resume the existing snapshot
         // observation bridge; it does not touch local sources from UI.
         model.startObserving(runtime)
+    }
+
+    func showDiagnostics() {
+        surfaces?.showDiagnostics()
     }
 
     private func startSmokeExitIfRequested() {

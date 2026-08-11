@@ -47,38 +47,73 @@ struct VisualEffectView: NSViewRepresentable {
     }
 }
 
-/// Native material contained by the exact surface geometry. It deliberately
-/// does not turn ordinary content windows into stacks of glass cards.
+enum LiquidGlassLevel { case persistent, floating }
+
+/// macOS 26 uses the real Liquid Glass compositor. Older supported systems use
+/// one restrained NSVisualEffectView fallback rather than a hand-made blur,
+/// beige fill, border, and shadow imitation.
 struct GlassSurface<Content: View>: View {
     let cornerRadius: CGFloat
     let shadow: Bool
+    let level: LiquidGlassLevel
     @ViewBuilder let content: Content
-    @Environment(\.colorScheme) private var colorScheme
     @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
 
-    init(cornerRadius: CGFloat = 22, shadow: Bool = true, @ViewBuilder content: () -> Content) {
+    init(cornerRadius: CGFloat = 22, shadow: Bool = true, level: LiquidGlassLevel = .floating, @ViewBuilder content: () -> Content) {
         self.cornerRadius = cornerRadius
         self.shadow = shadow
+        self.level = level
         self.content = content()
     }
 
+    private var shape: RoundedRectangle { RoundedRectangle(cornerRadius: cornerRadius, style: .continuous) }
+
+    @ViewBuilder
     var body: some View {
-        content
-            .background {
-                if reduceTransparency {
-                    RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                        .fill(Color(nsColor: .windowBackgroundColor))
-                } else {
-                    VisualEffectView(material: .hudWindow, blendingMode: .behindWindow, state: .active)
-                        .overlay(Color(nsColor: .windowBackgroundColor).opacity(colorScheme == .dark ? 0.10 : 0.18))
+        if #available(macOS 26.0, *), !reduceTransparency {
+            GlassEffectContainer(spacing: 0) {
+                content
+                    .glassEffect(level == .persistent ? .clear : .regular, in: shape)
+            }
+        } else {
+            content
+                .background {
+                    if reduceTransparency {
+                        shape.fill(Color(nsColor: .windowBackgroundColor))
+                    } else {
+                        VisualEffectView(material: level == .persistent ? .underWindowBackground : .hudWindow, blendingMode: .behindWindow, state: .active)
+                    }
                 }
-            }
-            .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
-            .overlay {
-                RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                    .strokeBorder(Color.white.opacity(colorScheme == .dark ? 0.18 : 0.48), lineWidth: 0.7)
-            }
-            .shadow(color: shadow ? Color.black.opacity(colorScheme == .dark ? 0.22 : 0.12) : .clear, radius: shadow ? 18 : 0, y: shadow ? 8 : 0)
+                .clipShape(shape)
+                .overlay { shape.strokeBorder(Color.primary.opacity(0.10), lineWidth: 0.5) }
+                .shadow(color: shadow ? Color.black.opacity(0.12) : .clear, radius: shadow ? 14 : 0, y: shadow ? 7 : 0)
+        }
+    }
+}
+
+private struct PersistentGlassCircle: View {
+    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
+    @ViewBuilder var body: some View {
+        if #available(macOS 26.0, *), !reduceTransparency {
+            Circle().fill(.clear).glassEffect(.clear, in: Circle())
+        } else if reduceTransparency {
+            Circle().fill(Color(nsColor: .windowBackgroundColor))
+        } else {
+            Circle().fill(.ultraThinMaterial)
+        }
+    }
+}
+
+private struct PersistentGlassCapsule: View {
+    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
+    @ViewBuilder var body: some View {
+        if #available(macOS 26.0, *), !reduceTransparency {
+            Capsule().fill(.clear).glassEffect(.clear, in: Capsule())
+        } else if reduceTransparency {
+            Capsule().fill(Color(nsColor: .windowBackgroundColor))
+        } else {
+            Capsule().fill(.ultraThinMaterial)
+        }
     }
 }
 
@@ -96,10 +131,9 @@ struct MonitorOrbView: View {
         let ringOpacity = palette.usesBreathing && !reduceMotion && breathing ? 0.98 : (palette.usesBreathing ? 0.62 : 0.88)
 
         ZStack {
-            Circle().fill(.ultraThinMaterial)
-            Circle().fill(Color(nsColor: .windowBackgroundColor).opacity(0.08))
+            PersistentGlassCircle()
             Circle()
-                .stroke(palette.tint.opacity(ringOpacity), lineWidth: ringWidth)
+                .stroke(palette.tint.opacity(ringOpacity), style: StrokeStyle(lineWidth: ringWidth, lineCap: .round))
                 .frame(width: ringDiameter, height: ringDiameter)
             Text(MonitorDisplayValue.orbQuota(snapshot))
                 .font(.system(size: valueSize, weight: .bold))
@@ -109,6 +143,7 @@ struct MonitorOrbView: View {
         }
         .frame(width: size, height: size)
         .clipShape(Circle())
+        .shadow(color: Color.black.opacity(0.12), radius: 10, y: 5)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("Codex \(MonitorDisplayValue.state(snapshot)); remaining quota \(MonitorDisplayValue.orbQuota(snapshot))")
         .accessibilityHint("Click to toggle Quick View. Drag to move. Right click for menu.")
@@ -139,7 +174,7 @@ struct MenuStatusCapsuleView: View {
             dot(color: dotColor(position: 3, snapshot: snapshot, palette: palette), opacity: dotOpacity(position: 3, snapshot: snapshot, animatedOpacity: opacity))
         }
         .frame(width: 48, height: 22)
-        .background(Capsule().fill(Color.black.opacity(0.28)))
+        .background(PersistentGlassCapsule())
         .overlay(Capsule().strokeBorder(Color.white.opacity(0.74), lineWidth: 0.7))
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("Codex Monitor \(MonitorDisplayValue.state(snapshot))")
@@ -215,7 +250,12 @@ struct MonitorDivider: View {
 
 enum MonitorDisplayValue {
     static func availability(_ availability: MonitorDataAvailability?) -> String {
-        availability?.rawValue.uppercased() ?? "UNAVAILABLE"
+        switch availability {
+        case .available: return L10n.tr("value.available")
+        case .stale: return L10n.tr("value.stale")
+        case .unknown: return L10n.unknown
+        case .unavailable, .none: return L10n.unavailable
+        }
     }
 
     static func token(_ snapshot: MonitorRuntimeSnapshot?) -> String {
@@ -248,44 +288,55 @@ enum MonitorDisplayValue {
     }
 
     static func state(_ snapshot: MonitorRuntimeSnapshot?) -> String {
-        guard let snapshot else { return "SOURCE UNAVAILABLE" }
-        if snapshot.sourceHealth[.desktopLocal]?.availability == .unavailable { return "SOURCE UNAVAILABLE" }
-        return snapshot.currentState.rawValue.replacingOccurrences(of: "_", with: " ").capitalized
+        guard let snapshot else { return L10n.tr("state.sourceUnavailable") }
+        if snapshot.sourceHealth[.desktopLocal]?.availability == .unavailable { return L10n.tr("state.sourceUnavailable") }
+        switch snapshot.currentState {
+        case .thinking: return L10n.tr("state.thinking")
+        case .working: return L10n.tr("state.working")
+        case .waitingApproval: return L10n.tr("state.waitingApproval")
+        case .completed: return L10n.tr("state.completed")
+        case .failed: return L10n.tr("state.failed")
+        case .interrupted: return L10n.tr("state.interrupted")
+        case .systemError: return L10n.tr("state.systemError")
+        case .idle: return L10n.tr("state.idle")
+        case .disconnected: return L10n.tr("state.codexUnavailable")
+        case .paused: return L10n.tr("state.paused")
+        }
     }
 
     static func activity(_ snapshot: MonitorRuntimeSnapshot?) -> String {
-        guard let activity = snapshot?.currentActivity else { return "No runtime snapshot" }
+        guard let activity = snapshot?.currentActivity else { return L10n.tr("activity.noSnapshot") }
         switch activity {
-        case .thinking: return "Thinking"
-        case .tool: return "Working"
-        case .fileChange: return "Changing files"
-        case .agentResponse: return "Responding"
-        case .waitingApproval: return "Waiting for confirmation in Codex"
-        case .completed: return "Completed"
-        case .failed: return "Failed"
-        case .interrupted: return "Interrupted"
-        case .systemError: return "System Error"
-        case .idle: return "Idle"
-        case .disconnected: return "Codex unavailable"
+        case .thinking: return L10n.tr("state.thinking")
+        case .tool: return L10n.tr("state.working")
+        case .fileChange: return L10n.tr("activity.changingFiles")
+        case .agentResponse: return L10n.tr("activity.responding")
+        case .waitingApproval: return L10n.tr("activity.waitingConfirmation")
+        case .completed: return L10n.tr("state.completed")
+        case .failed: return L10n.tr("state.failed")
+        case .interrupted: return L10n.tr("state.interrupted")
+        case .systemError: return L10n.tr("state.systemError")
+        case .idle: return L10n.tr("state.idle")
+        case .disconnected: return L10n.tr("state.codexUnavailable")
         }
     }
 
     static func taskTitle(_ snapshot: MonitorRuntimeSnapshot?) -> String {
-        snapshot?.currentThread?.taskTitle ?? "No active session"
+        snapshot?.currentThread?.taskTitle ?? L10n.tr("activity.noSession")
     }
 
     static func modelRuntime(_ snapshot: MonitorRuntimeSnapshot?) -> String {
-        let model = snapshot?.currentThread?.model ?? "Model UNKNOWN"
-        guard let since = snapshot?.currentStateSince else { return "\(model) · Runtime UNKNOWN" }
+        let model = snapshot?.currentThread?.model ?? "Model \(L10n.unknown)"
+        guard let since = snapshot?.currentStateSince else { return "\(model) · \(L10n.tr("runtime.unknown"))" }
         let seconds = max(0, Int(Date().timeIntervalSince(since)))
         return "\(model) · Runtime \(duration(seconds))"
     }
 
     static func update(_ snapshot: MonitorRuntimeSnapshot?) -> String {
-        guard let snapshot, snapshot.sourceHealth[.desktopLocal]?.availability == .available else { return "SOURCE UNAVAILABLE" }
+        guard let snapshot, snapshot.sourceHealth[.desktopLocal]?.availability == .available else { return L10n.tr("state.sourceUnavailable") }
         let formatter = DateFormatter()
         formatter.timeStyle = .short
-        return "Updated \(formatter.string(from: snapshot.capturedAt))"
+        return String(format: L10n.tr("update.updated"), formatter.string(from: snapshot.capturedAt))
     }
 
     static func source(_ source: MonitorRuntimeSource) -> String {

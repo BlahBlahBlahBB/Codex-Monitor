@@ -126,18 +126,18 @@ final class FloatingStatusPanelController: NSObject, ObservableObject, NSWindowD
 
     private func makeContextMenu() -> NSMenu {
         let menu = NSMenu(title: "Codex Monitor")
-        menu.addItem(withTitle: "Refresh", action: #selector(refresh), keyEquivalent: "") .target = self
-        menu.addItem(withTitle: "Usage", action: #selector(showUsage), keyEquivalent: "") .target = self
-        menu.addItem(withTitle: "Open Codex", action: #selector(openCodex), keyEquivalent: "") .target = self
+        menu.addItem(withTitle: L10n.tr("menu.refresh"), action: #selector(refresh), keyEquivalent: "").target = self
+        menu.addItem(withTitle: L10n.tr("menu.usage"), action: #selector(showUsage), keyEquivalent: "").target = self
+        menu.addItem(withTitle: L10n.tr("menu.openCodex"), action: #selector(openCodex), keyEquivalent: "").target = self
         menu.addItem(.separator())
-        let alwaysOnTop = menu.addItem(withTitle: "Always on Top (Unavailable)", action: nil, keyEquivalent: "")
+        let alwaysOnTop = menu.addItem(withTitle: L10n.tr("menu.alwaysOnTopUnavailable"), action: nil, keyEquivalent: "")
         alwaysOnTop.isEnabled = false
-        let lockPosition = menu.addItem(withTitle: "Lock Position (Unavailable)", action: nil, keyEquivalent: "")
+        let lockPosition = menu.addItem(withTitle: L10n.tr("menu.lockPositionUnavailable"), action: nil, keyEquivalent: "")
         lockPosition.isEnabled = false
-        menu.addItem(withTitle: "Hide Floating Window", action: #selector(hideOrb), keyEquivalent: "") .target = self
+        menu.addItem(withTitle: L10n.tr("menu.hideFloating"), action: #selector(hideOrb), keyEquivalent: "").target = self
         menu.addItem(.separator())
-        menu.addItem(withTitle: "Settings", action: #selector(showSettings), keyEquivalent: "") .target = self
-        menu.addItem(withTitle: "Quit Monitor", action: #selector(quit), keyEquivalent: "") .target = self
+        menu.addItem(withTitle: L10n.tr("menu.settings"), action: #selector(showSettings), keyEquivalent: "").target = self
+        menu.addItem(withTitle: L10n.tr("menu.quitMonitor"), action: #selector(quit), keyEquivalent: "").target = self
         return menu
     }
 
@@ -223,7 +223,7 @@ private struct QuickView: View {
                     .font(.system(size: 12))
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
-                Text("Session Token \(MonitorDisplayValue.token(snapshot)) · Remaining quota \(MonitorDisplayValue.remainingQuota(snapshot))")
+                Text(String(format: L10n.tr("session.tokenQuota"), MonitorDisplayValue.token(snapshot), MonitorDisplayValue.remainingQuota(snapshot)))
                     .font(.system(size: 12, weight: .medium))
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
