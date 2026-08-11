@@ -214,17 +214,35 @@ final class UsageWindowController: ReusableNativeWindowController {
 /// The one Settings surface owner. It is retained for the app lifetime and
 /// closes by ordering out, so every entry point reopens the exact same host.
 @MainActor
-final class SettingsWindowController: ReusableNativeWindowController {
+final class SettingsWindowController: ReusableNativeWindowController, NSWindowDelegate {
     let presentation: SettingsPresentationModel
+    let hostingController: NSHostingController<NativeSettingsWindowView>
+
     init(preferences: MonitorPreferences, showDiagnostics: @escaping () -> Void) {
         let presentation = SettingsPresentationModel()
         let window = Self.makeWindow(size: NSSize(width: 720, height: 500), minSize: NSSize(width: 600, height: 420))
-        window.contentView = NSHostingView(rootView: NativeSettingsWindowView(preferences: preferences, presentation: presentation, showDiagnostics: showDiagnostics))
+        let hostingController = NSHostingController(
+            rootView: NativeSettingsWindowView(
+                preferences: preferences,
+                presentation: presentation,
+                showDiagnostics: showDiagnostics
+            )
+        )
+        window.contentViewController = hostingController
         self.presentation = presentation
+        self.hostingController = hostingController
         super.init(window: window)
+        window.delegate = self
     }
 
     required init?(coder: NSCoder) { nil }
+
+    /// The title-bar close control follows the same order-out path as every
+    /// programmatic close, preserving the retained root and selected section.
+    func windowShouldClose(_ sender: NSWindow) -> Bool {
+        sender.orderOut(nil)
+        return false
+    }
 }
 
 @MainActor

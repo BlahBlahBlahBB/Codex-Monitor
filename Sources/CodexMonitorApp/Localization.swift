@@ -3,12 +3,14 @@ import Foundation
 /// The sole localization boundary for presentation strings. Runtime IDs, model
 /// names, and protocol data remain untouched; only user-facing copy comes here.
 enum L10n {
+    static var resolvedLanguage: String { commandLineLanguageOverride ?? Locale.preferredLanguages.first ?? Locale.current.identifier }
+
     static func tr(_ key: String, languageCode: String? = nil) -> String {
         // SwiftPM writes the directory as `zh-hans.lproj` inside an app
         // bundle, while Locale reports `zh-Hans`. Resolve it explicitly so
         // packaged apps do not silently fall back to development-region copy.
-        let requestedLanguage = languageCode ?? Locale.preferredLanguages.first
-        let localizedBundle = requestedLanguage.flatMap(localizedBundle(for:)) ?? resourceBundle
+        let requestedLanguage = languageCode ?? resolvedLanguage
+        let localizedBundle = localizedBundle(for: requestedLanguage) ?? resourceBundle
         return localizedBundle.localizedString(forKey: key, value: key, table: "Localizable")
     }
 
@@ -24,6 +26,20 @@ enum L10n {
             }
         }
         return nil
+    }
+
+    /// AppKit's manual entry point does not consume `-AppleLanguages` in the
+    /// way SwiftUI's application bootstrap does. Honor that standard launch
+    /// argument here so packaged language QA exercises the exact same bundle
+    /// resolution path as a real system-language launch.
+    private static var commandLineLanguageOverride: String? {
+        let arguments = ProcessInfo.processInfo.arguments
+        guard let index = arguments.firstIndex(of: "-AppleLanguages"), arguments.indices.contains(index + 1) else {
+            return nil
+        }
+        let raw = arguments[index + 1]
+            .trimmingCharacters(in: CharacterSet(charactersIn: "()[]\\\"' "))
+        return raw.split(separator: ",").first.map { String($0).trimmingCharacters(in: .whitespaces) }
     }
 
     private static var resourceBundle: Bundle {
@@ -45,7 +61,7 @@ enum UIBuildDiagnostics {
         let info = Bundle.main.infoDictionary ?? [:]
         let revision = info["UIBuildRevision"] as? String ?? "unversioned"
         let timestamp = info["UIBuildTimestamp"] as? String ?? "unknown"
-        let locale = Locale.preferredLanguages.first ?? Locale.current.identifier
+        let locale = L10n.resolvedLanguage
         let refresh = L10n.tr("menu.refresh")
         let usage = L10n.tr("menu.usage")
         let settings = L10n.tr("menu.settings")

@@ -67,6 +67,11 @@
 "diagnostics.sourceHealth" = "来源健康";
 "diagnostics.capabilities" = "能力";
 "diagnostics.state" = "状态";
+"app.about" = "关于 Codex Monitor";
+"label.cost" = "费用";
+"usage.tooltip" = "%@\nToken：%@\n费用：$--";
+"model.unknown" = "模型 %@";
+"runtime.label" = "运行时间";
 "accessibility.quickView" = "Codex %@。%@";
 "accessibility.orb" = "Codex %@；剩余额度 %@";
 "accessibility.orbHint" = "单击切换速览。拖动可移动。右键打开菜单。";

@@ -74,6 +74,18 @@ final class MonitorProductIntegrationTests: XCTestCase {
         XCTAssertEqual(PopoverActionFeedback.surfaceOpacity(for: .pressed), 0.16)
         XCTAssertEqual(PopoverActionFeedback.surfaceOpacity(for: .keyboardFocus), 0)
         XCTAssertEqual(PopoverActionFeedback.surfaceOpacity(for: .disabled), 0)
+
+        let contextMenuKeys = [
+            "menu.refresh", "menu.usage", "menu.openCodex", "menu.alwaysOnTopUnavailable",
+            "menu.lockPositionUnavailable", "menu.hideFloating", "menu.settings", "menu.quitMonitor"
+        ]
+        let popoverKeys = ["label.account", "label.plan", "label.quota", "label.resetCredit"]
+        let usageKeys = ["label.session", "label.currentSession", "label.sessionToken", "label.tokenUsage", "label.todayToken", "label.last30DaysToken"]
+        let settingsKeys = ["settings.general", "settings.floating", "settings.notifications", "settings.privacy", "settings.advanced", "settings.about"]
+        for key in contextMenuKeys + popoverKeys + usageKeys + settingsKeys {
+            XCTAssertNotEqual(L10n.tr(key, languageCode: "zh-Hans"), key, "missing zh-Hans string: \(key)")
+            XCTAssertNotEqual(L10n.tr(key, languageCode: "en"), key, "missing English string: \(key)")
+        }
     }
 
     func testRestoredFloatingWindowOriginStaysInsideAnAvailableScreen() {
@@ -134,22 +146,64 @@ final class MonitorProductIntegrationTests: XCTestCase {
         defer { defaults.removePersistentDomain(forName: suite) }
         let controller = SettingsWindowController(preferences: MonitorPreferences(defaults: defaults), showDiagnostics: {})
         let root = controller.window?.contentView
+        let host = controller.hostingController
         XCTAssertNotNil(root)
         XCTAssertEqual(controller.presentation.selection, .floating)
 
+        let navigationPath: [SettingsSection] = [.general, .floating, .notifications, .privacy, .advanced, .about, .floating]
         for index in 0..<30 {
             controller.show()
             XCTAssertTrue(controller.window?.isVisible == true, "open cycle \(index)")
             XCTAssertTrue(controller.window?.contentView === root, "root replacement on cycle \(index)")
-            controller.presentation.selection = SettingsSection.allCases[index % SettingsSection.allCases.count]
-            XCTAssertNotNil(controller.window?.contentView, "missing detail host on cycle \(index)")
+            XCTAssertTrue(controller.hostingController === host, "host replacement on cycle \(index)")
+            for section in navigationPath {
+                controller.presentation.selection = section
+                XCTAssertEqual(controller.presentation.selection, section, "lost selection at \(section) in cycle \(index)")
+                XCTAssertNotNil(controller.window?.contentView, "missing detail host at \(section) in cycle \(index)")
+            }
             controller.close()
             XCTAssertFalse(controller.window?.isVisible == true, "close cycle \(index)")
+        }
+
+        // Popover and context-menu actions both route to the same canonical
+        // controller. Repeat the lifecycle they exercise without creating a
+        // second Settings surface.
+        for entry in ["popover", "contextMenu"] {
+            for index in 0..<10 {
+                controller.show()
+                XCTAssertTrue(controller.window?.contentView === root, "\(entry) root \(index)")
+                XCTAssertTrue(controller.hostingController === host, "\(entry) host \(index)")
+                controller.close()
+            }
         }
         controller.show()
         XCTAssertTrue(controller.window?.isVisible == true)
         XCTAssertTrue(controller.window?.contentView === root)
+        XCTAssertFalse(controller.windowShouldClose(controller.window!))
+        XCTAssertFalse(controller.window?.isVisible == true)
         controller.close()
+    }
+
+    func testMenuLightPresentationUsesOneActiveDotForNonIdleStates() {
+        XCTAssertEqual(MenuLightPresentation.dots(for: .idle, desktopAvailable: true), [.idle, .idle, .idle])
+        XCTAssertEqual(MenuLightPresentation.dots(for: .completed, desktopAvailable: true), [.idle, .idle, .idle])
+        XCTAssertEqual(MenuLightPresentation.dots(for: .working, desktopAvailable: true), [.init(tone: .green, breathes: true), .inactive, .inactive])
+        XCTAssertEqual(MenuLightPresentation.dots(for: .thinking, desktopAvailable: true), [.init(tone: .green, breathes: true), .inactive, .inactive])
+        XCTAssertEqual(MenuLightPresentation.dots(for: .waitingApproval, desktopAvailable: true), [.inactive, .init(tone: .yellow, breathes: true), .inactive])
+        XCTAssertEqual(MenuLightPresentation.dots(for: .failed, desktopAvailable: true), [.inactive, .inactive, .init(tone: .red, breathes: false)])
+        XCTAssertEqual(MenuLightPresentation.dots(for: .interrupted, desktopAvailable: true), [.inactive, .inactive, .init(tone: .red, breathes: false)])
+        XCTAssertEqual(MenuLightPresentation.dots(for: .disconnected, desktopAvailable: true), [.inactive, .inactive, .inactive])
+        XCTAssertEqual(MenuLightPresentation.dots(for: .paused, desktopAvailable: true), [.inactive, .inactive, .inactive])
+        XCTAssertEqual(MenuLightPresentation.dots(for: .working, desktopAvailable: false), [.inactive, .inactive, .inactive])
+    }
+
+    func testUsageHoverPresentationAndInvalidEpochSuppression() {
+        let zero = AccountUsageDailyBucket(startDate: "2026-08-11", tokens: 0)
+        XCTAssertTrue(UsagePresentation.tooltip(for: zero, languageCode: "en").contains("Token: 0 Token"))
+        XCTAssertTrue(UsagePresentation.tooltip(for: zero, languageCode: "zh-Hans").contains("Token：0 Token"))
+        XCTAssertEqual(UsagePresentation.resetTime(Date(timeIntervalSince1970: 1_380), languageCode: "en"), "Unavailable")
+        XCTAssertEqual(UsagePresentation.resetTime(Date(timeIntervalSince1970: 1_380), languageCode: "zh-Hans"), "不可用")
+        XCTAssertNotEqual(UsagePresentation.resetTime(Date(timeIntervalSince1970: 1_800_000_000), languageCode: "en"), "Unavailable")
     }
 
     func testAccountUsageProviderMapsAuthoritativeReadShapesAndQuotaRemaining() async throws {

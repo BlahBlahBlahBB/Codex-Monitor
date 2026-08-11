@@ -141,8 +141,7 @@ struct UsageWindowView: View {
 
     private func resetTime(_ snapshot: MonitorRuntimeSnapshot?) -> String {
         let windows = [snapshot?.quota.primary, snapshot?.quota.secondary]
-        guard let date = windows.compactMap({ $0?.resetsAt }).min() else { return L10n.unknown }
-        return date.formatted(date: .abbreviated, time: .shortened)
+        return UsagePresentation.resetTime(windows.compactMap { $0?.resetsAt }.min())
     }
 }
 
@@ -207,7 +206,7 @@ private struct UsageHistoryChart: View {
                 let peak = max(1, buckets.map(\.tokens).max() ?? 0)
                 HStack(alignment: .bottom, spacing: 3) {
                     ForEach(buckets) { bucket in
-                        Capsule().fill(Color.accentColor.opacity(0.58)).frame(maxWidth: .infinity).frame(height: max(3, CGFloat(bucket.tokens) / CGFloat(peak) * 22))
+                        UsageDayBar(bucket: bucket, peak: peak)
                     }
                 }
                 .frame(height: 22, alignment: .bottom)
@@ -222,6 +221,60 @@ private struct UsageHistoryChart: View {
         .padding(.top, 4)
         .accessibilityElement(children: .combine)
         .accessibilityLabel(buckets == nil ? L10n.tr("usage.historyUnavailable") : L10n.tr("label.last30CalendarDays"))
+    }
+}
+
+private struct UsageDayBar: View {
+    let bucket: AccountUsageDailyBucket
+    let peak: Int
+    @State private var hovered = false
+
+    var body: some View {
+        Capsule()
+            .fill(Color.accentColor.opacity(hovered ? 0.88 : 0.58))
+            .overlay {
+                Capsule().strokeBorder(Color.white.opacity(hovered ? 0.58 : 0), lineWidth: 0.7)
+            }
+            .frame(maxWidth: .infinity)
+            .frame(height: max(3, CGFloat(bucket.tokens) / CGFloat(peak) * 22))
+            .contentShape(Rectangle())
+            .onHover { hovered = $0 }
+            .help(UsagePresentation.tooltip(for: bucket))
+            .accessibilityLabel(UsagePresentation.tooltip(for: bucket))
+            .animation(.easeInOut(duration: 0.14), value: hovered)
+    }
+}
+
+enum UsagePresentation {
+    /// A reset date before modern Codex account service dates is a decoded
+    /// epoch/default value, not user-facing reset information.
+    private static let earliestValidReset = Date(timeIntervalSince1970: 1_577_836_800) // 2020-01-01 UTC
+
+    static func resetTime(_ date: Date?, languageCode: String? = nil) -> String {
+        guard let date, date >= earliestValidReset else {
+            return L10n.tr("value.unavailable", languageCode: languageCode)
+        }
+        return date.formatted(date: .abbreviated, time: .shortened)
+    }
+
+    static func tooltip(for bucket: AccountUsageDailyBucket, languageCode: String? = nil) -> String {
+        String(
+            format: L10n.tr("usage.tooltip", languageCode: languageCode),
+            displayDate(bucket.startDate, languageCode: languageCode),
+            MonitorDisplayValue.tokenFormat(Int64(bucket.tokens))
+        )
+    }
+
+    private static func displayDate(_ raw: String, languageCode: String?) -> String {
+        let parser = DateFormatter()
+        parser.locale = Locale(identifier: "en_US_POSIX")
+        parser.calendar = Calendar(identifier: .gregorian)
+        parser.timeZone = TimeZone(secondsFromGMT: 0)
+        parser.dateFormat = "yyyy-MM-dd"
+        guard let date = parser.date(from: raw) else { return raw }
+        return date.formatted(
+            .dateTime.year().month(.abbreviated).day().locale(Locale(identifier: languageCode ?? Locale.preferredLanguages.first ?? "en"))
+        )
     }
 }
 
@@ -262,16 +315,19 @@ struct NativeSettingsWindowView: View {
     let showDiagnostics: () -> Void
 
     var body: some View {
-        NavigationSplitView {
+        HStack(spacing: 0) {
             List(selection: $presentation.selection) {
                 ForEach(SettingsSection.allCases) { section in
                     Label(section.title, systemImage: section.symbol).tag(section)
                 }
             }
             .listStyle(.sidebar)
-            .navigationSplitViewColumnWidth(min: 180, ideal: 200, max: 220)
-        } detail: {
+            .frame(minWidth: 180, idealWidth: 200, maxWidth: 220)
+
+            Divider()
+
             settingsDetail(for: presentation.selection)
+                .id(presentation.selection)
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
                 .background(Color(nsColor: .windowBackgroundColor))
         }

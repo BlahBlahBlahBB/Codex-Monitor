@@ -1,5 +1,6 @@
 import AppKit
 import Foundation
+import CodexMonitorContracts
 
 /// Small, presentation-only ownership guard. A surface remains owned while its
 /// reusable controller exists, including when its native window is hidden.
@@ -44,6 +45,34 @@ enum PopoverActionFeedback {
         // Native keyboard focus owns its system focus indication. Do not add
         // a mouse-rest blue outline underneath it.
         case .keyboardFocus, .disabled: 0
+        }
+    }
+}
+
+enum MenuLightTone: Equatable {
+    case green, yellow, red, inactive
+}
+
+struct MenuLightPresentation: Equatable {
+    let tone: MenuLightTone
+    let breathes: Bool
+
+    static let inactive = Self(tone: .inactive, breathes: false)
+    static let idle = Self(tone: .green, breathes: false)
+
+    static func dots(for state: MonitorRuntimeState?, desktopAvailable: Bool) -> [Self] {
+        guard desktopAvailable, let state else { return Array(repeating: inactive, count: 3) }
+        switch state {
+        case .idle, .completed:
+            return Array(repeating: idle, count: 3)
+        case .working, .thinking:
+            return [Self(tone: .green, breathes: true), inactive, inactive]
+        case .waitingApproval:
+            return [inactive, Self(tone: .yellow, breathes: true), inactive]
+        case .failed, .interrupted, .systemError:
+            return [inactive, inactive, Self(tone: .red, breathes: false)]
+        case .disconnected, .paused:
+            return Array(repeating: inactive, count: 3)
         }
     }
 }

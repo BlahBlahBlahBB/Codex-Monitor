@@ -95,11 +95,20 @@ private struct PersistentGlassCircle: View {
     @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
     @ViewBuilder var body: some View {
         if #available(macOS 26.0, *), !reduceTransparency {
-            Circle().fill(.clear).glassEffect(.clear, in: Circle())
+            Circle()
+                .fill(.clear)
+                .glassEffect(.regular, in: Circle())
+                .overlay {
+                    Circle().strokeBorder(Color.white.opacity(0.42), lineWidth: 0.8)
+                }
         } else if reduceTransparency {
             Circle().fill(Color(nsColor: .windowBackgroundColor))
         } else {
-            Circle().fill(.ultraThinMaterial)
+            Circle()
+                .fill(.ultraThinMaterial)
+                .overlay {
+                    Circle().strokeBorder(Color.white.opacity(0.40), lineWidth: 0.8)
+                }
         }
     }
 }
@@ -135,6 +144,11 @@ struct MonitorOrbView: View {
             Circle()
                 .stroke(palette.tint.opacity(ringOpacity), style: StrokeStyle(lineWidth: ringWidth, lineCap: .round))
                 .frame(width: ringDiameter, height: ringDiameter)
+                .overlay {
+                    Circle()
+                        .strokeBorder(Color.white.opacity(0.20), lineWidth: 0.7)
+                        .frame(width: ringDiameter, height: ringDiameter)
+                }
             Text(MonitorDisplayValue.orbQuota(snapshot))
                 .font(.system(size: valueSize, weight: .bold))
                 .monospacedDigit()
@@ -166,55 +180,43 @@ struct MenuStatusCapsuleView: View {
 
     var body: some View {
         let snapshot = model.snapshot
-        let palette = MonitorVisualPalette.forSnapshot(snapshot)
-        let opacity = palette.usesBreathing && !reduceMotion && breathing ? 1.0 : (palette.usesBreathing ? 0.58 : 0.9)
+        let dots = MenuLightPresentation.dots(
+            for: snapshot?.currentState,
+            desktopAvailable: snapshot?.sourceHealth[.desktopLocal]?.availability == .available
+        )
         HStack(spacing: 5) {
-            dot(color: dotColor(position: 1, snapshot: snapshot, palette: palette), opacity: dotOpacity(position: 1, snapshot: snapshot, animatedOpacity: opacity))
-            dot(color: dotColor(position: 2, snapshot: snapshot, palette: palette), opacity: dotOpacity(position: 2, snapshot: snapshot, animatedOpacity: opacity))
-            dot(color: dotColor(position: 3, snapshot: snapshot, palette: palette), opacity: dotOpacity(position: 3, snapshot: snapshot, animatedOpacity: opacity))
+            ForEach(Array(dots.enumerated()), id: \.offset) { _, dot in
+                dotView(dot)
+            }
         }
         .frame(width: 48, height: 22)
         .background(PersistentGlassCapsule())
         .overlay(Capsule().strokeBorder(Color.white.opacity(0.74), lineWidth: 0.7))
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(String(format: L10n.tr("accessibility.menuStatus"), MonitorDisplayValue.state(snapshot)))
-        .onAppear { breathing = palette.usesBreathing && !reduceMotion }
-        .onChange(of: reduceMotion) { value in breathing = palette.usesBreathing && !value }
-        .onChange(of: palette.usesBreathing) { value in breathing = value && !reduceMotion }
+        .onAppear { breathing = dots.contains(where: \.breathes) && !reduceMotion }
+        .onChange(of: reduceMotion) { value in breathing = dots.contains(where: \.breathes) && !value }
+        .onChange(of: dots) { value in breathing = value.contains(where: \.breathes) && !reduceMotion }
         .animation(
-            palette.usesBreathing && !reduceMotion
+            dots.contains(where: \.breathes) && !reduceMotion
                 ? .easeInOut(duration: 0.8).repeatForever(autoreverses: true)
                 : .easeOut(duration: 0.18),
             value: breathing
         )
     }
 
-    private func dot(color: Color, opacity: Double) -> some View {
-        Circle().fill(color.opacity(opacity)).frame(width: 7, height: 7)
-    }
-
-    private func dotColor(position: Int, snapshot: MonitorRuntimeSnapshot?, palette: MonitorVisualPalette) -> Color {
-        guard let snapshot,
-              snapshot.sourceHealth[.desktopLocal]?.availability != .unavailable else { return Color(nsColor: .systemGray) }
-        switch snapshot.currentState {
-        case .waitingApproval: return position == 2 ? palette.tint : Color(nsColor: .systemGray)
-        case .failed, .interrupted, .systemError: return position == 3 ? palette.tint : Color(nsColor: .systemGray)
-        case .thinking, .working: return position == 1 ? palette.tint : Color(nsColor: .systemGray)
-        case .idle, .completed: return Color(nsColor: .systemGreen)
-        case .disconnected, .paused: return Color(nsColor: .systemGray)
+    private func dotView(_ presentation: MenuLightPresentation) -> some View {
+        let activeOpacity = presentation.breathes && !reduceMotion ? (breathing ? 1.0 : 0.58) : 0.90
+        let tone: Color
+        switch presentation.tone {
+        case .green: tone = Color(nsColor: .systemGreen)
+        case .yellow: tone = Color(nsColor: .systemYellow)
+        case .red: tone = Color(nsColor: .systemRed)
+        case .inactive: tone = Color(nsColor: .tertiaryLabelColor)
         }
-    }
-
-    private func dotOpacity(position: Int, snapshot: MonitorRuntimeSnapshot?, animatedOpacity: Double) -> Double {
-        guard let state = snapshot?.currentState else { return 0.9 }
-        switch state {
-        case .thinking where position == 1,
-             .working where position == 1,
-             .waitingApproval where position == 2:
-            return animatedOpacity
-        default:
-            return 0.9
-        }
+        return Circle()
+            .fill(tone.opacity(presentation.tone == .inactive ? 0.32 : activeOpacity))
+            .frame(width: 7, height: 7)
     }
 }
 
@@ -378,10 +380,10 @@ enum MonitorDisplayValue {
     }
 
     static func modelRuntime(_ snapshot: MonitorRuntimeSnapshot?) -> String {
-        let model = snapshot?.currentThread?.model ?? "Model \(L10n.unknown)"
+        let model = snapshot?.currentThread?.model ?? String(format: L10n.tr("model.unknown"), L10n.unknown)
         guard let since = snapshot?.currentStateSince else { return "\(model) · \(L10n.tr("runtime.unknown"))" }
         let seconds = max(0, Int(Date().timeIntervalSince(since)))
-        return "\(model) · Runtime \(duration(seconds))"
+        return "\(model) · \(L10n.tr("runtime.label")) \(duration(seconds))"
     }
 
     static func update(_ snapshot: MonitorRuntimeSnapshot?) -> String {
