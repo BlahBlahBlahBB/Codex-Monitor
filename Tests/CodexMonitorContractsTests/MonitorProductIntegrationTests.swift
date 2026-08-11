@@ -18,6 +18,13 @@ final class MonitorProductIntegrationTests: XCTestCase {
         preferences.showOrb = false
         preferences.showUsageMenu = false
         preferences.showSettingsMenu = false
+        preferences.alwaysOnTop = false
+        preferences.lockPosition = true
+        preferences.pauseMonitoring = true
+        preferences.waitingApprovalNotifications = true
+        preferences.taskCompletedNotifications = true
+        preferences.hideAccountInfo = true
+        preferences.interfaceLanguage = .english
         preferences.orbSize = 240
         preferences.orbOrigin = CGPoint(x: 225, y: 340)
         preferences.flushPersistence()
@@ -26,6 +33,13 @@ final class MonitorProductIntegrationTests: XCTestCase {
         XCTAssertFalse(restored.showOrb)
         XCTAssertFalse(restored.showUsageMenu)
         XCTAssertFalse(restored.showSettingsMenu)
+        XCTAssertFalse(restored.alwaysOnTop)
+        XCTAssertTrue(restored.lockPosition)
+        XCTAssertTrue(restored.pauseMonitoring)
+        XCTAssertTrue(restored.waitingApprovalNotifications)
+        XCTAssertTrue(restored.taskCompletedNotifications)
+        XCTAssertTrue(restored.hideAccountInfo)
+        XCTAssertEqual(restored.interfaceLanguage, .english)
         XCTAssertEqual(restored.orbSize, 180)
         XCTAssertEqual(restored.orbOrigin, CGPoint(x: 225, y: 340))
     }
@@ -144,7 +158,7 @@ final class MonitorProductIntegrationTests: XCTestCase {
         let suite = "CodexMonitorTests.settings.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suite)!
         defer { defaults.removePersistentDomain(forName: suite) }
-        let controller = SettingsWindowController(preferences: MonitorPreferences(defaults: defaults), showDiagnostics: {})
+        let controller = SettingsWindowController(preferences: MonitorPreferences(defaults: defaults), actions: testSettingsActions())
         let root = controller.window?.contentView
         let host = controller.hostingController
         XCTAssertNotNil(root)
@@ -184,17 +198,31 @@ final class MonitorProductIntegrationTests: XCTestCase {
         controller.close()
     }
 
-    func testMenuLightPresentationUsesOneActiveDotForNonIdleStates() {
-        XCTAssertEqual(MenuLightPresentation.dots(for: .idle, desktopAvailable: true), [.idle, .idle, .idle])
-        XCTAssertEqual(MenuLightPresentation.dots(for: .completed, desktopAvailable: true), [.idle, .idle, .idle])
-        XCTAssertEqual(MenuLightPresentation.dots(for: .working, desktopAvailable: true), [.init(tone: .green, breathes: true), .inactive, .inactive])
-        XCTAssertEqual(MenuLightPresentation.dots(for: .thinking, desktopAvailable: true), [.init(tone: .green, breathes: true), .inactive, .inactive])
-        XCTAssertEqual(MenuLightPresentation.dots(for: .waitingApproval, desktopAvailable: true), [.inactive, .init(tone: .yellow, breathes: true), .inactive])
-        XCTAssertEqual(MenuLightPresentation.dots(for: .failed, desktopAvailable: true), [.inactive, .inactive, .init(tone: .red, breathes: false)])
-        XCTAssertEqual(MenuLightPresentation.dots(for: .interrupted, desktopAvailable: true), [.inactive, .inactive, .init(tone: .red, breathes: false)])
-        XCTAssertEqual(MenuLightPresentation.dots(for: .disconnected, desktopAvailable: true), [.inactive, .inactive, .inactive])
-        XCTAssertEqual(MenuLightPresentation.dots(for: .paused, desktopAvailable: true), [.inactive, .inactive, .inactive])
-        XCTAssertEqual(MenuLightPresentation.dots(for: .working, desktopAvailable: false), [.inactive, .inactive, .inactive])
+    func testVisualStatePresentationIsTheExactSingleSurfaceMatrix() {
+        XCTAssertEqual(VisualStatePresentation.forState(.idle), .init(dots: [.green, .green, .green], orbTone: .green, breathes: false, stateTextKey: "state.idle"))
+        XCTAssertEqual(VisualStatePresentation.forState(.completed).orbTone, .green)
+        XCTAssertEqual(VisualStatePresentation.forState(.working), .init(dots: [.init(tone: .green, breathes: true), .inactive, .inactive], orbTone: .blue, breathes: true, stateTextKey: "state.working"))
+        XCTAssertEqual(VisualStatePresentation.forState(.thinking).orbTone, .blue)
+        XCTAssertEqual(VisualStatePresentation.forState(.waitingApproval), .init(dots: [.inactive, .init(tone: .yellow, breathes: true), .inactive], orbTone: .yellow, breathes: true, stateTextKey: "state.waitingApproval"))
+        for state in [MonitorRuntimeState.failed, .interrupted, .systemError] {
+            XCTAssertEqual(VisualStatePresentation.forState(state).dots, [.inactive, .inactive, .init(tone: .red, breathes: false)])
+            XCTAssertEqual(VisualStatePresentation.forState(state).orbTone, .red)
+        }
+        XCTAssertEqual(VisualStatePresentation.forState(.disconnected).orbTone, .gray)
+        XCTAssertEqual(VisualStatePresentation.forState(.paused).dots.map(\.tone), [.gray, .gray, .gray])
+        XCTAssertEqual(VisualStatePresentation.unavailable.orbTone, .gray)
+    }
+
+    func testPopoverAnchorUsesOnlyCurrentGeometryAcrossRepeatedReopen() {
+        let visible = CGRect(x: 0, y: 0, width: 1_200, height: 800)
+        for index in 0..<50 {
+            let anchor = CGRect(x: index.isMultiple(of: 2) ? 10 : 1_160, y: 760, width: 48, height: 22)
+            let frame = PopoverAnchorLayout.frame(anchor: anchor, contentSize: CGSize(width: 340, height: 350), visibleFrame: visible)
+            XCTAssertGreaterThanOrEqual(frame.minX, 8)
+            XCTAssertLessThanOrEqual(frame.maxX, visible.maxX - 8)
+            XCTAssertGreaterThanOrEqual(frame.minY, 8)
+            XCTAssertEqual(frame.midX, min(max(anchor.midX, frame.width / 2 + 8), visible.maxX - frame.width / 2 - 8), accuracy: 0.001)
+        }
     }
 
     func testUsageHoverPresentationAndInvalidEpochSuppression() {
@@ -204,6 +232,14 @@ final class MonitorProductIntegrationTests: XCTestCase {
         XCTAssertEqual(UsagePresentation.resetTime(Date(timeIntervalSince1970: 1_380), languageCode: "en"), "Unavailable")
         XCTAssertEqual(UsagePresentation.resetTime(Date(timeIntervalSince1970: 1_380), languageCode: "zh-Hans"), "不可用")
         XCTAssertNotEqual(UsagePresentation.resetTime(Date(timeIntervalSince1970: 1_800_000_000), languageCode: "en"), "Unavailable")
+    }
+
+    func testUsageChartPointerMappingAndZeroDayTooltip() {
+        let buckets = (0..<30).map { AccountUsageDailyBucket(startDate: String(format: "2026-08-%02d", $0 + 1), tokens: $0 == 0 ? 0 : $0) }
+        XCTAssertEqual(UsagePresentation.bucket(closestTo: 0, plotWidth: 300, buckets: buckets)?.startDate, "2026-08-01")
+        XCTAssertEqual(UsagePresentation.bucket(closestTo: 299, plotWidth: 300, buckets: buckets)?.startDate, "2026-08-30")
+        XCTAssertTrue(UsagePresentation.tooltip(for: buckets[0], languageCode: "en").contains("Token: 0 Token"))
+        XCTAssertTrue(UsagePresentation.axisDate("2026-08-01", languageCode: "en").contains("Aug 1"))
     }
 
     func testAccountUsageProviderMapsAuthoritativeReadShapesAndQuotaRemaining() async throws {
@@ -234,5 +270,11 @@ final class MonitorProductIntegrationTests: XCTestCase {
         let snapshot = await runtime.snapshot()
         XCTAssertEqual(MonitorDisplayValue.orbQuota(snapshot), "30%")
         XCTAssertEqual(MonitorDisplayValue.todayUsage(snapshot), "45 Token")
+    }
+
+    private func testSettingsActions() -> SettingsSystemActions {
+        SettingsSystemActions(
+            refresh: {}, openCodex: {}, openLogsFolder: {}, setMonitoringPaused: { _ in }, requestNotificationPermission: { _ in }, loginItem: LoginItemController(), showDiagnostics: {}
+        )
     }
 }

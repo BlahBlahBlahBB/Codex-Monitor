@@ -56,7 +56,7 @@ final class FloatingStatusPanelController: NSObject, ObservableObject, NSWindowD
             backing: .buffered,
             defer: false
         )
-        quick.level = .floating
+        quick.level = preferences?.alwaysOnTop == true ? .floating : .normal
         quick.isOpaque = false
         quick.backgroundColor = .clear
         quick.hasShadow = false
@@ -99,7 +99,7 @@ final class FloatingStatusPanelController: NSObject, ObservableObject, NSWindowD
             backing: .buffered,
             defer: false
         )
-        panel.level = .floating
+        panel.level = preferences.alwaysOnTop ? .floating : .normal
         panel.isOpaque = FloatingOrbSurfaceConfiguration.isOpaque
         panel.backgroundColor = .clear
         panel.hasShadow = FloatingOrbSurfaceConfiguration.hasPanelShadow
@@ -121,6 +121,8 @@ final class FloatingStatusPanelController: NSObject, ObservableObject, NSWindowD
 
     private func applyPreferences() {
         guard let panel, let preferences else { return }
+        panel.level = preferences.alwaysOnTop ? .floating : .normal
+        panel.isMovableByWindowBackground = !preferences.lockPosition
         let size = MonitorPreferences.clampedSize(preferences.orbSize)
         let screenFrames = NSScreen.screens.map(\.visibleFrame)
         let origin: CGPoint
@@ -170,10 +172,12 @@ final class FloatingStatusPanelController: NSObject, ObservableObject, NSWindowD
         menu.addItem(withTitle: L10n.tr("menu.usage"), action: #selector(showUsage), keyEquivalent: "").target = self
         menu.addItem(withTitle: L10n.tr("menu.openCodex"), action: #selector(openCodex), keyEquivalent: "").target = self
         menu.addItem(.separator())
-        let alwaysOnTop = menu.addItem(withTitle: L10n.tr("menu.alwaysOnTopUnavailable"), action: nil, keyEquivalent: "")
-        alwaysOnTop.isEnabled = false
-        let lockPosition = menu.addItem(withTitle: L10n.tr("menu.lockPositionUnavailable"), action: nil, keyEquivalent: "")
-        lockPosition.isEnabled = false
+        let alwaysOnTop = menu.addItem(withTitle: L10n.tr("menu.alwaysOnTop"), action: #selector(toggleAlwaysOnTop), keyEquivalent: "")
+        alwaysOnTop.target = self
+        alwaysOnTop.state = preferences?.alwaysOnTop == true ? .on : .off
+        let lockPosition = menu.addItem(withTitle: L10n.tr("menu.lockPosition"), action: #selector(toggleLockPosition), keyEquivalent: "")
+        lockPosition.target = self
+        lockPosition.state = preferences?.lockPosition == true ? .on : .off
         menu.addItem(withTitle: L10n.tr("menu.hideFloating"), action: #selector(hideOrb), keyEquivalent: "").target = self
         menu.addItem(.separator())
         menu.addItem(withTitle: L10n.tr("menu.settings"), action: #selector(showSettings), keyEquivalent: "").target = self
@@ -187,6 +191,8 @@ final class FloatingStatusPanelController: NSObject, ObservableObject, NSWindowD
     @objc private func hideOrb() { actions.toggleOrb() }
     @objc private func showSettings() { actions.showSettings() }
     @objc private func quit() { actions.quit() }
+    @objc private func toggleAlwaysOnTop() { preferences?.alwaysOnTop.toggle() }
+    @objc private func toggleLockPosition() { preferences?.lockPosition.toggle() }
 }
 
 final class OrbHostingView: NSHostingView<FloatingOrbRoot> {
@@ -250,7 +256,7 @@ private struct QuickView: View {
                         .foregroundStyle(.secondary)
                 }
                 HStack(spacing: 6) {
-                    Circle().fill(MonitorVisualPalette.forSnapshot(snapshot).tint).frame(width: 7, height: 7)
+                    Circle().fill(VisualStatePresentation.forSnapshot(snapshot).orbTone.color).frame(width: 7, height: 7)
                     Text(MonitorDisplayValue.state(snapshot))
                         .font(.system(size: 15, weight: .semibold))
                 }

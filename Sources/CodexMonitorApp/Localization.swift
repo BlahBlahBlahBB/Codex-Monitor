@@ -3,7 +3,15 @@ import Foundation
 /// The sole localization boundary for presentation strings. Runtime IDs, model
 /// names, and protocol data remain untouched; only user-facing copy comes here.
 enum L10n {
-    static var resolvedLanguage: String { commandLineLanguageOverride ?? Locale.preferredLanguages.first ?? Locale.current.identifier }
+    private static let interfaceLanguageKey = "monitor.interfaceLanguage"
+
+    static var resolvedLanguage: String {
+        if let selected = InterfaceLanguage(rawValue: UserDefaults.standard.string(forKey: interfaceLanguageKey) ?? ""),
+           let locale = selected.localeIdentifier {
+            return locale
+        }
+        return commandLineLanguageOverride ?? Locale.preferredLanguages.first ?? Locale.current.identifier
+    }
 
     static func tr(_ key: String, languageCode: String? = nil) -> String {
         // SwiftPM writes the directory as `zh-hans.lproj` inside an app

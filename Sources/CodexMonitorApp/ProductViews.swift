@@ -1,3 +1,4 @@
+import Charts
 import SwiftUI
 import CodexMonitorContracts
 
@@ -12,7 +13,7 @@ struct MenuBarPopoverView: View {
             VStack(alignment: .leading, spacing: 0) {
                 // Block 1 — information only.
                 HStack(alignment: .top, spacing: 10) {
-                    Circle().fill(MonitorVisualPalette.forSnapshot(snapshot).tint).frame(width: 8, height: 8).padding(.top, 5)
+                    Circle().fill(VisualStatePresentation.forSnapshot(snapshot).orbTone.color).frame(width: 8, height: 8).padding(.top, 5)
                     VStack(alignment: .leading, spacing: 3) {
                         Text(MonitorDisplayValue.state(snapshot)).font(.system(size: 17, weight: .semibold))
                         Text(MonitorDisplayValue.activity(snapshot)).font(.system(size: 12)).foregroundStyle(.secondary).lineLimit(1)
@@ -25,7 +26,7 @@ struct MenuBarPopoverView: View {
 
                 // Block 2 — information only.
                 VStack(alignment: .leading, spacing: 8) {
-                    MonitorPopoverRow(label: L10n.tr("label.account"), value: MonitorDisplayValue.account(snapshot))
+                    MonitorPopoverRow(label: L10n.tr("label.account"), value: MonitorDisplayValue.account(snapshot, hidden: preferences.hideAccountInfo))
                     MonitorPopoverRow(label: L10n.tr("label.plan"), value: MonitorDisplayValue.plan(snapshot))
                     MonitorPopoverRow(label: L10n.tr("label.quota"), value: MonitorDisplayValue.remainingQuota(snapshot))
                     MonitorPopoverRow(label: L10n.tr("label.resetCredit"), value: MonitorDisplayValue.reset(snapshot))
@@ -109,13 +110,14 @@ private struct MonitorPopoverRow: View {
 
 struct UsageWindowView: View {
     @ObservedObject var model: MonitorAppModel
+    @ObservedObject var preferences: MonitorPreferences
 
     var body: some View {
         let snapshot = model.snapshot
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
                 UsageFactSection(title: L10n.tr("label.account")) {
-                    UsageFactRow(label: L10n.tr("label.account"), value: MonitorDisplayValue.account(snapshot))
+                    UsageFactRow(label: L10n.tr("label.account"), value: MonitorDisplayValue.account(snapshot, hidden: preferences.hideAccountInfo))
                     UsageFactRow(label: L10n.tr("label.plan"), value: MonitorDisplayValue.plan(snapshot))
                 }
                 UsageFactSection(title: L10n.tr("label.session")) {
@@ -198,18 +200,14 @@ private struct UsageMetric: View {
 
 private struct UsageHistoryChart: View {
     let snapshot: MonitorRuntimeSnapshot?
+    @State private var selectedBucket: AccountUsageDailyBucket?
+
     var body: some View {
         let buckets = snapshot?.usage.availability == .available ? snapshot?.usage.usage?.dailyBuckets : nil
         VStack(alignment: .leading, spacing: 8) {
             Text(L10n.tr("label.last30CalendarDays")).font(.system(size: 13, weight: .medium))
             if let buckets {
-                let peak = max(1, buckets.map(\.tokens).max() ?? 0)
-                HStack(alignment: .bottom, spacing: 3) {
-                    ForEach(buckets) { bucket in
-                        UsageDayBar(bucket: bucket, peak: peak)
-                    }
-                }
-                .frame(height: 22, alignment: .bottom)
+                interactiveChart(buckets)
             } else {
                 HStack(alignment: .bottom, spacing: 3) {
                     ForEach(0..<30, id: \.self) { _ in Capsule().fill(Color.secondary.opacity(0.16)).frame(maxWidth: .infinity).frame(height: 3) }
@@ -222,26 +220,70 @@ private struct UsageHistoryChart: View {
         .accessibilityElement(children: .combine)
         .accessibilityLabel(buckets == nil ? L10n.tr("usage.historyUnavailable") : L10n.tr("label.last30CalendarDays"))
     }
+
+    @ViewBuilder
+    private func interactiveChart(_ buckets: [AccountUsageDailyBucket]) -> some View {
+        Chart(buckets) { bucket in
+            BarMark(
+                x: .value("Date", bucket.startDate),
+                y: .value("Token", bucket.tokens)
+            )
+            .foregroundStyle(Color.accentColor.opacity(selectedBucket?.id == bucket.id ? 0.92 : 0.58))
+            .clipShape(RoundedRectangle(cornerRadius: 2, style: .continuous))
+        }
+        .chartXAxis(.hidden)
+        .chartYAxis(.hidden)
+        .chartOverlay { proxy in
+            GeometryReader { geometry in
+                Rectangle().fill(.clear).contentShape(Rectangle())
+                    .onContinuousHover { phase in
+                        switch phase {
+                        case .active(let location):
+                            let plotX = location.x
+                            if let date: String = proxy.value(atX: plotX, as: String.self),
+                               let exact = buckets.first(where: { $0.startDate == date }) {
+                                selectedBucket = exact
+                            } else {
+                                selectedBucket = UsagePresentation.bucket(closestTo: plotX, plotWidth: geometry.size.width, buckets: buckets)
+                            }
+                        case .ended:
+                            selectedBucket = nil
+                        }
+                    }
+                    .overlay(alignment: .topLeading) {
+                        if let selectedBucket {
+                            UsageChartTooltip(bucket: selectedBucket)
+                                .offset(x: UsagePresentation.tooltipOffset(for: selectedBucket, buckets: buckets, width: geometry.size.width))
+                                .allowsHitTesting(false)
+                        }
+                    }
+            }
+        }
+        .frame(height: 164)
+        HStack {
+            Text(UsagePresentation.axisDate(buckets.first?.startDate))
+            Spacer()
+            Text(UsagePresentation.axisDate(buckets.last?.startDate))
+        }
+        .font(.system(size: 11))
+        .foregroundStyle(.secondary)
+        Text(L10n.tr("usage.hoverHint"))
+            .font(.system(size: 12))
+            .foregroundStyle(.secondary)
+    }
 }
 
-private struct UsageDayBar: View {
+private struct UsageChartTooltip: View {
     let bucket: AccountUsageDailyBucket
-    let peak: Int
-    @State private var hovered = false
-
     var body: some View {
-        Capsule()
-            .fill(Color.accentColor.opacity(hovered ? 0.88 : 0.58))
-            .overlay {
-                Capsule().strokeBorder(Color.white.opacity(hovered ? 0.58 : 0), lineWidth: 0.7)
-            }
-            .frame(maxWidth: .infinity)
-            .frame(height: max(3, CGFloat(bucket.tokens) / CGFloat(peak) * 22))
-            .contentShape(Rectangle())
-            .onHover { hovered = $0 }
-            .help(UsagePresentation.tooltip(for: bucket))
-            .accessibilityLabel(UsagePresentation.tooltip(for: bucket))
-            .animation(.easeInOut(duration: 0.14), value: hovered)
+        Text(UsagePresentation.tooltip(for: bucket))
+            .font(.system(size: 11, weight: .medium))
+            .multilineTextAlignment(.leading)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 6)
+            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 7, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: 7, style: .continuous).strokeBorder(Color.primary.opacity(0.12), lineWidth: 0.5))
+            .fixedSize()
     }
 }
 
@@ -263,6 +305,23 @@ enum UsagePresentation {
             displayDate(bucket.startDate, languageCode: languageCode),
             MonitorDisplayValue.tokenFormat(Int64(bucket.tokens))
         )
+    }
+
+    static func bucket(closestTo x: CGFloat, plotWidth: CGFloat, buckets: [AccountUsageDailyBucket]) -> AccountUsageDailyBucket? {
+        guard !buckets.isEmpty, plotWidth > 0 else { return nil }
+        let progress = min(max(x / plotWidth, 0), 0.999_999)
+        return buckets[min(Int(progress * CGFloat(buckets.count)), buckets.count - 1)]
+    }
+
+    static func tooltipOffset(for bucket: AccountUsageDailyBucket, buckets: [AccountUsageDailyBucket], width: CGFloat) -> CGFloat {
+        guard let index = buckets.firstIndex(where: { $0.id == bucket.id }) else { return 0 }
+        let point = (CGFloat(index) + 0.5) / CGFloat(max(1, buckets.count)) * width
+        return min(max(point - 62, 0), max(0, width - 124))
+    }
+
+    static func axisDate(_ raw: String?, languageCode: String? = nil) -> String {
+        guard let raw else { return L10n.unavailable }
+        return displayDate(raw, languageCode: languageCode)
     }
 
     private static func displayDate(_ raw: String, languageCode: String?) -> String {
@@ -309,10 +368,20 @@ final class SettingsPresentationModel: ObservableObject {
     @Published var selection: SettingsSection = .defaultSection
 }
 
+struct SettingsSystemActions {
+    let refresh: () -> Void
+    let openCodex: () -> Void
+    let openLogsFolder: () -> Void
+    let setMonitoringPaused: (Bool) -> Void
+    let requestNotificationPermission: (NotificationPreference) -> Void
+    let loginItem: LoginItemController
+    let showDiagnostics: () -> Void
+}
+
 struct NativeSettingsWindowView: View {
     @ObservedObject var preferences: MonitorPreferences
     @ObservedObject var presentation: SettingsPresentationModel
-    let showDiagnostics: () -> Void
+    let actions: SettingsSystemActions
 
     var body: some View {
         HStack(spacing: 0) {
@@ -338,77 +407,173 @@ struct NativeSettingsWindowView: View {
     private func settingsDetail(for section: SettingsSection) -> some View {
         switch section {
         case .general:
-            UnavailableSettingsDetail(title: section.title, message: L10n.tr("settings.noneGeneral"))
+            GeneralSettingsDetail(preferences: preferences, actions: actions)
         case .floating:
             FloatingSettingsDetail(preferences: preferences)
         case .notifications:
-            UnavailableSettingsDetail(title: section.title, message: L10n.tr("settings.noneNotifications"))
+            NotificationSettingsDetail(preferences: preferences, actions: actions)
         case .privacy:
-            UnavailableSettingsDetail(title: section.title, message: L10n.tr("settings.nonePrivacy"))
+            PrivacySettingsDetail(preferences: preferences)
         case .advanced:
-            AdvancedSettingsDetail(showDiagnostics: showDiagnostics)
+            AdvancedSettingsDetail(actions: actions)
         case .about:
             AboutSettingsDetail()
         }
     }
 }
 
-private struct FloatingSettingsDetail: View {
-    @ObservedObject var preferences: MonitorPreferences
+private struct SettingsDetail<Content: View>: View {
+    let title: String
+    @ViewBuilder let content: Content
     var body: some View {
-        VStack(alignment: .leading, spacing: 18) {
-            Text(L10n.tr("settings.floating")).font(.system(size: 15, weight: .semibold))
-            // Deliberately not a Form: its grouped style inserts an orphan
-            // separator beneath Slider in a system Settings scene.
-            VStack(alignment: .leading, spacing: 16) {
-                Toggle(L10n.tr("settings.showFloating"), isOn: $preferences.showOrb).toggleStyle(.switch)
-                VStack(alignment: .leading, spacing: 8) {
-                    HStack {
-                        Text(L10n.tr("settings.floatingSize"))
-                        Spacer()
-                        Text("\(Int(preferences.orbSize)) pt").foregroundStyle(.secondary).monospacedDigit()
-                    }
-                    Slider(value: $preferences.orbSize, in: 72...180, step: 1)
-                }
-                Toggle(L10n.tr("settings.showUsageMenu"), isOn: $preferences.showUsageMenu).toggleStyle(.switch)
-                Toggle(L10n.tr("settings.showSettingsMenu"), isOn: $preferences.showSettingsMenu).toggleStyle(.switch)
+        ScrollView {
+            VStack(alignment: .leading, spacing: 20) {
+                Text(title).font(.system(size: 15, weight: .semibold))
+                VStack(spacing: 0) { content }
+                    .background(Color(nsColor: .controlBackgroundColor).opacity(0.35), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
             }
+            .padding(20)
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .padding(20)
     }
 }
 
-private struct UnavailableSettingsDetail: View {
+private struct SettingsRow<Control: View>: View {
     let title: String
-    let message: String
+    @ViewBuilder let control: Control
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text(title).font(.system(size: 15, weight: .semibold))
-            Text(message).font(.system(size: 13)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+        HStack(spacing: 16) {
+            Text(title)
+                .font(.system(size: 13))
+                .lineLimit(1)
+                .minimumScaleFactor(0.86)
+                .layoutPriority(1)
+            Spacer(minLength: 16)
+            control
+                .frame(width: 220, alignment: .trailing)
         }
-        .padding(20)
+        .padding(.horizontal, 16)
+        .frame(minHeight: 58)
+        .overlay(alignment: .bottom) { Rectangle().fill(Color.primary.opacity(0.08)).frame(height: 0.5) }
+    }
+}
+
+private struct GeneralSettingsDetail: View {
+    @ObservedObject var preferences: MonitorPreferences
+    let actions: SettingsSystemActions
+    @State private var launchAtLoginError: String?
+
+    var body: some View {
+        SettingsDetail(title: L10n.tr("settings.general")) {
+            SettingsRow(title: L10n.tr("settings.language")) {
+                Picker(L10n.tr("settings.language"), selection: $preferences.interfaceLanguage) {
+                    Text(L10n.tr("settings.followSystem")).tag(InterfaceLanguage.system)
+                    Text(L10n.tr("settings.simplifiedChinese")).tag(InterfaceLanguage.simplifiedChinese)
+                    Text(L10n.tr("settings.english")).tag(InterfaceLanguage.english)
+                }
+                .labelsHidden()
+                .pickerStyle(.menu)
+            }
+            SettingsRow(title: L10n.tr("settings.launchAtLogin")) {
+                Toggle(L10n.tr("settings.launchAtLogin"), isOn: Binding(
+                    get: { actions.loginItem.isEnabled },
+                    set: { enabled in
+                        do { try actions.loginItem.setEnabled(enabled) }
+                        catch { actions.loginItem.reconcile(); launchAtLoginError = error.localizedDescription }
+                    }
+                ))
+                .labelsHidden()
+                .toggleStyle(.switch)
+            }
+        }
+        .alert(L10n.tr("settings.launchAtLogin"), isPresented: Binding(get: { launchAtLoginError != nil }, set: { if !$0 { launchAtLoginError = nil } })) {
+            Button("OK", role: .cancel) { launchAtLoginError = nil }
+        } message: { Text(launchAtLoginError ?? "") }
+    }
+}
+
+private struct FloatingSettingsDetail: View {
+    @ObservedObject var preferences: MonitorPreferences
+    var body: some View {
+        SettingsDetail(title: L10n.tr("settings.floating")) {
+            SettingsRow(title: L10n.tr("settings.showFloating")) { Toggle("", isOn: $preferences.showOrb).labelsHidden().toggleStyle(.switch) }
+            SettingsRow(title: L10n.tr("settings.alwaysOnTop")) { Toggle("", isOn: $preferences.alwaysOnTop).labelsHidden().toggleStyle(.switch) }
+            SettingsRow(title: L10n.tr("settings.lockPosition")) { Toggle("", isOn: $preferences.lockPosition).labelsHidden().toggleStyle(.switch) }
+            SettingsRow(title: L10n.tr("settings.floatingSize")) {
+                HStack(spacing: 10) {
+                    Slider(value: $preferences.orbSize, in: 72...180, step: 1)
+                    Text("\(Int(preferences.orbSize)) pt").foregroundStyle(.secondary).monospacedDigit().frame(width: 48, alignment: .trailing)
+                }
+            }
+            SettingsRow(title: L10n.tr("settings.showUsageMenu")) { Toggle("", isOn: $preferences.showUsageMenu).labelsHidden().toggleStyle(.switch) }
+            SettingsRow(title: L10n.tr("settings.showSettingsMenu")) { Toggle("", isOn: $preferences.showSettingsMenu).labelsHidden().toggleStyle(.switch) }
+        }
+    }
+}
+
+private struct NotificationSettingsDetail: View {
+    @ObservedObject var preferences: MonitorPreferences
+    let actions: SettingsSystemActions
+    var body: some View {
+        SettingsDetail(title: L10n.tr("settings.notifications")) {
+            SettingsRow(title: L10n.tr("settings.pauseMonitoring")) {
+                Toggle("", isOn: Binding(get: { preferences.pauseMonitoring }, set: { preferences.pauseMonitoring = $0; actions.setMonitoringPaused($0) }))
+                    .labelsHidden().toggleStyle(.switch)
+            }
+            SettingsRow(title: L10n.tr("settings.waitingApprovalNotification")) {
+                Toggle("", isOn: notificationBinding(.waitingApproval, preferences: preferences, actions: actions))
+                    .labelsHidden().toggleStyle(.switch)
+            }
+            SettingsRow(title: L10n.tr("settings.taskCompletedNotification")) {
+                Toggle("", isOn: notificationBinding(.taskCompleted, preferences: preferences, actions: actions))
+                    .labelsHidden().toggleStyle(.switch)
+            }
+        }
+    }
+
+    private func notificationBinding(_ preference: NotificationPreference, preferences: MonitorPreferences, actions: SettingsSystemActions) -> Binding<Bool> {
+        Binding(
+            get: { preference == .waitingApproval ? preferences.waitingApprovalNotifications : preferences.taskCompletedNotifications },
+            set: { enabled in
+                if !enabled {
+                    if preference == .waitingApproval { preferences.waitingApprovalNotifications = false }
+                    else { preferences.taskCompletedNotifications = false }
+                } else {
+                    actions.requestNotificationPermission(preference)
+                }
+            }
+        )
+    }
+}
+
+private struct PrivacySettingsDetail: View {
+    @ObservedObject var preferences: MonitorPreferences
+    var body: some View {
+        SettingsDetail(title: L10n.tr("settings.privacy")) {
+            SettingsRow(title: L10n.tr("settings.hideAccountInfo")) { Toggle("", isOn: $preferences.hideAccountInfo).labelsHidden().toggleStyle(.switch) }
+        }
     }
 }
 
 private struct AdvancedSettingsDetail: View {
-    let showDiagnostics: () -> Void
+    let actions: SettingsSystemActions
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text(L10n.tr("settings.advanced")).font(.system(size: 15, weight: .semibold))
-            Text(L10n.tr("settings.advancedDescription")).font(.system(size: 13)).foregroundStyle(.secondary)
-            Button(L10n.tr("settings.openDiagnostics"), action: showDiagnostics).buttonStyle(.bordered)
+        SettingsDetail(title: L10n.tr("settings.advanced")) {
+            SettingsRow(title: L10n.tr("settings.refresh")) { Button(L10n.tr("settings.refresh"), action: actions.refresh).buttonStyle(.bordered) }
+            SettingsRow(title: L10n.tr("settings.openCodex")) { Button(L10n.tr("settings.openCodex"), action: actions.openCodex).buttonStyle(.bordered) }
+            SettingsRow(title: L10n.tr("settings.openLogsFolder")) { Button(L10n.tr("settings.openLogsFolder"), action: actions.openLogsFolder).buttonStyle(.bordered) }
+            SettingsRow(title: L10n.tr("settings.openDiagnostics")) { Button(L10n.tr("settings.openDiagnostics"), action: actions.showDiagnostics).buttonStyle(.bordered) }
         }
-        .padding(20)
     }
 }
 
 private struct AboutSettingsDetail: View {
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text(L10n.tr("settings.about")).font(.system(size: 15, weight: .semibold))
-            Text("Codex Monitor\n\(L10n.tr("about.description"))").font(.system(size: 13)).foregroundStyle(.secondary)
+        SettingsDetail(title: L10n.tr("settings.about")) {
+            SettingsRow(title: L10n.tr("settings.productName")) { Text("Codex Monitor").foregroundStyle(.secondary) }
+            SettingsRow(title: L10n.tr("settings.version")) { Text(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.0").foregroundStyle(.secondary).monospacedDigit() }
+            SettingsRow(title: L10n.tr("settings.build")) { Text(Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "dev").foregroundStyle(.secondary).monospacedDigit() }
         }
-        .padding(20)
     }
 }
 

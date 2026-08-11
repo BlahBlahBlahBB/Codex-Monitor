@@ -2,26 +2,14 @@ import AppKit
 import SwiftUI
 import CodexMonitorContracts
 
-struct MonitorVisualPalette {
-    let tint: Color
-    let usesBreathing: Bool
-
-    static func forSnapshot(_ snapshot: MonitorRuntimeSnapshot?) -> MonitorVisualPalette {
-        guard let snapshot,
-              snapshot.sourceHealth[.desktopLocal]?.availability != .unavailable else {
-            return .init(tint: Color(nsColor: .systemGray), usesBreathing: false)
-        }
-        switch snapshot.currentState {
-        case .thinking, .working:
-            return .init(tint: Color(nsColor: .systemGreen), usesBreathing: true)
-        case .waitingApproval:
-            return .init(tint: Color(nsColor: .systemYellow), usesBreathing: true)
-        case .failed, .interrupted, .systemError:
-            return .init(tint: Color(nsColor: .systemRed), usesBreathing: false)
-        case .completed, .idle:
-            return .init(tint: Color(nsColor: .systemGreen), usesBreathing: false)
-        case .disconnected, .paused:
-            return .init(tint: Color(nsColor: .systemGray), usesBreathing: false)
+extension VisualStateTone {
+    var color: Color {
+        switch self {
+        case .green: Color(nsColor: .systemGreen)
+        case .blue: Color(nsColor: .systemBlue)
+        case .yellow: Color(nsColor: .systemYellow)
+        case .red: Color(nsColor: .systemRed)
+        case .gray, .inactive: Color(nsColor: .tertiaryLabelColor)
         }
     }
 }
@@ -133,16 +121,16 @@ struct MonitorOrbView: View {
     @State private var breathing = false
 
     var body: some View {
-        let palette = MonitorVisualPalette.forSnapshot(snapshot)
+        let presentation = VisualStatePresentation.forSnapshot(snapshot)
         let ringWidth = max(5.6, min(13.5, size * (7 / 90)))
         let ringDiameter = size * 0.90
         let valueSize = max(13, min(30, size * (24 / 90)))
-        let ringOpacity = palette.usesBreathing && !reduceMotion && breathing ? 0.98 : (palette.usesBreathing ? 0.62 : 0.88)
+        let ringOpacity = presentation.breathes && !reduceMotion && breathing ? 0.98 : (presentation.breathes ? 0.62 : 0.88)
 
         ZStack {
             PersistentGlassCircle()
             Circle()
-                .stroke(palette.tint.opacity(ringOpacity), style: StrokeStyle(lineWidth: ringWidth, lineCap: .round))
+                .stroke(presentation.orbTone.color.opacity(ringOpacity), style: StrokeStyle(lineWidth: ringWidth, lineCap: .round))
                 .frame(width: ringDiameter, height: ringDiameter)
                 .overlay {
                     Circle()
@@ -161,11 +149,11 @@ struct MonitorOrbView: View {
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(String(format: L10n.tr("accessibility.orb"), MonitorDisplayValue.state(snapshot), MonitorDisplayValue.orbQuota(snapshot)))
         .accessibilityHint(L10n.tr("accessibility.orbHint"))
-        .onAppear { breathing = palette.usesBreathing && !reduceMotion }
-        .onChange(of: reduceMotion) { value in breathing = palette.usesBreathing && !value }
-        .onChange(of: palette.usesBreathing) { value in breathing = value && !reduceMotion }
+        .onAppear { breathing = presentation.breathes && !reduceMotion }
+        .onChange(of: reduceMotion) { value in breathing = presentation.breathes && !value }
+        .onChange(of: presentation.breathes) { value in breathing = value && !reduceMotion }
         .animation(
-            palette.usesBreathing && !reduceMotion
+            presentation.breathes && !reduceMotion
                 ? .easeInOut(duration: 0.8).repeatForever(autoreverses: true)
                 : .easeOut(duration: 0.18),
             value: breathing
@@ -180,10 +168,8 @@ struct MenuStatusCapsuleView: View {
 
     var body: some View {
         let snapshot = model.snapshot
-        let dots = MenuLightPresentation.dots(
-            for: snapshot?.currentState,
-            desktopAvailable: snapshot?.sourceHealth[.desktopLocal]?.availability == .available
-        )
+        let presentation = VisualStatePresentation.forSnapshot(snapshot)
+        let dots = presentation.dots
         HStack(spacing: 5) {
             ForEach(Array(dots.enumerated()), id: \.offset) { _, dot in
                 dotView(dot)
@@ -205,17 +191,10 @@ struct MenuStatusCapsuleView: View {
         )
     }
 
-    private func dotView(_ presentation: MenuLightPresentation) -> some View {
+    private func dotView(_ presentation: VisualStateDot) -> some View {
         let activeOpacity = presentation.breathes && !reduceMotion ? (breathing ? 1.0 : 0.58) : 0.90
-        let tone: Color
-        switch presentation.tone {
-        case .green: tone = Color(nsColor: .systemGreen)
-        case .yellow: tone = Color(nsColor: .systemYellow)
-        case .red: tone = Color(nsColor: .systemRed)
-        case .inactive: tone = Color(nsColor: .tertiaryLabelColor)
-        }
         return Circle()
-            .fill(tone.opacity(presentation.tone == .inactive ? 0.32 : activeOpacity))
+            .fill(presentation.tone.color.opacity(presentation.tone == .inactive ? 0.32 : activeOpacity))
             .frame(width: 7, height: 7)
     }
 }
@@ -268,8 +247,10 @@ enum MonitorDisplayValue {
         snapshot?.usage.usage?.totalTokens.map { tokenFormat(Int64($0)) } ?? availability(snapshot?.usage.availability)
     }
 
-    static func account(_ snapshot: MonitorRuntimeSnapshot?) -> String {
-        snapshot?.account.accountKind?.capitalized ?? availability(snapshot?.account.availability)
+    static func account(_ snapshot: MonitorRuntimeSnapshot?, hidden: Bool = false) -> String {
+        guard !hidden else { return L10n.tr("value.hidden") }
+        guard let kind = snapshot?.account.accountKind else { return availability(snapshot?.account.availability) }
+        return kind.caseInsensitiveCompare("chatgpt") == .orderedSame ? "ChatGPT" : kind.capitalized
     }
 
     static func plan(_ snapshot: MonitorRuntimeSnapshot?) -> String {
@@ -314,20 +295,7 @@ enum MonitorDisplayValue {
     }
 
     static func state(_ snapshot: MonitorRuntimeSnapshot?) -> String {
-        guard let snapshot else { return L10n.tr("state.sourceUnavailable") }
-        if snapshot.sourceHealth[.desktopLocal]?.availability == .unavailable { return L10n.tr("state.sourceUnavailable") }
-        switch snapshot.currentState {
-        case .thinking: return L10n.tr("state.thinking")
-        case .working: return L10n.tr("state.working")
-        case .waitingApproval: return L10n.tr("state.waitingApproval")
-        case .completed: return L10n.tr("state.completed")
-        case .failed: return L10n.tr("state.failed")
-        case .interrupted: return L10n.tr("state.interrupted")
-        case .systemError: return L10n.tr("state.systemError")
-        case .idle: return L10n.tr("state.idle")
-        case .disconnected: return L10n.tr("state.codexUnavailable")
-        case .paused: return L10n.tr("state.paused")
-        }
+        L10n.tr(VisualStatePresentation.forSnapshot(snapshot).stateTextKey)
     }
 
     static func activity(_ snapshot: MonitorRuntimeSnapshot?) -> String {

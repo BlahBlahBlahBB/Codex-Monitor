@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 import CodexMonitorContracts
 
 @main
@@ -24,6 +25,7 @@ final class CodexMonitorAppDelegate: NSObject, NSApplicationDelegate {
     private let model = MonitorAppModel()
     let preferences = MonitorPreferences()
     private var surfaces: MonitorSurfaceCoordinator?
+    private var languageObserver: AnyCancellable?
 
     func applicationWillFinishLaunching(_ notification: Notification) {
         installApplicationMenu()
@@ -35,18 +37,24 @@ final class CodexMonitorAppDelegate: NSObject, NSApplicationDelegate {
         let surfaces = MonitorSurfaceCoordinator(
             model: model,
             preferences: preferences,
-            refreshMonitoring: { [weak self] in self?.restartObservation() }
+            refreshMonitoring: { [weak self] in self?.restartObservation() },
+            setMonitoringPaused: { [weak self] in self?.setMonitoringPaused($0) }
         )
         self.surfaces = surfaces
         model.startObserving(runtime)
         surfaces.start()
         Task { await driver.start() }
         Task { await accountProvider.start() }
+        if preferences.pauseMonitoring { setMonitoringPaused(true) }
+        languageObserver = preferences.$interfaceLanguage.sink { [weak self] _ in
+            self?.installApplicationMenu()
+        }
         startSmokeExitIfRequested()
     }
 
     func applicationWillTerminate(_ notification: Notification) {
         preferences.flushPersistence()
+        languageObserver?.cancel()
         model.stopObserving()
         surfaces?.stop()
         Task { await driver.stop() }
@@ -57,6 +65,19 @@ final class CodexMonitorAppDelegate: NSObject, NSApplicationDelegate {
         // This is a safe UI-level request to resume the existing snapshot
         // observation bridge; it does not touch local sources from UI.
         model.startObserving(runtime)
+        Task { [weak self] in
+            guard let self else { return }
+            await driver.refreshOnce()
+            await accountProvider.refreshOnce()
+        }
+    }
+
+    private func setMonitoringPaused(_ paused: Bool) {
+        Task { [weak self] in
+            guard let self else { return }
+            await driver.setUserMonitoringPaused(paused)
+            if !paused { await accountProvider.refreshOnce() }
+        }
     }
 
     func showDiagnostics() {

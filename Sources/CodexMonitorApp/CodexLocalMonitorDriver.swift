@@ -61,6 +61,16 @@ public actor CodexLocalMonitorDriver {
         needsBootstrap = true
     }
 
+    /// User-controlled monitoring pause uses the existing runtime pause and
+    /// reconciliation contract. No UI code reaches local sources directly.
+    public func setUserMonitoringPaused(_ paused: Bool) async {
+        suspended = paused
+        await runtime.setPaused(paused)
+        guard !paused else { return }
+        needsBootstrap = true
+        await refreshOnce()
+    }
+
     public func refreshOnce() async {
         guard !suspended else { return }
         if needsBootstrap {

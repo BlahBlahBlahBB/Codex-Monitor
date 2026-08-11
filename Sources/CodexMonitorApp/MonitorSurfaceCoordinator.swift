@@ -10,7 +10,10 @@ final class MonitorSurfaceCoordinator: NSObject {
     private let model: MonitorAppModel
     private let preferences: MonitorPreferences
     private let refreshMonitoring: () -> Void
+    private let setMonitoringPaused: (Bool) -> Void
     private let ownership = MonitorSurfaceOwnership()
+    private let loginItem = LoginItemController()
+    private let notifications = MonitorNotificationController()
     private var preferencesObserver: AnyCancellable?
     private var statusItemController: MonitorStatusItemController?
     private var floatingController: FloatingStatusPanelController?
@@ -18,10 +21,11 @@ final class MonitorSurfaceCoordinator: NSObject {
     private var settingsWindowController: SettingsWindowController?
     private var diagnosticsWindowController: DiagnosticsWindowController?
 
-    init(model: MonitorAppModel, preferences: MonitorPreferences, refreshMonitoring: @escaping () -> Void) {
+    init(model: MonitorAppModel, preferences: MonitorPreferences, refreshMonitoring: @escaping () -> Void, setMonitoringPaused: @escaping (Bool) -> Void) {
         self.model = model
         self.preferences = preferences
         self.refreshMonitoring = refreshMonitoring
+        self.setMonitoringPaused = setMonitoringPaused
     }
 
     func start() {
@@ -39,6 +43,7 @@ final class MonitorSurfaceCoordinator: NSObject {
         statusItemController = MonitorStatusItemController(model: model, preferences: preferences, actions: actions)
         floatingController = FloatingStatusPanelController(actions: actions)
         floatingController?.configure(model: model, preferences: preferences)
+        notifications.start(model: model, preferences: preferences)
 
         preferencesObserver = preferences.objectWillChange.sink { [weak self] _ in
             // Published sends before mutation; schedule after the value lands.
@@ -53,6 +58,7 @@ final class MonitorSurfaceCoordinator: NSObject {
     func stop() {
         preferencesObserver?.cancel()
         preferencesObserver = nil
+        notifications.stop()
         floatingController?.closeAll()
         statusItemController?.invalidate()
         usageWindowController?.close()
@@ -64,7 +70,7 @@ final class MonitorSurfaceCoordinator: NSObject {
     func showUsage() {
         if usageWindowController == nil {
             guard ownership.acquire(.usage) else { return }
-            usageWindowController = UsageWindowController(model: model)
+            usageWindowController = UsageWindowController(model: model, preferences: preferences)
         }
         usageWindowController?.show()
     }
@@ -74,7 +80,18 @@ final class MonitorSurfaceCoordinator: NSObject {
             guard ownership.acquire(.settings) else { return }
             settingsWindowController = SettingsWindowController(
                 preferences: preferences,
-                showDiagnostics: { [weak self] in self?.showDiagnostics() }
+                actions: SettingsSystemActions(
+                    refresh: { [weak self] in self?.refreshMonitoring() },
+                    openCodex: { [weak self] in self?.openCodex() },
+                    openLogsFolder: Self.openLogsFolder,
+                    setMonitoringPaused: { [weak self] in self?.setMonitoringPaused($0) },
+                    requestNotificationPermission: { [weak self] preference in
+                        guard let self else { return }
+                        self.notifications.requestPermissionThenEnable(preference, preferences: self.preferences)
+                    },
+                    loginItem: loginItem,
+                    showDiagnostics: { [weak self] in self?.showDiagnostics() }
+                )
             )
         }
         settingsWindowController?.show()
@@ -96,6 +113,12 @@ final class MonitorSurfaceCoordinator: NSObject {
         guard let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.openai.codex") else { return }
         NSWorkspace.shared.openApplication(at: url, configuration: .init())
     }
+
+    private static func openLogsFolder() {
+        let logs = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".codex", isDirectory: true)
+        guard FileManager.default.fileExists(atPath: logs.path) else { return }
+        NSWorkspace.shared.open(logs)
+    }
 }
 
 struct MonitorSurfaceActions {
@@ -109,7 +132,7 @@ struct MonitorSurfaceActions {
 }
 
 @MainActor
-final class MonitorStatusItemController: NSObject {
+final class MonitorStatusItemController: NSObject, NSPopoverDelegate {
     private let model: MonitorAppModel
     private let preferences: MonitorPreferences
     private let actions: MonitorSurfaceActions
@@ -141,7 +164,15 @@ final class MonitorStatusItemController: NSObject {
         if popover.isShown {
             popover.performClose(sender)
         } else {
+            let local = button.convert(button.bounds, to: nil)
+            let anchor = button.window?.convertToScreen(local) ?? .zero
+            let visible = button.window?.screen?.visibleFrame ?? NSScreen.main?.visibleFrame ?? .zero
+            let target = PopoverAnchorLayout.frame(anchor: anchor, contentSize: popover.contentSize, visibleFrame: visible)
+            // AppKit still owns the arrow and click-away behavior; the frame is
+            // recalculated from the current item on every open, then clamped.
+            button.toolTip = nil
             popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
+            popover.contentViewController?.view.window?.setFrame(target, display: true)
             popover.contentViewController?.view.window?.makeKey()
         }
     }
@@ -163,11 +194,16 @@ final class MonitorStatusItemController: NSObject {
     }
 
     private func configurePopover() {
+        popover.delegate = self
         popover.behavior = .transient
         popover.contentSize = NSSize(width: 340, height: 350)
         popover.contentViewController = NSHostingController(
             rootView: MenuBarPopoverView(model: model, preferences: preferences, actions: actions)
         )
+    }
+
+    func popoverDidClose(_ notification: Notification) {
+        statusItem.button?.toolTip = "Codex Monitor"
     }
 }
 
@@ -202,9 +238,9 @@ class ReusableNativeWindowController: NSWindowController {
 
 @MainActor
 final class UsageWindowController: ReusableNativeWindowController {
-    init(model: MonitorAppModel) {
+    init(model: MonitorAppModel, preferences: MonitorPreferences) {
         let window = Self.makeWindow(size: NSSize(width: 600, height: 560), minSize: NSSize(width: 500, height: 460))
-        window.contentView = NSHostingView(rootView: UsageWindowView(model: model))
+        window.contentView = NSHostingView(rootView: UsageWindowView(model: model, preferences: preferences))
         super.init(window: window)
     }
 
@@ -218,14 +254,14 @@ final class SettingsWindowController: ReusableNativeWindowController, NSWindowDe
     let presentation: SettingsPresentationModel
     let hostingController: NSHostingController<NativeSettingsWindowView>
 
-    init(preferences: MonitorPreferences, showDiagnostics: @escaping () -> Void) {
+    init(preferences: MonitorPreferences, actions: SettingsSystemActions) {
         let presentation = SettingsPresentationModel()
-        let window = Self.makeWindow(size: NSSize(width: 720, height: 500), minSize: NSSize(width: 600, height: 420))
+        let window = Self.makeWindow(size: NSSize(width: 780, height: 540), minSize: NSSize(width: 760, height: 460))
         let hostingController = NSHostingController(
             rootView: NativeSettingsWindowView(
                 preferences: preferences,
                 presentation: presentation,
-                showDiagnostics: showDiagnostics
+                actions: actions
             )
         )
         window.contentViewController = hostingController

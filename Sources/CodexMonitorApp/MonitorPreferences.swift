@@ -1,17 +1,53 @@
 import Foundation
 import CoreGraphics
 
+public enum InterfaceLanguage: String, CaseIterable, Identifiable {
+    case system
+    case simplifiedChinese
+    case english
+
+    public var id: String { rawValue }
+    var localeIdentifier: String? {
+        switch self {
+        case .system: nil
+        case .simplifiedChinese: "zh-Hans"
+        case .english: "en"
+        }
+    }
+}
+
 @MainActor
 public final class MonitorPreferences: ObservableObject {
     @Published public var showOrb: Bool { didSet { defaults.set(showOrb, forKey: Keys.showOrb) } }
     @Published public var orbSize: CGFloat { didSet { let value = Self.clampedSize(orbSize); if value != orbSize { orbSize = value; return }; scheduleOrbSizePersistence(value) } }
     @Published public var showUsageMenu: Bool { didSet { defaults.set(showUsageMenu, forKey: Keys.showUsageMenu) } }
     @Published public var showSettingsMenu: Bool { didSet { defaults.set(showSettingsMenu, forKey: Keys.showSettingsMenu) } }
+    @Published public var alwaysOnTop: Bool { didSet { defaults.set(alwaysOnTop, forKey: Keys.alwaysOnTop) } }
+    @Published public var lockPosition: Bool { didSet { defaults.set(lockPosition, forKey: Keys.lockPosition) } }
+    @Published public var pauseMonitoring: Bool { didSet { defaults.set(pauseMonitoring, forKey: Keys.pauseMonitoring) } }
+    @Published public var waitingApprovalNotifications: Bool { didSet { defaults.set(waitingApprovalNotifications, forKey: Keys.waitingApprovalNotifications) } }
+    @Published public var taskCompletedNotifications: Bool { didSet { defaults.set(taskCompletedNotifications, forKey: Keys.taskCompletedNotifications) } }
+    @Published public var hideAccountInfo: Bool { didSet { defaults.set(hideAccountInfo, forKey: Keys.hideAccountInfo) } }
+    @Published public var interfaceLanguage: InterfaceLanguage { didSet { defaults.set(interfaceLanguage.rawValue, forKey: Keys.interfaceLanguage) } }
     @Published public var orbOrigin: CGPoint? { didSet { persistOrigin() } }
 
     private let defaults: UserDefaults
     private var pendingSizePersistence: DispatchWorkItem?
-    private enum Keys { static let showOrb = "monitor.showOrb"; static let orbSize = "monitor.orbSize"; static let showUsageMenu = "monitor.showUsageMenu"; static let showSettingsMenu = "monitor.showSettingsMenu"; static let orbX = "monitor.orbX"; static let orbY = "monitor.orbY" }
+    private enum Keys {
+        static let showOrb = "monitor.showOrb"
+        static let orbSize = "monitor.orbSize"
+        static let showUsageMenu = "monitor.showUsageMenu"
+        static let showSettingsMenu = "monitor.showSettingsMenu"
+        static let alwaysOnTop = "monitor.alwaysOnTop"
+        static let lockPosition = "monitor.lockPosition"
+        static let pauseMonitoring = "monitor.pauseMonitoring"
+        static let waitingApprovalNotifications = "monitor.waitingApprovalNotifications"
+        static let taskCompletedNotifications = "monitor.taskCompletedNotifications"
+        static let hideAccountInfo = "monitor.hideAccountInfo"
+        static let interfaceLanguage = "monitor.interfaceLanguage"
+        static let orbX = "monitor.orbX"
+        static let orbY = "monitor.orbY"
+    }
 
     public init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
@@ -21,6 +57,13 @@ public final class MonitorPreferences: ObservableObject {
         orbSize = Self.clampedSize(CGFloat(defaults.object(forKey: Keys.orbSize) as? Double ?? FloatingOrbSurfaceConfiguration.freshInstallDefaultSize))
         showUsageMenu = defaults.object(forKey: Keys.showUsageMenu) as? Bool ?? true
         showSettingsMenu = defaults.object(forKey: Keys.showSettingsMenu) as? Bool ?? true
+        alwaysOnTop = defaults.object(forKey: Keys.alwaysOnTop) as? Bool ?? true
+        lockPosition = defaults.object(forKey: Keys.lockPosition) as? Bool ?? false
+        pauseMonitoring = defaults.object(forKey: Keys.pauseMonitoring) as? Bool ?? false
+        waitingApprovalNotifications = defaults.object(forKey: Keys.waitingApprovalNotifications) as? Bool ?? false
+        taskCompletedNotifications = defaults.object(forKey: Keys.taskCompletedNotifications) as? Bool ?? false
+        hideAccountInfo = defaults.object(forKey: Keys.hideAccountInfo) as? Bool ?? false
+        interfaceLanguage = InterfaceLanguage(rawValue: defaults.string(forKey: Keys.interfaceLanguage) ?? "") ?? .system
         if defaults.object(forKey: Keys.orbX) != nil, defaults.object(forKey: Keys.orbY) != nil {
             orbOrigin = CGPoint(x: defaults.double(forKey: Keys.orbX), y: defaults.double(forKey: Keys.orbY))
         } else { orbOrigin = nil }

@@ -49,30 +49,77 @@ enum PopoverActionFeedback {
     }
 }
 
-enum MenuLightTone: Equatable {
-    case green, yellow, red, inactive
+/// The only runtime-to-visual mapping used by the capsule, Orb, and textual
+/// state labels. Keeping this small value type independent from SwiftUI makes
+/// the frozen state grammar straightforward to regression-test.
+enum VisualStateTone: Equatable {
+    case green, blue, yellow, red, gray, inactive
 }
 
-struct MenuLightPresentation: Equatable {
-    let tone: MenuLightTone
+struct VisualStateDot: Equatable {
+    let tone: VisualStateTone
     let breathes: Bool
 
     static let inactive = Self(tone: .inactive, breathes: false)
-    static let idle = Self(tone: .green, breathes: false)
+    static let green = Self(tone: .green, breathes: false)
+}
 
-    static func dots(for state: MonitorRuntimeState?, desktopAvailable: Bool) -> [Self] {
-        guard desktopAvailable, let state else { return Array(repeating: inactive, count: 3) }
-        switch state {
-        case .idle, .completed:
-            return Array(repeating: idle, count: 3)
-        case .working, .thinking:
-            return [Self(tone: .green, breathes: true), inactive, inactive]
-        case .waitingApproval:
-            return [inactive, Self(tone: .yellow, breathes: true), inactive]
-        case .failed, .interrupted, .systemError:
-            return [inactive, inactive, Self(tone: .red, breathes: false)]
-        case .disconnected, .paused:
-            return Array(repeating: inactive, count: 3)
+struct VisualStatePresentation: Equatable {
+    let dots: [VisualStateDot]
+    let orbTone: VisualStateTone
+    let breathes: Bool
+    let stateTextKey: String
+
+    static func forSnapshot(_ snapshot: MonitorRuntimeSnapshot?) -> Self {
+        guard let snapshot,
+              snapshot.sourceHealth[.desktopLocal]?.availability == .available else {
+            return unavailable
         }
+        return forState(snapshot.currentState)
+    }
+
+    static func forState(_ state: MonitorRuntimeState) -> Self {
+        switch state {
+        case .idle:
+            return Self(dots: [.green, .green, .green], orbTone: .green, breathes: false, stateTextKey: "state.idle")
+        case .completed:
+            return Self(dots: [.green, .green, .green], orbTone: .green, breathes: false, stateTextKey: "state.completed")
+        case .thinking:
+            return Self(dots: [.init(tone: .green, breathes: true), .inactive, .inactive], orbTone: .blue, breathes: true, stateTextKey: "state.thinking")
+        case .working:
+            return Self(dots: [.init(tone: .green, breathes: true), .inactive, .inactive], orbTone: .blue, breathes: true, stateTextKey: "state.working")
+        case .waitingApproval:
+            return Self(dots: [.inactive, .init(tone: .yellow, breathes: true), .inactive], orbTone: .yellow, breathes: true, stateTextKey: "state.waitingApproval")
+        case .failed:
+            return Self(dots: [.inactive, .inactive, .init(tone: .red, breathes: false)], orbTone: .red, breathes: false, stateTextKey: "state.failed")
+        case .interrupted:
+            return Self(dots: [.inactive, .inactive, .init(tone: .red, breathes: false)], orbTone: .red, breathes: false, stateTextKey: "state.interrupted")
+        case .systemError:
+            return Self(dots: [.inactive, .inactive, .init(tone: .red, breathes: false)], orbTone: .red, breathes: false, stateTextKey: "state.systemError")
+        case .disconnected:
+            return Self(dots: Array(repeating: .init(tone: .gray, breathes: false), count: 3), orbTone: .gray, breathes: false, stateTextKey: "state.codexUnavailable")
+        case .paused:
+            return Self(dots: Array(repeating: .init(tone: .gray, breathes: false), count: 3), orbTone: .gray, breathes: false, stateTextKey: "state.paused")
+        }
+    }
+
+    static let unavailable = Self(
+        dots: Array(repeating: .init(tone: .gray, breathes: false), count: 3),
+        orbTone: .gray,
+        breathes: false,
+        stateTextKey: "state.sourceUnavailable"
+    )
+}
+
+/// Pure geometry contract for every status-item popover show. Coordinates are
+/// in the current screen's coordinate system, so no previous popover frame can
+/// influence a later open.
+enum PopoverAnchorLayout {
+    static func frame(anchor: CGRect, contentSize: CGSize, visibleFrame: CGRect, attachmentGap: CGFloat = 8, margin: CGFloat = 8) -> CGRect {
+        let width = min(contentSize.width, max(1, visibleFrame.width - 2 * margin))
+        let height = min(contentSize.height, max(1, visibleFrame.height - 2 * margin))
+        let x = min(max(anchor.midX - width / 2, visibleFrame.minX + margin), visibleFrame.maxX - width - margin)
+        let y = min(max(anchor.minY - attachmentGap - height, visibleFrame.minY + margin), visibleFrame.maxY - height - margin)
+        return CGRect(x: x, y: y, width: width, height: height)
     }
 }
