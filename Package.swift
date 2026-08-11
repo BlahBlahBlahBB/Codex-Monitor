@@ -5,7 +5,8 @@ let package = Package(
     name: "CodexMonitorContracts",
     platforms: [.macOS(.v13)],
     products: [
-        .library(name: "CodexMonitorContracts", targets: ["CodexMonitorContracts"])
+        .library(name: "CodexMonitorContracts", targets: ["CodexMonitorContracts"]),
+        .executable(name: "CodexMonitorApp", targets: ["CodexMonitorApp"])
     ],
     targets: [
         .target(
@@ -15,9 +16,10 @@ let package = Package(
             linkerSettings: [.linkedLibrary("sqlite3")]
         ),
         .target(name: "CodexMonitorContracts", dependencies: ["CSQLite"]),
+        .executableTarget(name: "CodexMonitorApp", dependencies: ["CodexMonitorContracts"]),
         .testTarget(
             name: "CodexMonitorContractsTests",
-            dependencies: ["CodexMonitorContracts", "CSQLite"],
+            dependencies: ["CodexMonitorContracts", "CodexMonitorApp", "CSQLite"],
             resources: [.process("Fixtures")]
         )
     ]

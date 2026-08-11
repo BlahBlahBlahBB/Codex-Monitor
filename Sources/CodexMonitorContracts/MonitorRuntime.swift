@@ -148,6 +148,49 @@ public struct MonitorRuntimeSnapshot: Sendable, Equatable {
     public let resetInformation: MonitorResetInformationViewModel
     public let sourceHealth: [MonitorRuntimeSource: MonitorSourceHealth]
     public let capabilities: [MonitorRuntimeCapability: MonitorCapabilityAvailability]
+
+    /// `capturedAt` and freshness assessment timestamps are sampling metadata,
+    /// not presentation changes. UI bindings use this to avoid rerendering on
+    /// a timer when the observable product state has not changed.
+    public func isPresentationEquivalent(to other: MonitorRuntimeSnapshot) -> Bool {
+        monitoringPhase == other.monitoringPhase &&
+        currentState == other.currentState &&
+        currentStateSince == other.currentStateSince &&
+        currentActivity == other.currentActivity &&
+        equivalent(currentThread, other.currentThread) &&
+        currentSessionThread == other.currentSessionThread &&
+        activeThreadCount == other.activeThreadCount &&
+        waitingApprovalCount == other.waitingApprovalCount &&
+        threads.count == other.threads.count && zip(threads, other.threads).allSatisfy { equivalent($0, $1) } &&
+        sessionToken == other.sessionToken &&
+        usage == other.usage &&
+        quota == other.quota &&
+        resetInformation == other.resetInformation &&
+        sourceHealth.count == other.sourceHealth.count && sourceHealth.allSatisfy { entry in
+            other.sourceHealth[entry.key].map { equivalent(entry.value, $0) } ?? false
+        } &&
+        capabilities == other.capabilities
+    }
+
+    private func equivalent(_ lhs: MonitorThreadViewModel?, _ rhs: MonitorThreadViewModel?) -> Bool {
+        switch (lhs, rhs) {
+        case (.none, .none): true
+        case let (.some(lhs), .some(rhs)): equivalent(lhs, rhs)
+        default: false
+        }
+    }
+
+    private func equivalent(_ lhs: MonitorThreadViewModel, _ rhs: MonitorThreadViewModel) -> Bool {
+        lhs.threadID == rhs.threadID && lhs.activeTurnID == rhs.activeTurnID && lhs.taskTitle == rhs.taskTitle && lhs.model == rhs.model && lhs.state == rhs.state && lhs.stateSince == rhs.stateSince && lhs.activity == rhs.activity && lhs.waitingApproval == rhs.waitingApproval && lhs.sessionToken == rhs.sessionToken && lhs.sessionTokenAvailability == rhs.sessionTokenAvailability && lhs.sessionTokenProvenance == rhs.sessionTokenProvenance && equivalent(lhs.freshness, rhs.freshness)
+    }
+
+    private func equivalent(_ lhs: MonitorSourceHealth, _ rhs: MonitorSourceHealth) -> Bool {
+        lhs.source == rhs.source && lhs.availability == rhs.availability && lhs.reason == rhs.reason && equivalent(lhs.freshness, rhs.freshness)
+    }
+
+    private func equivalent(_ lhs: Freshness, _ rhs: Freshness) -> Bool {
+        lhs.state == rhs.state && lhs.observedAt == rhs.observedAt && lhs.reason == rhs.reason
+    }
 }
 
 public protocol MonitorRuntimeClock: Sendable { func now() -> Date }

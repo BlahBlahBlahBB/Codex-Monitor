@@ -186,6 +186,22 @@ public final class StateDBReader: @unchecked Sendable {
         throw lastError
     }
 
+    /// Bounded discovery for a product-owned local monitor.  It returns only
+    /// the same allow-listed metadata used by `thread(rawID:)`; callers still
+    /// have to perform exact rollout/session admission through
+    /// `DesktopLocalAdapter.open` before treating a row as runtime evidence.
+    public func recentThreads(limit: Int = 12) throws -> [StateDBThreadRecord] {
+        var lastError: StateDBError = .unavailable
+        for attempt in 0..<retryPolicy.attempts {
+            do { return try readRecentThreadsOnce(limit: max(1, min(limit, 64))) }
+            catch let error as StateDBError where error == .busyExhausted {
+                lastError = error
+                if attempt + 1 < retryPolicy.attempts { usleep(retryPolicy.retryDelayMilliseconds * 1_000) }
+            } catch let error as StateDBError { throw error }
+        }
+        throw lastError
+    }
+
     private func readThreadOnce(rawID: String) throws -> StateDBThreadRecord? {
         var database: OpaquePointer?
         let flags = SQLITE_OPEN_READONLY | SQLITE_OPEN_FULLMUTEX
@@ -212,6 +228,37 @@ public final class StateDBReader: @unchecked Sendable {
               let threadID = NamespacedID(sourceID: sourceID.value, entityKind: .thread, rawID: id) else { throw StateDBError.schemaMismatch }
         let snapshot = DesktopThreadSnapshot(threadID: threadID, title: text(statement, column: 2), model: text(statement, column: 3), reasoningEffort: text(statement, column: 4), updatedAtMilliseconds: integer(statement, column: 5), tokensUsed: integer(statement, column: 6))
         return StateDBThreadRecord(snapshot: snapshot, rolloutURL: URL(fileURLWithPath: path))
+    }
+
+    private func readRecentThreadsOnce(limit: Int) throws -> [StateDBThreadRecord] {
+        var database: OpaquePointer?
+        let flags = SQLITE_OPEN_READONLY | SQLITE_OPEN_FULLMUTEX
+        let result = sqlite3_open_v2(databaseURL.path, &database, flags, nil)
+        guard result == SQLITE_OK, let database else { sqlite3_close(database); throw StateDBError.readOnlyOpenFailed }
+        defer { sqlite3_close(database) }
+        sqlite3_busy_timeout(database, retryPolicy.busyTimeoutMilliseconds)
+        let version = try scalarInt(database, sql: "PRAGMA user_version")
+        guard schema.acceptedUserVersions.contains(Int32(version)) else { throw StateDBError.schemaMismatch }
+        let columns = try tableColumns(database, table: "threads")
+        let required: Set<String> = ["id", "rollout_path", "title", "model", "reasoning_effort", "updated_at", "tokens_used"]
+        guard required.isSubset(of: columns) else { throw StateDBError.schemaMismatch }
+        let sql = "SELECT id, rollout_path, title, model, reasoning_effort, updated_at, tokens_used FROM threads ORDER BY updated_at DESC LIMIT ?"
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(database, sql, -1, &statement, nil) == SQLITE_OK, let statement else { throw stateError(for: database) }
+        defer { sqlite3_finalize(statement) }
+        sqlite3_bind_int(statement, 1, Int32(limit))
+        var records: [StateDBThreadRecord] = []
+        while true {
+            let stepped = sqlite3_step(statement)
+            if stepped == SQLITE_DONE { break }
+            guard stepped == SQLITE_ROW,
+                  let id = text(statement, column: 0),
+                  let path = text(statement, column: 1),
+                  let threadID = NamespacedID(sourceID: sourceID.value, entityKind: .thread, rawID: id) else { throw StateDBError.schemaMismatch }
+            let snapshot = DesktopThreadSnapshot(threadID: threadID, title: text(statement, column: 2), model: text(statement, column: 3), reasoningEffort: text(statement, column: 4), updatedAtMilliseconds: integer(statement, column: 5), tokensUsed: integer(statement, column: 6))
+            records.append(StateDBThreadRecord(snapshot: snapshot, rolloutURL: URL(fileURLWithPath: path)))
+        }
+        return records
     }
 
     private func scalarInt(_ database: OpaquePointer, sql: String) throws -> Int64 {
