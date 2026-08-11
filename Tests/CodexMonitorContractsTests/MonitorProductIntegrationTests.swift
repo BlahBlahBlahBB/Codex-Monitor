@@ -264,6 +264,15 @@ final class MonitorProductIntegrationTests: XCTestCase {
         XCTAssertEqual(UsagePresentation.bucket(closestTo: 299, plotWidth: 300, buckets: buckets)?.startDate, "2026-08-30")
         XCTAssertTrue(UsagePresentation.tooltip(for: buckets[0], languageCode: "en").contains("Token: 0 Token"))
         XCTAssertTrue(UsagePresentation.axisDate("2026-08-01", languageCode: "en").contains("Aug 1"))
+        let originalTimeZone = NSTimeZone.default
+        defer { NSTimeZone.default = originalTimeZone }
+        for identifier in ["Asia/Shanghai", "America/Los_Angeles", "America/New_York"] {
+            NSTimeZone.default = TimeZone(identifier: identifier)!
+            XCTAssertTrue(
+                UsagePresentation.axisDate("2026-08-11", languageCode: "zh-Hans").contains("11"),
+                "calendar bucket must not shift in \(identifier)"
+            )
+        }
         let bounds = CGRect(x: 0, y: 0, width: 300, height: 164)
         let right = UsagePresentation.tooltipFrame(desiredOrigin: CGPoint(x: 280, y: 150), tooltipSize: UsagePresentation.tooltipSize, bounds: bounds)
         XCTAssertLessThanOrEqual(right.maxX, bounds.maxX - 6)
@@ -297,8 +306,13 @@ final class MonitorProductIntegrationTests: XCTestCase {
         XCTAssertFalse(circularMaterial.isOpaque)
         XCTAssertEqual(effect?.blendingMode, .behindWindow)
         XCTAssertEqual(effect?.state, .active)
-        XCTAssertTrue(effect?.layer?.masksToBounds == true)
-        XCTAssertNotNil(effect?.layer?.mask)
+        XCTAssertFalse(effect?.layer?.masksToBounds == true)
+        XCTAssertNil(effect?.layer?.mask)
+        XCTAssertEqual(effect?.maskImage?.size, NSSize(width: 90, height: 90))
+
+        circularMaterial.frame = NSRect(x: 0, y: 0, width: 180, height: 180)
+        circularMaterial.layoutSubtreeIfNeeded()
+        XCTAssertEqual(effect?.maskImage?.size, NSSize(width: 180, height: 180))
         XCTAssertFalse(SettingsLayoutContract.hasCustomSliderDecoration)
     }
 

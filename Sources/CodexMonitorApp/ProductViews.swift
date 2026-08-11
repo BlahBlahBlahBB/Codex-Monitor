@@ -19,8 +19,9 @@ struct MenuBarPopoverView: View {
                 ScrollView {
                     contents(snapshot: snapshot, presentation: presentation)
                         .padding(16)
+                        .frame(maxWidth: .infinity, alignment: .topLeading)
                 }
-                .frame(width: 340, height: maximumContentHeight)
+                .frame(width: 340, height: maximumContentHeight, alignment: .topLeading)
             } else {
                 contents(snapshot: snapshot, presentation: presentation)
                     .padding(16)
@@ -367,15 +368,32 @@ enum UsagePresentation {
     }
 
     private static func displayDate(_ raw: String, languageCode: String?) -> String {
-        let parser = DateFormatter()
-        parser.locale = Locale(identifier: "en_US_POSIX")
-        parser.calendar = Calendar(identifier: .gregorian)
-        parser.timeZone = TimeZone(secondsFromGMT: 0)
-        parser.dateFormat = "yyyy-MM-dd"
-        guard let date = parser.date(from: raw) else { return raw }
-        return date.formatted(
-            .dateTime.month(.abbreviated).day().locale(Locale(identifier: languageCode ?? L10n.resolvedLanguage))
-        )
+        let values = raw.split(separator: "-", omittingEmptySubsequences: false)
+        guard values.count == 3,
+              let year = Int(values[0]),
+              let month = Int(values[1]),
+              let day = Int(values[2]) else { return raw }
+
+        // Usage buckets are calendar days, not midnight UTC instants. Keep
+        // parsing and formatting in one fixed calendar/timezone so west-of-UTC
+        // users never see an authoritative 2026-08-11 bucket as August 10.
+        let timezone = TimeZone(secondsFromGMT: 0)!
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = timezone
+        var components = DateComponents()
+        components.calendar = calendar
+        components.timeZone = timezone
+        components.year = year
+        components.month = month
+        components.day = day
+        guard let date = calendar.date(from: components) else { return raw }
+
+        let formatter = DateFormatter()
+        formatter.calendar = calendar
+        formatter.timeZone = timezone
+        formatter.locale = Locale(identifier: languageCode ?? L10n.resolvedLanguage)
+        formatter.setLocalizedDateFormatFromTemplate("MMMd")
+        return formatter.string(from: date)
     }
 }
 

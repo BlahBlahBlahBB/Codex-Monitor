@@ -167,7 +167,6 @@ final class MonitorStatusItemController: NSObject, NSPopoverDelegate {
     private let statusItem: NSStatusItem
     private let popover = NSPopover()
     private var hostedCapsule: NSHostingView<AnyView>?
-    private var popoverHost: NSHostingController<AnyView>?
 
     init(model: MonitorAppModel, preferences: MonitorPreferences, localization: LocalizationController, actions: MonitorSurfaceActions) {
         self.model = model
@@ -225,9 +224,6 @@ final class MonitorStatusItemController: NSObject, NSPopoverDelegate {
     private func configurePopover() {
         popover.delegate = self
         popover.behavior = .transient
-        let host = NSHostingController(rootView: popoverRoot(maximumContentHeight: nil))
-        popoverHost = host
-        popover.contentViewController = host
         DiagnosticEvent.record(.localization, ["event": "popoverFirstCreation", "resolvedLocale": L10n.resolvedLanguage])
     }
 
@@ -246,25 +242,28 @@ final class MonitorStatusItemController: NSObject, NSPopoverDelegate {
         })
     }
 
-    /// Measures the actual SwiftUI hierarchy immediately before every native
-    /// attachment. No window frame is set here: AppKit remains the sole
-    /// placement owner for the NSPopover.
+    /// A popover's previous hosting tree can retain layout constraints and a
+    /// ScrollView offset. Each open therefore measures a brand-new host, then
+    /// installs exactly one fresh normal-or-scrollable root. AppKit remains
+    /// the only placement owner; this never calls `setFrame` on a window.
     private func preparePopoverContent(for button: NSStatusBarButton) {
-        guard let host = popoverHost else { return }
-        host.rootView = popoverRoot(maximumContentHeight: nil)
-        host.loadView()
-        host.view.setFrameSize(NSSize(width: 340, height: 1))
-        host.view.layoutSubtreeIfNeeded()
-        let fitting = host.view.fittingSize
+        let normalHost = NSHostingController(rootView: popoverRoot(maximumContentHeight: nil))
+        let desired = normalHost.sizeThatFits(in: NSSize(width: 340, height: CGFloat.greatestFiniteMagnitude))
         let visible = button.window?.screen?.visibleFrame ?? NSScreen.main?.visibleFrame ?? .zero
-        let maximumHeight = max(1, visible.height - 24)
-        let desiredHeight = max(1, ceil(fitting.height))
+        let buttonRectInWindow = button.convert(button.bounds, to: nil)
+        let buttonScreenRect = button.window?.convertToScreen(buttonRectInWindow) ?? .zero
+        let availableBelow = buttonScreenRect.minY - visible.minY
+        // Preserve space for the native arrow and chrome. The content itself
+        // scrolls only when it cannot fit below this real status-item anchor.
+        let maximumHeight = max(1, floor(availableBelow - 32))
+        let desiredHeight = max(1, ceil(desired.height))
         if desiredHeight > maximumHeight {
-            host.rootView = popoverRoot(maximumContentHeight: maximumHeight)
-            host.view.layoutSubtreeIfNeeded()
+            let scrollHost = NSHostingController(rootView: popoverRoot(maximumContentHeight: maximumHeight))
+            popover.contentViewController = scrollHost
             popover.contentSize = NSSize(width: 340, height: maximumHeight)
             DiagnosticEvent.record(.popover, ["event": "contentScrollEnabled", "height": String(Int(maximumHeight))])
         } else {
+            popover.contentViewController = normalHost
             popover.contentSize = NSSize(width: 340, height: desiredHeight)
         }
     }

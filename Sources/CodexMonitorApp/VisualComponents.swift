@@ -128,7 +128,6 @@ struct CircularVisualEffectView: NSViewRepresentable {
 
 final class CircularVisualEffectHost: NSView {
     private let effectView = NSVisualEffectView()
-    private let circularMask = CAShapeLayer()
 
     init(material: NSVisualEffectView.Material, blendingMode: NSVisualEffectView.BlendingMode, state: NSVisualEffectView.State) {
         super.init(frame: .zero)
@@ -137,8 +136,6 @@ final class CircularVisualEffectHost: NSView {
         layer?.isOpaque = false
         effectView.wantsLayer = true
         effectView.layer?.backgroundColor = NSColor.clear.cgColor
-        effectView.layer?.masksToBounds = true
-        effectView.layer?.mask = circularMask
         addSubview(effectView)
         configure(material: material, blendingMode: blendingMode, state: state)
     }
@@ -150,21 +147,36 @@ final class CircularVisualEffectHost: NSView {
     override func layout() {
         super.layout()
         effectView.frame = bounds
-        let diameter = min(bounds.width, bounds.height)
-        let circle = NSRect(
-            x: bounds.midX - diameter / 2,
-            y: bounds.midY - diameter / 2,
-            width: diameter,
-            height: diameter
-        )
-        circularMask.path = CGPath(ellipseIn: circle, transform: nil)
-        effectView.layer?.cornerRadius = diameter / 2
+        effectView.maskImage = circleMaskImage(for: effectView.bounds.size)
     }
 
     func configure(material: NSVisualEffectView.Material, blendingMode: NSVisualEffectView.BlendingMode, state: NSVisualEffectView.State) {
         effectView.material = material
         effectView.blendingMode = blendingMode
         effectView.state = state
+    }
+
+    /// `NSVisualEffectView` owns a separate compositing path, so a regular
+    /// CALayer mask does not reliably clip its material. Its documented
+    /// `maskImage` API applies this opaque circular image at every size.
+    private func circleMaskImage(for size: NSSize) -> NSImage? {
+        guard size.width > 0, size.height > 0 else { return nil }
+        let image = NSImage(size: size)
+        image.lockFocus()
+        defer { image.unlockFocus() }
+
+        NSColor.clear.setFill()
+        NSRect(origin: .zero, size: size).fill()
+        let diameter = min(size.width, size.height)
+        let circle = NSRect(
+            x: (size.width - diameter) / 2,
+            y: (size.height - diameter) / 2,
+            width: diameter,
+            height: diameter
+        )
+        NSColor.white.setFill()
+        NSBezierPath(ovalIn: circle).fill()
+        return image
     }
 }
 
@@ -209,9 +221,6 @@ struct MonitorOrbView: View {
                 .overlay {
                     Circle().strokeBorder(Color.white.opacity(0.40), lineWidth: 0.8)
                 }
-                // The shadow belongs to the circular material itself, never
-                // to the transparent rectangular floating-panel root.
-                .shadow(color: Color.black.opacity(0.10), radius: 8, y: 4)
             Circle()
                 .stroke(presentation.orbTone.color, style: StrokeStyle(lineWidth: ringWidth, lineCap: .round))
                 .frame(width: ringDiameter, height: ringDiameter)
