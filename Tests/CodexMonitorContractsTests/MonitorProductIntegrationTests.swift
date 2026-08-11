@@ -27,6 +27,31 @@ final class MonitorProductIntegrationTests: XCTestCase {
         XCTAssertEqual(restored.orbOrigin, CGPoint(x: 225, y: 340))
     }
 
+    func testFreshFloatingOrbDefaultAndTransparentHostContract() {
+        let suite = "CodexMonitorTests.freshPreferences.\(UUID().uuidString)"
+        guard let defaults = UserDefaults(suiteName: suite) else {
+            return XCTFail("Could not create isolated preferences")
+        }
+        defer { defaults.removePersistentDomain(forName: suite) }
+
+        let preferences = MonitorPreferences(defaults: defaults)
+        XCTAssertEqual(preferences.orbSize, 90)
+        XCTAssertEqual(FloatingOrbSurfaceConfiguration.quickViewSize, CGSize(width: 350, height: 214))
+        XCTAssertFalse(FloatingOrbSurfaceConfiguration.isOpaque)
+        XCTAssertFalse(FloatingOrbSurfaceConfiguration.hasPanelShadow)
+    }
+
+    func testNativeSurfaceOwnershipPreventsDuplicateControllers() {
+        let ownership = MonitorSurfaceOwnership()
+        XCTAssertTrue(ownership.acquire(.statusItem))
+        XCTAssertFalse(ownership.acquire(.statusItem))
+        XCTAssertTrue(ownership.acquire(.usage))
+        XCTAssertFalse(ownership.acquire(.usage))
+        XCTAssertTrue(ownership.owns(.usage))
+        ownership.reset()
+        XCTAssertFalse(ownership.owns(.usage))
+    }
+
     func testRestoredFloatingWindowOriginStaysInsideAnAvailableScreen() {
         let screens = [CGRect(x: 0, y: 0, width: 1_200, height: 900)]
         let origin = FloatingPanelLayout.clampedOrigin(

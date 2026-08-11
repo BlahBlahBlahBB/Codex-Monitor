@@ -5,28 +5,23 @@ import CodexMonitorContracts
 struct MonitorVisualPalette {
     let tint: Color
     let usesBreathing: Bool
-    let breathingDuration: Double
 
     static func forSnapshot(_ snapshot: MonitorRuntimeSnapshot?) -> MonitorVisualPalette {
-        guard let snapshot else {
-            return MonitorVisualPalette(tint: Color(nsColor: .systemGray), usesBreathing: false, breathingDuration: 3.2)
-        }
-        if snapshot.sourceHealth[.desktopLocal]?.availability == .unavailable {
-            return MonitorVisualPalette(tint: Color(nsColor: .systemGray), usesBreathing: false, breathingDuration: 3.2)
+        guard let snapshot,
+              snapshot.sourceHealth[.desktopLocal]?.availability != .unavailable else {
+            return .init(tint: Color(nsColor: .systemGray), usesBreathing: false)
         }
         switch snapshot.currentState {
-        case .thinking:
-            return MonitorVisualPalette(tint: Color(nsColor: .systemGreen), usesBreathing: true, breathingDuration: 2.8)
-        case .working:
-            return MonitorVisualPalette(tint: Color(nsColor: .systemGreen), usesBreathing: true, breathingDuration: 3.6)
+        case .thinking, .working:
+            return .init(tint: Color(nsColor: .systemGreen), usesBreathing: true)
         case .waitingApproval:
-            return MonitorVisualPalette(tint: Color(nsColor: .systemYellow), usesBreathing: true, breathingDuration: 3.2)
+            return .init(tint: Color(nsColor: .systemYellow), usesBreathing: true)
         case .failed, .interrupted, .systemError:
-            return MonitorVisualPalette(tint: Color(nsColor: .systemRed), usesBreathing: false, breathingDuration: 3.2)
+            return .init(tint: Color(nsColor: .systemRed), usesBreathing: false)
         case .completed, .idle:
-            return MonitorVisualPalette(tint: Color(nsColor: .systemGreen), usesBreathing: false, breathingDuration: 3.2)
+            return .init(tint: Color(nsColor: .systemGreen), usesBreathing: false)
         case .disconnected, .paused:
-            return MonitorVisualPalette(tint: Color(nsColor: .systemGray), usesBreathing: false, breathingDuration: 3.2)
+            return .init(tint: Color(nsColor: .systemGray), usesBreathing: false)
         }
     }
 }
@@ -52,28 +47,38 @@ struct VisualEffectView: NSViewRepresentable {
     }
 }
 
+/// Native material contained by the exact surface geometry. It deliberately
+/// does not turn ordinary content windows into stacks of glass cards.
 struct GlassSurface<Content: View>: View {
     let cornerRadius: CGFloat
+    let shadow: Bool
     @ViewBuilder let content: Content
     @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
 
-    init(cornerRadius: CGFloat = 22, @ViewBuilder content: () -> Content) {
+    init(cornerRadius: CGFloat = 22, shadow: Bool = true, @ViewBuilder content: () -> Content) {
         self.cornerRadius = cornerRadius
+        self.shadow = shadow
         self.content = content()
     }
 
     var body: some View {
         content
             .background {
-                VisualEffectView(material: .hudWindow, blendingMode: .behindWindow, state: .active)
-                    .overlay(Color(nsColor: .windowBackgroundColor).opacity(colorScheme == .dark ? 0.16 : 0.26))
+                if reduceTransparency {
+                    RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                        .fill(Color(nsColor: .windowBackgroundColor))
+                } else {
+                    VisualEffectView(material: .hudWindow, blendingMode: .behindWindow, state: .active)
+                        .overlay(Color(nsColor: .windowBackgroundColor).opacity(colorScheme == .dark ? 0.10 : 0.18))
+                }
             }
             .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
             .overlay {
                 RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                    .strokeBorder(Color.white.opacity(colorScheme == .dark ? 0.16 : 0.42), lineWidth: 0.7)
+                    .strokeBorder(Color.white.opacity(colorScheme == .dark ? 0.18 : 0.48), lineWidth: 0.7)
             }
-            .shadow(color: Color.black.opacity(colorScheme == .dark ? 0.34 : 0.16), radius: 24, y: 12)
+            .shadow(color: shadow ? Color.black.opacity(colorScheme == .dark ? 0.22 : 0.12) : .clear, radius: shadow ? 18 : 0, y: shadow ? 8 : 0)
     }
 }
 
@@ -85,97 +90,96 @@ struct MonitorOrbView: View {
 
     var body: some View {
         let palette = MonitorVisualPalette.forSnapshot(snapshot)
-        let ringWidth = min(11, max(5.5, size * 0.075))
-        let textSize = min(21, max(10, size * 0.145))
-        let ringOpacity = palette.usesBreathing && !reduceMotion ? (breathing ? 0.96 : 0.65) : 0.84
+        let ringWidth = max(5.6, min(13.5, size * (7 / 90)))
+        let ringDiameter = size * 0.90
+        let valueSize = max(13, min(30, size * (24 / 90)))
+        let ringOpacity = palette.usesBreathing && !reduceMotion && breathing ? 0.98 : (palette.usesBreathing ? 0.62 : 0.88)
 
         ZStack {
-            Circle()
-                .fill(.ultraThinMaterial)
-            Circle()
-                .fill(palette.tint.opacity(0.11))
-            Circle()
-                .stroke(palette.tint.opacity(0.18), lineWidth: 1)
+            Circle().fill(.ultraThinMaterial)
+            Circle().fill(Color(nsColor: .windowBackgroundColor).opacity(0.08))
             Circle()
                 .stroke(palette.tint.opacity(ringOpacity), lineWidth: ringWidth)
-            Text(statusLabel)
-                .font(.system(size: textSize, weight: .semibold, design: .rounded))
-                .tracking(size < 100 ? 0 : -0.1)
+                .frame(width: ringDiameter, height: ringDiameter)
+            Text(MonitorDisplayValue.orbQuota(snapshot))
+                .font(.system(size: valueSize, weight: .bold))
+                .monospacedDigit()
                 .foregroundStyle(.primary)
-                .multilineTextAlignment(.center)
-                .lineSpacing(-1)
                 .minimumScaleFactor(0.72)
-                .padding(size * 0.18)
         }
         .frame(width: size, height: size)
-        .shadow(color: palette.tint.opacity(0.18), radius: 13, y: 5)
+        .clipShape(Circle())
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel("Codex status \(statusLabel.replacingOccurrences(of: "\n", with: " "))")
-        .accessibilityHint("Click to open Quick View. Drag to move.")
-        .onAppear {
-            breathing = palette.usesBreathing && !reduceMotion
-        }
-        .onChange(of: reduceMotion) { value in
-            breathing = palette.usesBreathing && !value
-        }
+        .accessibilityLabel("Codex \(MonitorDisplayValue.state(snapshot)); remaining quota \(MonitorDisplayValue.orbQuota(snapshot))")
+        .accessibilityHint("Click to toggle Quick View. Drag to move. Right click for menu.")
+        .onAppear { breathing = palette.usesBreathing && !reduceMotion }
+        .onChange(of: reduceMotion) { value in breathing = palette.usesBreathing && !value }
+        .onChange(of: palette.usesBreathing) { value in breathing = value && !reduceMotion }
         .animation(
             palette.usesBreathing && !reduceMotion
-                ? .easeInOut(duration: palette.breathingDuration).repeatForever(autoreverses: true)
+                ? .easeInOut(duration: 0.8).repeatForever(autoreverses: true)
+                : .easeOut(duration: 0.18),
+            value: breathing
+        )
+    }
+}
+
+struct MenuStatusCapsuleView: View {
+    @ObservedObject var model: MonitorAppModel
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var breathing = false
+
+    var body: some View {
+        let snapshot = model.snapshot
+        let palette = MonitorVisualPalette.forSnapshot(snapshot)
+        let opacity = palette.usesBreathing && !reduceMotion && breathing ? 1.0 : (palette.usesBreathing ? 0.58 : 0.9)
+        HStack(spacing: 5) {
+            dot(color: dotColor(position: 1, snapshot: snapshot, palette: palette), opacity: dotOpacity(position: 1, snapshot: snapshot, animatedOpacity: opacity))
+            dot(color: dotColor(position: 2, snapshot: snapshot, palette: palette), opacity: dotOpacity(position: 2, snapshot: snapshot, animatedOpacity: opacity))
+            dot(color: dotColor(position: 3, snapshot: snapshot, palette: palette), opacity: dotOpacity(position: 3, snapshot: snapshot, animatedOpacity: opacity))
+        }
+        .frame(width: 48, height: 22)
+        .background(Capsule().fill(Color.black.opacity(0.28)))
+        .overlay(Capsule().strokeBorder(Color.white.opacity(0.74), lineWidth: 0.7))
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("Codex Monitor \(MonitorDisplayValue.state(snapshot))")
+        .onAppear { breathing = palette.usesBreathing && !reduceMotion }
+        .onChange(of: reduceMotion) { value in breathing = palette.usesBreathing && !value }
+        .onChange(of: palette.usesBreathing) { value in breathing = value && !reduceMotion }
+        .animation(
+            palette.usesBreathing && !reduceMotion
+                ? .easeInOut(duration: 0.8).repeatForever(autoreverses: true)
                 : .easeOut(duration: 0.18),
             value: breathing
         )
     }
 
-    private var statusLabel: String {
-        guard let snapshot else { return "CODEX\nUNAVAILABLE" }
-        if snapshot.sourceHealth[.desktopLocal]?.availability == .unavailable {
-            return "SOURCE\nUNAVAILABLE"
-        }
-        if snapshot.currentState == .disconnected {
-            return "CODEX\nUNAVAILABLE"
-        }
-        return snapshot.currentState.rawValue.replacingOccurrences(of: "_", with: "\n")
-    }
-}
-
-struct MonitorStatusCapsule: View {
-    let snapshot: MonitorRuntimeSnapshot?
-
-    var body: some View {
-        HStack(spacing: 7) {
-            statusDot(MonitorVisualPalette.forSnapshot(snapshot).tint, label: "State")
-            statusDot(activityColor, label: "Activity")
-            statusDot(sourceColor, label: "Source")
-        }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 6)
-        .background(Capsule().fill(Color.black.opacity(0.84)))
-        .overlay(Capsule().strokeBorder(Color.white.opacity(0.62), lineWidth: 0.7))
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel("Monitor status indicators")
+    private func dot(color: Color, opacity: Double) -> some View {
+        Circle().fill(color.opacity(opacity)).frame(width: 7, height: 7)
     }
 
-    private func statusDot(_ color: Color, label: String) -> some View {
-        Circle()
-            .fill(color)
-            .frame(width: 7, height: 7)
-            .shadow(color: color.opacity(0.35), radius: 3)
-            .accessibilityLabel(label)
-    }
-
-    private var activityColor: Color {
-        switch snapshot?.currentActivity {
-        case .thinking, .tool, .fileChange, .agentResponse: Color(nsColor: .systemGreen)
-        case .waitingApproval: Color(nsColor: .systemYellow)
-        case .failed, .interrupted, .systemError: Color(nsColor: .systemRed)
-        case .completed, .idle: Color(nsColor: .systemGreen)
-        case .disconnected, .none: Color(nsColor: .systemGray)
+    private func dotColor(position: Int, snapshot: MonitorRuntimeSnapshot?, palette: MonitorVisualPalette) -> Color {
+        guard let snapshot,
+              snapshot.sourceHealth[.desktopLocal]?.availability != .unavailable else { return Color(nsColor: .systemGray) }
+        switch snapshot.currentState {
+        case .waitingApproval: return position == 2 ? palette.tint : Color(nsColor: .systemGray)
+        case .failed, .interrupted, .systemError: return position == 3 ? palette.tint : Color(nsColor: .systemGray)
+        case .thinking, .working: return position == 1 ? palette.tint : Color(nsColor: .systemGray)
+        case .idle, .completed: return Color(nsColor: .systemGreen)
+        case .disconnected, .paused: return Color(nsColor: .systemGray)
         }
     }
 
-    private var sourceColor: Color {
-        guard let health = snapshot?.sourceHealth[.desktopLocal] else { return Color(nsColor: .systemGray) }
-        return health.availability == .available ? Color(nsColor: .systemGreen) : Color(nsColor: .systemGray)
+    private func dotOpacity(position: Int, snapshot: MonitorRuntimeSnapshot?, animatedOpacity: Double) -> Double {
+        guard let state = snapshot?.currentState else { return 0.9 }
+        switch state {
+        case .thinking where position == 1,
+             .working where position == 1,
+             .waitingApproval where position == 2:
+            return animatedOpacity
+        default:
+            return 0.9
+        }
     }
 }
 
@@ -186,12 +190,10 @@ struct MonitorValueRow: View {
 
     var body: some View {
         HStack(alignment: .firstTextBaseline, spacing: 16) {
-            Text(title)
-                .font(.system(size: 13, weight: .regular))
-                .foregroundStyle(.secondary)
+            Text(title).font(.system(size: 13)).foregroundStyle(.secondary)
             Spacer(minLength: 8)
             Text(value)
-                .font(.system(size: 13, weight: .medium, design: .rounded))
+                .font(.system(size: 13, weight: .medium))
                 .foregroundStyle(valueColor)
                 .multilineTextAlignment(.trailing)
                 .lineLimit(2)
@@ -202,21 +204,13 @@ struct MonitorValueRow: View {
 
 struct MonitorSectionTitle: View {
     let title: String
-
     var body: some View {
-        Text(title.uppercased())
-            .font(.system(size: 11, weight: .semibold))
-            .tracking(0.7)
-            .foregroundStyle(.secondary)
+        Text(title).font(.system(size: 15, weight: .semibold)).foregroundStyle(.primary)
     }
 }
 
 struct MonitorDivider: View {
-    var body: some View {
-        Rectangle()
-            .fill(Color.primary.opacity(0.1))
-            .frame(height: 1)
-    }
+    var body: some View { Rectangle().fill(Color.primary.opacity(0.12)).frame(height: 1) }
 }
 
 enum MonitorDisplayValue {
@@ -225,15 +219,28 @@ enum MonitorDisplayValue {
     }
 
     static func token(_ snapshot: MonitorRuntimeSnapshot?) -> String {
-        snapshot?.sessionToken.map(String.init) ?? availability(snapshot?.currentThread?.sessionTokenAvailability)
+        snapshot?.sessionToken.map(tokenFormat) ?? availability(snapshot?.currentThread?.sessionTokenAvailability)
     }
 
     static func usage(_ snapshot: MonitorRuntimeSnapshot?) -> String {
-        snapshot?.usage.usage?.totalTokens.map(String.init) ?? availability(snapshot?.usage.availability)
+        snapshot?.usage.usage?.totalTokens.map { tokenFormat(Int64($0)) } ?? availability(snapshot?.usage.availability)
     }
 
-    static func quota(_ snapshot: MonitorRuntimeSnapshot?) -> String {
-        snapshot?.quota.primary?.usedPercent.map { String(format: "%.0f%% used", $0) } ?? availability(snapshot?.quota.primaryAvailability)
+    static func remainingQuota(_ snapshot: MonitorRuntimeSnapshot?) -> String {
+        let windows: [(RateLimitWindow?, MonitorDataAvailability)] = [
+            (snapshot?.quota.primary, snapshot?.quota.primaryAvailability ?? .unavailable),
+            (snapshot?.quota.secondary, snapshot?.quota.secondaryAvailability ?? .unavailable)
+        ]
+        let remaining = windows.compactMap { window, availability -> Double? in
+            guard availability == .available, let used = window?.usedPercent else { return nil }
+            return min(max(100 - used, 0), 100)
+        }.min()
+        return remaining.map { String(format: "%.0f%%", $0) } ?? availability(snapshot?.quota.primaryAvailability)
+    }
+
+    static func orbQuota(_ snapshot: MonitorRuntimeSnapshot?) -> String {
+        let value = remainingQuota(snapshot)
+        return value.hasSuffix("%") ? value : "--"
     }
 
     static func reset(_ snapshot: MonitorRuntimeSnapshot?) -> String {
@@ -241,7 +248,9 @@ enum MonitorDisplayValue {
     }
 
     static func state(_ snapshot: MonitorRuntimeSnapshot?) -> String {
-        snapshot?.currentState.rawValue.replacingOccurrences(of: "_", with: " ") ?? "UNAVAILABLE"
+        guard let snapshot else { return "SOURCE UNAVAILABLE" }
+        if snapshot.sourceHealth[.desktopLocal]?.availability == .unavailable { return "SOURCE UNAVAILABLE" }
+        return snapshot.currentState.rawValue.replacingOccurrences(of: "_", with: " ").capitalized
     }
 
     static func activity(_ snapshot: MonitorRuntimeSnapshot?) -> String {
@@ -249,16 +258,34 @@ enum MonitorDisplayValue {
         switch activity {
         case .thinking: return "Thinking"
         case .tool: return "Working"
-        case .fileChange: return "File Change"
-        case .agentResponse: return "Agent Response"
-        case .waitingApproval: return "Waiting Approval"
+        case .fileChange: return "Changing files"
+        case .agentResponse: return "Responding"
+        case .waitingApproval: return "Waiting for confirmation in Codex"
         case .completed: return "Completed"
         case .failed: return "Failed"
         case .interrupted: return "Interrupted"
         case .systemError: return "System Error"
         case .idle: return "Idle"
-        case .disconnected: return "Codex Unavailable"
+        case .disconnected: return "Codex unavailable"
         }
+    }
+
+    static func taskTitle(_ snapshot: MonitorRuntimeSnapshot?) -> String {
+        snapshot?.currentThread?.taskTitle ?? "No active session"
+    }
+
+    static func modelRuntime(_ snapshot: MonitorRuntimeSnapshot?) -> String {
+        let model = snapshot?.currentThread?.model ?? "Model UNKNOWN"
+        guard let since = snapshot?.currentStateSince else { return "\(model) · Runtime UNKNOWN" }
+        let seconds = max(0, Int(Date().timeIntervalSince(since)))
+        return "\(model) · Runtime \(duration(seconds))"
+    }
+
+    static func update(_ snapshot: MonitorRuntimeSnapshot?) -> String {
+        guard let snapshot, snapshot.sourceHealth[.desktopLocal]?.availability == .available else { return "SOURCE UNAVAILABLE" }
+        let formatter = DateFormatter()
+        formatter.timeStyle = .short
+        return "Updated \(formatter.string(from: snapshot.capturedAt))"
     }
 
     static func source(_ source: MonitorRuntimeSource) -> String {
@@ -270,15 +297,16 @@ enum MonitorDisplayValue {
     }
 
     static func capability(_ capability: MonitorRuntimeCapability) -> String {
-        switch capability {
-        case .currentState: return "Current State"
-        case .sessionThreadAttribution: return "Session / Thread"
-        case .waitingApproval: return "Waiting Approval"
-        case .approvalResolution: return "Approval Resolution"
-        case .sessionToken: return "Session Token"
-        case .usage: return "Usage"
-        case .quota: return "Quota"
-        case .resetInformation: return "Reset Information"
-        }
+        capability.rawValue.replacingOccurrences(of: "([a-z])([A-Z])", with: "$1 $2", options: .regularExpression)
+    }
+
+    static func tokenFormat(_ value: Int64) -> String {
+        let formatter = NumberFormatter()
+        formatter.numberStyle = .decimal
+        return "\(formatter.string(from: NSNumber(value: value)) ?? String(value)) Token"
+    }
+
+    private static func duration(_ seconds: Int) -> String {
+        String(format: "%d:%02d", seconds / 60, seconds % 60)
     }
 }

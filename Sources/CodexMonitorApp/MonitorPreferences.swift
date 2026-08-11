@@ -15,7 +15,9 @@ public final class MonitorPreferences: ObservableObject {
     public init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
         showOrb = defaults.object(forKey: Keys.showOrb) as? Bool ?? true
-        orbSize = Self.clampedSize(CGFloat(defaults.object(forKey: Keys.orbSize) as? Double ?? 96))
+        // A persisted user value is always preserved. 90 pt is only the
+        // approved fresh-install default for the rebuilt Orb.
+        orbSize = Self.clampedSize(CGFloat(defaults.object(forKey: Keys.orbSize) as? Double ?? FloatingOrbSurfaceConfiguration.freshInstallDefaultSize))
         showUsageMenu = defaults.object(forKey: Keys.showUsageMenu) as? Bool ?? true
         showSettingsMenu = defaults.object(forKey: Keys.showSettingsMenu) as? Bool ?? true
         if defaults.object(forKey: Keys.orbX) != nil, defaults.object(forKey: Keys.orbY) != nil {
@@ -23,7 +25,7 @@ public final class MonitorPreferences: ObservableObject {
         } else { orbOrigin = nil }
     }
 
-    public static func clampedSize(_ value: CGFloat) -> CGFloat { min(max(value, 72), 180) }
+    public static func clampedSize(_ value: CGFloat) -> CGFloat { min(max(value, FloatingOrbSurfaceConfiguration.minimumSize), FloatingOrbSurfaceConfiguration.maximumSize) }
     private func persistOrigin() {
         guard let orbOrigin else { defaults.removeObject(forKey: Keys.orbX); defaults.removeObject(forKey: Keys.orbY); return }
         defaults.set(Double(orbOrigin.x), forKey: Keys.orbX); defaults.set(Double(orbOrigin.y), forKey: Keys.orbY)
