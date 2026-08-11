@@ -167,22 +167,30 @@ public struct UsagePresence: Codable, Sendable, Equatable {
     public let outputTokens: Int?
     public let reasoningOutputTokens: Int?
     public let totalTokens: Int?
+    public let dailyBuckets: [AccountUsageDailyBucket]?
     public let costUSD: Decimal? = nil
-    public init(summaryAvailable: Bool? = nil, dailyBucketsAvailable: Bool? = nil, inputTokens: Int? = nil, cachedInputTokens: Int? = nil, outputTokens: Int? = nil, reasoningOutputTokens: Int? = nil, totalTokens: Int? = nil) {
+    public init(summaryAvailable: Bool? = nil, dailyBucketsAvailable: Bool? = nil, inputTokens: Int? = nil, cachedInputTokens: Int? = nil, outputTokens: Int? = nil, reasoningOutputTokens: Int? = nil, totalTokens: Int? = nil, dailyBuckets: [AccountUsageDailyBucket]? = nil) {
         self.summaryAvailable = summaryAvailable; self.dailyBucketsAvailable = dailyBucketsAvailable; self.inputTokens = inputTokens
-        self.cachedInputTokens = cachedInputTokens; self.outputTokens = outputTokens; self.reasoningOutputTokens = reasoningOutputTokens; self.totalTokens = totalTokens
+        self.cachedInputTokens = cachedInputTokens; self.outputTokens = outputTokens; self.reasoningOutputTokens = reasoningOutputTokens; self.totalTokens = totalTokens; self.dailyBuckets = dailyBuckets
     }
-    private enum CodingKeys: String, CodingKey { case summaryAvailable, dailyBucketsAvailable, inputTokens, cachedInputTokens, outputTokens, reasoningOutputTokens, totalTokens }
+    private enum CodingKeys: String, CodingKey { case summaryAvailable, dailyBucketsAvailable, inputTokens, cachedInputTokens, outputTokens, reasoningOutputTokens, totalTokens, dailyBuckets }
     public init(from decoder: Decoder) throws {
         let values = try decoder.container(keyedBy: CodingKeys.self)
-        self.init(summaryAvailable: try values.decodeIfPresent(Bool.self, forKey: .summaryAvailable), dailyBucketsAvailable: try values.decodeIfPresent(Bool.self, forKey: .dailyBucketsAvailable), inputTokens: try values.decodeIfPresent(Int.self, forKey: .inputTokens), cachedInputTokens: try values.decodeIfPresent(Int.self, forKey: .cachedInputTokens), outputTokens: try values.decodeIfPresent(Int.self, forKey: .outputTokens), reasoningOutputTokens: try values.decodeIfPresent(Int.self, forKey: .reasoningOutputTokens), totalTokens: try values.decodeIfPresent(Int.self, forKey: .totalTokens))
+        self.init(summaryAvailable: try values.decodeIfPresent(Bool.self, forKey: .summaryAvailable), dailyBucketsAvailable: try values.decodeIfPresent(Bool.self, forKey: .dailyBucketsAvailable), inputTokens: try values.decodeIfPresent(Int.self, forKey: .inputTokens), cachedInputTokens: try values.decodeIfPresent(Int.self, forKey: .cachedInputTokens), outputTokens: try values.decodeIfPresent(Int.self, forKey: .outputTokens), reasoningOutputTokens: try values.decodeIfPresent(Int.self, forKey: .reasoningOutputTokens), totalTokens: try values.decodeIfPresent(Int.self, forKey: .totalTokens), dailyBuckets: try values.decodeIfPresent([AccountUsageDailyBucket].self, forKey: .dailyBuckets))
     }
     public func encode(to encoder: Encoder) throws {
         var values = encoder.container(keyedBy: CodingKeys.self)
         try values.encodeIfPresent(summaryAvailable, forKey: .summaryAvailable); try values.encodeIfPresent(dailyBucketsAvailable, forKey: .dailyBucketsAvailable)
         try values.encodeIfPresent(inputTokens, forKey: .inputTokens); try values.encodeIfPresent(cachedInputTokens, forKey: .cachedInputTokens)
-        try values.encodeIfPresent(outputTokens, forKey: .outputTokens); try values.encodeIfPresent(reasoningOutputTokens, forKey: .reasoningOutputTokens); try values.encodeIfPresent(totalTokens, forKey: .totalTokens)
+        try values.encodeIfPresent(outputTokens, forKey: .outputTokens); try values.encodeIfPresent(reasoningOutputTokens, forKey: .reasoningOutputTokens); try values.encodeIfPresent(totalTokens, forKey: .totalTokens); try values.encodeIfPresent(dailyBuckets, forKey: .dailyBuckets)
     }
+}
+
+public struct AccountUsageDailyBucket: Codable, Sendable, Equatable, Identifiable {
+    public let startDate: String
+    public let tokens: Int
+    public var id: String { startDate }
+    public init(startDate: String, tokens: Int) { self.startDate = startDate; self.tokens = max(0, tokens) }
 }
 
 public struct AccountSnapshot: Codable, Sendable, Equatable {

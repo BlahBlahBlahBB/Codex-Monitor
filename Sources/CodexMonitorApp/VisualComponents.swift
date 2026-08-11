@@ -145,8 +145,8 @@ struct MonitorOrbView: View {
         .clipShape(Circle())
         .shadow(color: Color.black.opacity(0.12), radius: 10, y: 5)
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel("Codex \(MonitorDisplayValue.state(snapshot)); remaining quota \(MonitorDisplayValue.orbQuota(snapshot))")
-        .accessibilityHint("Click to toggle Quick View. Drag to move. Right click for menu.")
+        .accessibilityLabel(String(format: L10n.tr("accessibility.orb"), MonitorDisplayValue.state(snapshot), MonitorDisplayValue.orbQuota(snapshot)))
+        .accessibilityHint(L10n.tr("accessibility.orbHint"))
         .onAppear { breathing = palette.usesBreathing && !reduceMotion }
         .onChange(of: reduceMotion) { value in breathing = palette.usesBreathing && !value }
         .onChange(of: palette.usesBreathing) { value in breathing = value && !reduceMotion }
@@ -177,7 +177,7 @@ struct MenuStatusCapsuleView: View {
         .background(PersistentGlassCapsule())
         .overlay(Capsule().strokeBorder(Color.white.opacity(0.74), lineWidth: 0.7))
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel("Codex Monitor \(MonitorDisplayValue.state(snapshot))")
+        .accessibilityLabel(String(format: L10n.tr("accessibility.menuStatus"), MonitorDisplayValue.state(snapshot)))
         .onAppear { breathing = palette.usesBreathing && !reduceMotion }
         .onChange(of: reduceMotion) { value in breathing = palette.usesBreathing && !value }
         .onChange(of: palette.usesBreathing) { value in breathing = value && !reduceMotion }
@@ -264,6 +264,30 @@ enum MonitorDisplayValue {
 
     static func usage(_ snapshot: MonitorRuntimeSnapshot?) -> String {
         snapshot?.usage.usage?.totalTokens.map { tokenFormat(Int64($0)) } ?? availability(snapshot?.usage.availability)
+    }
+
+    static func account(_ snapshot: MonitorRuntimeSnapshot?) -> String {
+        snapshot?.account.accountKind?.capitalized ?? availability(snapshot?.account.availability)
+    }
+
+    static func plan(_ snapshot: MonitorRuntimeSnapshot?) -> String {
+        snapshot?.account.plan?.capitalized ?? availability(snapshot?.account.availability)
+    }
+
+    static func todayUsage(_ snapshot: MonitorRuntimeSnapshot?) -> String {
+        guard snapshot?.usage.availability == .available,
+              let value = snapshot?.usage.usage?.dailyBuckets?.last?.tokens else {
+            return availability(snapshot?.usage.availability)
+        }
+        return tokenFormat(Int64(value))
+    }
+
+    static func last30DaysUsage(_ snapshot: MonitorRuntimeSnapshot?) -> String {
+        guard snapshot?.usage.availability == .available,
+              let buckets = snapshot?.usage.usage?.dailyBuckets else {
+            return availability(snapshot?.usage.availability)
+        }
+        return tokenFormat(Int64(buckets.reduce(0) { $0 + $1.tokens }))
     }
 
     static func remainingQuota(_ snapshot: MonitorRuntimeSnapshot?) -> String {

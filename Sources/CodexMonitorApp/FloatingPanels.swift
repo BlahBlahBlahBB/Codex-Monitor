@@ -189,7 +189,7 @@ final class FloatingStatusPanelController: NSObject, ObservableObject, NSWindowD
     @objc private func quit() { actions.quit() }
 }
 
-private final class OrbHostingView: NSHostingView<FloatingOrbRoot> {
+final class OrbHostingView: NSHostingView<FloatingOrbRoot> {
     private let menuProvider: () -> NSMenu
 
     init(rootView: FloatingOrbRoot, menuProvider: @escaping () -> NSMenu) {
@@ -283,6 +283,6 @@ private struct QuickView: View {
         }
         .frame(width: 350, height: 214)
         .accessibilityElement(children: .combine)
-        .accessibilityLabel("Codex \(MonitorDisplayValue.state(snapshot)). \(MonitorDisplayValue.activity(snapshot))")
+        .accessibilityLabel(String(format: L10n.tr("accessibility.quickView"), MonitorDisplayValue.state(snapshot), MonitorDisplayValue.activity(snapshot)))
     }
 }

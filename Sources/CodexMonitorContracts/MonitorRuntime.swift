@@ -114,6 +114,12 @@ public struct MonitorUsageViewModel: Sendable, Equatable {
     public let usage: UsagePresence?
 }
 
+public struct MonitorAccountViewModel: Sendable, Equatable {
+    public let availability: MonitorDataAvailability
+    public let accountKind: String?
+    public let plan: String?
+}
+
 public struct MonitorQuotaViewModel: Sendable, Equatable {
     public let primaryAvailability: MonitorDataAvailability
     public let primary: RateLimitWindow?
@@ -143,6 +149,7 @@ public struct MonitorRuntimeSnapshot: Sendable, Equatable {
     public let waitingApprovalCount: Int
     public let threads: [MonitorThreadViewModel]
     public let sessionToken: Int64?
+    public let account: MonitorAccountViewModel
     public let usage: MonitorUsageViewModel
     public let quota: MonitorQuotaViewModel
     public let resetInformation: MonitorResetInformationViewModel
@@ -163,6 +170,7 @@ public struct MonitorRuntimeSnapshot: Sendable, Equatable {
         waitingApprovalCount == other.waitingApprovalCount &&
         threads.count == other.threads.count && zip(threads, other.threads).allSatisfy { equivalent($0, $1) } &&
         sessionToken == other.sessionToken &&
+        account == other.account &&
         usage == other.usage &&
         quota == other.quota &&
         resetInformation == other.resetInformation &&
@@ -364,10 +372,11 @@ public actor MonitorRuntimeStore {
             accountSource: accountHealth,
             accountCapabilities: accountCapabilities
         )
+        let accountView = MonitorRuntimeSnapshotBuilder.account(account, source: accountHealth)
         let usage = MonitorRuntimeSnapshotBuilder.usage(account, source: accountHealth, capability: accountCapabilities.usage)
         let quota = MonitorRuntimeSnapshotBuilder.quota(account, source: accountHealth, primaryCapability: accountCapabilities.primaryQuota, secondaryCapability: accountCapabilities.secondaryQuota)
         let reset = MonitorRuntimeSnapshotBuilder.reset(account, source: accountHealth, countCapability: accountCapabilities.resetCount, detailsCapability: accountCapabilities.resetDetails)
-        return MonitorRuntimeSnapshot(capturedAt: now, monitoringPhase: monitoringPhase, currentState: runtime.state, currentStateSince: runtime.stateSince, currentActivity: runtime.currentActivityCategory, currentThread: current, currentSessionThread: MonitorSessionThreadAttribution(thread: current), activeThreadCount: runtime.activeThreadCount, waitingApprovalCount: runtime.waitingApprovalCount, threads: threads, sessionToken: current?.sessionToken, usage: usage, quota: quota, resetInformation: reset, sourceHealth: [.desktopLocal: desktopHealth, .approvalLocal: approvalHealth, .account: accountHealth], capabilities: capabilities)
+        return MonitorRuntimeSnapshot(capturedAt: now, monitoringPhase: monitoringPhase, currentState: runtime.state, currentStateSince: runtime.stateSince, currentActivity: runtime.currentActivityCategory, currentThread: current, currentSessionThread: MonitorSessionThreadAttribution(thread: current), activeThreadCount: runtime.activeThreadCount, waitingApprovalCount: runtime.waitingApprovalCount, threads: threads, sessionToken: current?.sessionToken, account: accountView, usage: usage, quota: quota, resetInformation: reset, sourceHealth: [.desktopLocal: desktopHealth, .approvalLocal: approvalHealth, .account: accountHealth], capabilities: capabilities)
     }
 
     private func freshAccount(at now: Date) -> AccountSnapshot? {
@@ -418,6 +427,13 @@ private struct SourceState: Sendable {
 }
 
 private enum MonitorRuntimeSnapshotBuilder {
+    static func account(_ account: AccountSnapshot?, source: MonitorSourceHealth) -> MonitorAccountViewModel {
+        guard source.availability == .available, let account else {
+            return MonitorAccountViewModel(availability: source.availability, accountKind: nil, plan: nil)
+        }
+        return MonitorAccountViewModel(availability: .available, accountKind: account.authMode, plan: account.planType)
+    }
+
     static func waitingApprovalAvailability(for thread: ThreadRuntimeSnapshot) -> MonitorCapabilityAvailability {
         switch thread.approvalHealth {
         case .availableKnownNotWaiting, .availableWaiting: return MonitorCapabilityAvailability(availability: .available)

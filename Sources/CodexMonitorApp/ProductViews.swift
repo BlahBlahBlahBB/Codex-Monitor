@@ -25,8 +25,8 @@ struct MenuBarPopoverView: View {
 
                 // Block 2 — information only.
                 VStack(alignment: .leading, spacing: 8) {
-                    MonitorPopoverRow(label: L10n.tr("label.account"), value: L10n.unknown)
-                    MonitorPopoverRow(label: L10n.tr("label.plan"), value: L10n.unknown)
+                    MonitorPopoverRow(label: L10n.tr("label.account"), value: MonitorDisplayValue.account(snapshot))
+                    MonitorPopoverRow(label: L10n.tr("label.plan"), value: MonitorDisplayValue.plan(snapshot))
                     MonitorPopoverRow(label: L10n.tr("label.quota"), value: MonitorDisplayValue.remainingQuota(snapshot))
                     MonitorPopoverRow(label: L10n.tr("label.resetCredit"), value: MonitorDisplayValue.reset(snapshot))
                 }
@@ -80,13 +80,14 @@ private struct PopoverActionRowStyle: ButtonStyle {
     let isHovered: Bool
     let enabled: Bool
     func makeBody(configuration: Configuration) -> some View {
+        let state: PopoverActionVisualState = !enabled ? .disabled : (configuration.isPressed ? .pressed : (isHovered ? .hover : .rest))
         configuration.label
             .padding(.horizontal, 8)
             .foregroundStyle(enabled ? .primary : .secondary)
             .opacity(enabled ? 1 : 0.42)
             .background {
                 RoundedRectangle(cornerRadius: UIInteractionContract.actionRowCornerRadius, style: .continuous)
-                    .fill(Color.primary.opacity(configuration.isPressed ? 0.16 : (isHovered ? 0.09 : 0)))
+                    .fill(Color.primary.opacity(PopoverActionFeedback.surfaceOpacity(for: state)))
             }
             .animation(.easeOut(duration: 0.15), value: configuration.isPressed)
             .animation(.easeOut(duration: 0.15), value: isHovered)
@@ -114,8 +115,8 @@ struct UsageWindowView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
                 UsageFactSection(title: L10n.tr("label.account")) {
-                    UsageFactRow(label: L10n.tr("label.account"), value: L10n.unknown)
-                    UsageFactRow(label: L10n.tr("label.plan"), value: L10n.unknown)
+                    UsageFactRow(label: L10n.tr("label.account"), value: MonitorDisplayValue.account(snapshot))
+                    UsageFactRow(label: L10n.tr("label.plan"), value: MonitorDisplayValue.plan(snapshot))
                 }
                 UsageFactSection(title: L10n.tr("label.session")) {
                     UsageFactRow(label: L10n.tr("label.currentSession"), value: MonitorDisplayValue.taskTitle(snapshot))
@@ -128,7 +129,7 @@ struct UsageWindowView: View {
                 VStack(alignment: .leading, spacing: 12) {
                     MonitorSectionTitle(title: L10n.tr("label.tokenUsage"))
                     UsageMetricGrid(snapshot: snapshot)
-                    UsageHistoryUnavailableChart()
+                    UsageHistoryChart(snapshot: snapshot)
                 }
             }
             .padding(18)
@@ -175,8 +176,8 @@ private struct UsageMetricGrid: View {
         LazyVGrid(columns: [GridItem(.flexible(), spacing: 0), GridItem(.flexible(), spacing: 0)], spacing: 0) {
             UsageMetric(title: L10n.tr("label.todayCost"), value: "$--")
             UsageMetric(title: L10n.tr("label.last30DaysCost"), value: "$--")
-            UsageMetric(title: L10n.tr("label.todayToken"), value: L10n.unknown)
-            UsageMetric(title: L10n.tr("label.last30DaysToken"), value: MonitorDisplayValue.usage(snapshot))
+            UsageMetric(title: L10n.tr("label.todayToken"), value: MonitorDisplayValue.todayUsage(snapshot))
+            UsageMetric(title: L10n.tr("label.last30DaysToken"), value: MonitorDisplayValue.last30DaysUsage(snapshot))
         }
         .background(Color(nsColor: .controlBackgroundColor).opacity(0.42), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
     }
@@ -196,21 +197,31 @@ private struct UsageMetric: View {
     }
 }
 
-private struct UsageHistoryUnavailableChart: View {
+private struct UsageHistoryChart: View {
+    let snapshot: MonitorRuntimeSnapshot?
     var body: some View {
+        let buckets = snapshot?.usage.availability == .available ? snapshot?.usage.usage?.dailyBuckets : nil
         VStack(alignment: .leading, spacing: 8) {
             Text(L10n.tr("label.last30CalendarDays")).font(.system(size: 13, weight: .medium))
-            HStack(alignment: .bottom, spacing: 3) {
-                ForEach(0..<30, id: \.self) { _ in
-                    Capsule().fill(Color.secondary.opacity(0.16)).frame(maxWidth: .infinity).frame(height: 3)
+            if let buckets {
+                let peak = max(1, buckets.map(\.tokens).max() ?? 0)
+                HStack(alignment: .bottom, spacing: 3) {
+                    ForEach(buckets) { bucket in
+                        Capsule().fill(Color.accentColor.opacity(0.58)).frame(maxWidth: .infinity).frame(height: max(3, CGFloat(bucket.tokens) / CGFloat(peak) * 22))
+                    }
                 }
+                .frame(height: 22, alignment: .bottom)
+            } else {
+                HStack(alignment: .bottom, spacing: 3) {
+                    ForEach(0..<30, id: \.self) { _ in Capsule().fill(Color.secondary.opacity(0.16)).frame(maxWidth: .infinity).frame(height: 3) }
+                }
+                .frame(height: 22, alignment: .bottom)
+                Text(L10n.tr("usage.historyUnavailable")).font(.system(size: 12)).foregroundStyle(.secondary)
             }
-            .frame(height: 22, alignment: .bottom)
-            Text(L10n.tr("usage.historyUnavailable")).font(.system(size: 12)).foregroundStyle(.secondary)
         }
         .padding(.top, 4)
         .accessibilityElement(children: .combine)
-        .accessibilityLabel(L10n.tr("usage.historyUnavailable"))
+        .accessibilityLabel(buckets == nil ? L10n.tr("usage.historyUnavailable") : L10n.tr("label.last30CalendarDays"))
     }
 }
 
@@ -240,16 +251,19 @@ enum SettingsSection: CaseIterable, Identifiable {
     static let defaultSection: SettingsSection = .floating
 }
 
+@MainActor
+final class SettingsPresentationModel: ObservableObject {
+    @Published var selection: SettingsSection = .defaultSection
+}
+
 struct NativeSettingsWindowView: View {
     @ObservedObject var preferences: MonitorPreferences
+    @ObservedObject var presentation: SettingsPresentationModel
     let showDiagnostics: () -> Void
-    // Non-optional default prevents an AppKit-hosted NavigationSplitView from
-    // taking the empty initial route that caused the QA blank-window bug.
-    @State private var selection: SettingsSection = .defaultSection
 
     var body: some View {
         NavigationSplitView {
-            List(selection: $selection) {
+            List(selection: $presentation.selection) {
                 ForEach(SettingsSection.allCases) { section in
                     Label(section.title, systemImage: section.symbol).tag(section)
                 }
@@ -257,7 +271,7 @@ struct NativeSettingsWindowView: View {
             .listStyle(.sidebar)
             .navigationSplitViewColumnWidth(min: 180, ideal: 200, max: 220)
         } detail: {
-            settingsDetail(for: selection)
+            settingsDetail(for: presentation.selection)
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
                 .background(Color(nsColor: .windowBackgroundColor))
         }

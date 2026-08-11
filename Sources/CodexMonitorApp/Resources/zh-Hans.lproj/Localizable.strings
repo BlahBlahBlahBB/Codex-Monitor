@@ -67,3 +67,7 @@
 "diagnostics.sourceHealth" = "来源健康";
 "diagnostics.capabilities" = "能力";
 "diagnostics.state" = "状态";
+"accessibility.quickView" = "Codex %@。%@";
+"accessibility.orb" = "Codex %@；剩余额度 %@";
+"accessibility.orbHint" = "单击切换速览。拖动可移动。右键打开菜单。";
+"accessibility.menuStatus" = "Codex Monitor %@";

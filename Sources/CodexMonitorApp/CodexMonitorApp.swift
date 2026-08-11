@@ -18,6 +18,7 @@ struct CodexMonitorApp: App {
 final class CodexMonitorAppDelegate: NSObject, NSApplicationDelegate {
     private let runtime = MonitorRuntimeStore()
     private lazy var driver = CodexLocalMonitorDriver(runtime: runtime)
+    private lazy var accountProvider = AccountUsageProvider(runtime: runtime)
     private let model = MonitorAppModel()
     let preferences = MonitorPreferences()
     private var surfaces: MonitorSurfaceCoordinator?
@@ -35,6 +36,7 @@ final class CodexMonitorAppDelegate: NSObject, NSApplicationDelegate {
         model.startObserving(runtime)
         surfaces.start()
         Task { await driver.start() }
+        Task { await accountProvider.start() }
         startSmokeExitIfRequested()
     }
 
@@ -43,6 +45,7 @@ final class CodexMonitorAppDelegate: NSObject, NSApplicationDelegate {
         model.stopObserving()
         surfaces?.stop()
         Task { await driver.stop() }
+        Task { await accountProvider.stop() }
     }
 
     private func restartObservation() {

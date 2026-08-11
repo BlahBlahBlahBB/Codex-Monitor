@@ -1,7 +1,9 @@
+import AppKit
 import CoreGraphics
 import Foundation
 import XCTest
 @testable import CodexMonitorApp
+@testable import CodexMonitorContracts
 
 @MainActor
 final class MonitorProductIntegrationTests: XCTestCase {
@@ -40,6 +42,8 @@ final class MonitorProductIntegrationTests: XCTestCase {
         XCTAssertEqual(FloatingOrbSurfaceConfiguration.quickViewSize, CGSize(width: 350, height: 214))
         XCTAssertFalse(FloatingOrbSurfaceConfiguration.isOpaque)
         XCTAssertFalse(FloatingOrbSurfaceConfiguration.hasPanelShadow)
+        let host = OrbHostingView(rootView: FloatingOrbRoot(model: MonitorAppModel(), preferences: preferences, action: {}), menuProvider: { NSMenu() })
+        XCTAssertFalse(host.isOpaque)
     }
 
     func testNativeSurfaceOwnershipPreventsDuplicateControllers() {
@@ -65,6 +69,11 @@ final class MonitorProductIntegrationTests: XCTestCase {
         XCTAssertEqual(L10n.tr("menu.refresh", languageCode: "en"), "Refresh")
         XCTAssertEqual(L10n.tr("menu.refresh", languageCode: "zh-Hans"), "刷新")
         XCTAssertEqual(L10n.tr("menu.alwaysOnTopUnavailable", languageCode: "zh-Hans"), "始终置顶（不可用）")
+        XCTAssertEqual(PopoverActionFeedback.surfaceOpacity(for: .rest), 0)
+        XCTAssertEqual(PopoverActionFeedback.surfaceOpacity(for: .hover), 0.09)
+        XCTAssertEqual(PopoverActionFeedback.surfaceOpacity(for: .pressed), 0.16)
+        XCTAssertEqual(PopoverActionFeedback.surfaceOpacity(for: .keyboardFocus), 0)
+        XCTAssertEqual(PopoverActionFeedback.surfaceOpacity(for: .disabled), 0)
     }
 
     func testRestoredFloatingWindowOriginStaysInsideAnAvailableScreen() {
@@ -117,5 +126,59 @@ final class MonitorProductIntegrationTests: XCTestCase {
             L10n.tr("activity.currentTask")
         )
         XCTAssertEqual(MonitorDisplayValue.taskTitleForPresentation("Implement the status view"), "Implement the status view")
+    }
+
+    func testSettingsControllerRetainsOneRootForThirtyCloseReopenCycles() {
+        let suite = "CodexMonitorTests.settings.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let controller = SettingsWindowController(preferences: MonitorPreferences(defaults: defaults), showDiagnostics: {})
+        let root = controller.window?.contentView
+        XCTAssertNotNil(root)
+        XCTAssertEqual(controller.presentation.selection, .floating)
+
+        for index in 0..<30 {
+            controller.show()
+            XCTAssertTrue(controller.window?.isVisible == true, "open cycle \(index)")
+            XCTAssertTrue(controller.window?.contentView === root, "root replacement on cycle \(index)")
+            controller.presentation.selection = SettingsSection.allCases[index % SettingsSection.allCases.count]
+            XCTAssertNotNil(controller.window?.contentView, "missing detail host on cycle \(index)")
+            controller.close()
+            XCTAssertFalse(controller.window?.isVisible == true, "close cycle \(index)")
+        }
+        controller.show()
+        XCTAssertTrue(controller.window?.isVisible == true)
+        XCTAssertTrue(controller.window?.contentView === root)
+        controller.close()
+    }
+
+    func testAccountUsageProviderMapsAuthoritativeReadShapesAndQuotaRemaining() async throws {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(secondsFromGMT: 0)!
+        let observedAt = Date()
+        let account: JSONValue = .object(["account": .object(["type": .string("chatgpt"), "planType": .string("pro"), "email": .string("user@example.test")])])
+        let limits: JSONValue = .object([
+            "rateLimits": .object(["primary": .object(["usedPercent": .number(40), "windowDurationMins": .number(300), "resetsAt": .number(1_725_001_000)]), "secondary": .null]),
+            "rateLimitsByLimitId": .object(["codex": .object(["primary": .object(["usedPercent": .number(70), "windowDurationMins": .number(60), "resetsAt": .number(1_725_000_500)]), "secondary": .null])]),
+            "rateLimitResetCredits": .object(["availableCount": .number(2)])
+        ])
+        let date = DateFormatter()
+        date.calendar = calendar; date.locale = Locale(identifier: "en_US_POSIX"); date.timeZone = calendar.timeZone; date.dateFormat = "yyyy-MM-dd"
+        let today = date.string(from: observedAt)
+        let usage: JSONValue = .object(["summary": .object(["lifetimeTokens": .number(900)]), "dailyUsageBuckets": .array([.object(["startDate": .string(today), "tokens": .number(45)])])])
+
+        let mapped = try AccountUsageProvider.snapshot(accountResponse: account, rateLimitsResponse: limits, usageResponse: usage, observedAt: observedAt, calendar: calendar)
+        XCTAssertEqual(mapped.authMode, "chatgpt")
+        XCTAssertEqual(mapped.planType, "pro")
+        XCTAssertEqual(mapped.primaryRateLimit?.usedPercent, 70)
+        XCTAssertEqual(mapped.resetCreditCount, 2)
+        XCTAssertEqual(mapped.usage?.dailyBuckets?.count, 30)
+        XCTAssertEqual(mapped.usage?.dailyBuckets?.last?.tokens, 45)
+
+        let runtime = MonitorRuntimeStore(initialPhase: .live)
+        await runtime.ingest(account: mapped)
+        let snapshot = await runtime.snapshot()
+        XCTAssertEqual(MonitorDisplayValue.orbQuota(snapshot), "30%")
+        XCTAssertEqual(MonitorDisplayValue.todayUsage(snapshot), "45 Token")
     }
 }

@@ -67,3 +67,7 @@
 "diagnostics.sourceHealth" = "Source Health";
 "diagnostics.capabilities" = "Capabilities";
 "diagnostics.state" = "State";
+"accessibility.quickView" = "Codex %@. %@";
+"accessibility.orb" = "Codex %@; remaining quota %@";
+"accessibility.orbHint" = "Click to toggle Quick View. Drag to move. Right click for menu.";
+"accessibility.menuStatus" = "Codex Monitor %@";

@@ -215,9 +215,12 @@ final class UsageWindowController: ReusableNativeWindowController {
 /// closes by ordering out, so every entry point reopens the exact same host.
 @MainActor
 final class SettingsWindowController: ReusableNativeWindowController {
+    let presentation: SettingsPresentationModel
     init(preferences: MonitorPreferences, showDiagnostics: @escaping () -> Void) {
+        let presentation = SettingsPresentationModel()
         let window = Self.makeWindow(size: NSSize(width: 720, height: 500), minSize: NSSize(width: 600, height: 420))
-        window.contentView = NSHostingView(rootView: NativeSettingsWindowView(preferences: preferences, showDiagnostics: showDiagnostics))
+        window.contentView = NSHostingView(rootView: NativeSettingsWindowView(preferences: preferences, presentation: presentation, showDiagnostics: showDiagnostics))
+        self.presentation = presentation
         super.init(window: window)
     }
 

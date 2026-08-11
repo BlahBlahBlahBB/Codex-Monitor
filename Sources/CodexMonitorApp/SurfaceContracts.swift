@@ -30,3 +30,20 @@ enum UIInteractionContract {
     static let actionRowCornerRadius: CGFloat = 8
     static let disabledOpacity: Double = 0.42
 }
+
+enum PopoverActionVisualState: Equatable {
+    case rest, hover, pressed, keyboardFocus, disabled
+}
+
+enum PopoverActionFeedback {
+    static func surfaceOpacity(for state: PopoverActionVisualState) -> Double {
+        switch state {
+        case .rest: 0
+        case .hover: 0.09
+        case .pressed: 0.16
+        // Native keyboard focus owns its system focus indication. Do not add
+        // a mouse-rest blue outline underneath it.
+        case .keyboardFocus, .disabled: 0
+        }
+    }
+}
