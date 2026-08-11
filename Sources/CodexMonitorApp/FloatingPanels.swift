@@ -21,12 +21,15 @@ final class FloatingStatusPanelController: NSObject, ObservableObject, NSWindowD
         guard let panel else { return }
         if quickView?.isVisible == true { quickView?.orderOut(nil); return }
         let screen = panel.screen?.visibleFrame ?? NSScreen.main?.visibleFrame ?? .zero
-        let frame = FloatingPanelLayout.quickViewFrame(orbFrame: panel.frame, desiredSize: CGSize(width: 300, height: 270), visibleFrame: screen)
-        let quick = NSPanel(contentRect: frame, styleMask: [.nonactivatingPanel, .titled, .fullSizeContentView], backing: .buffered, defer: false)
-        quick.title = "Codex Monitor"
+        let frame = FloatingPanelLayout.quickViewFrame(orbFrame: panel.frame, desiredSize: CGSize(width: 320, height: 330), visibleFrame: screen)
+        let quick = NSPanel(contentRect: frame, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
         quick.level = .floating
+        quick.isOpaque = false
+        quick.backgroundColor = .clear
+        quick.hasShadow = true
         quick.isReleasedWhenClosed = false
-        quick.contentView = NSHostingView(rootView: QuickView(model: model).padding(16))
+        quick.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+        quick.contentView = NSHostingView(rootView: QuickView(model: model))
         quick.orderFrontRegardless()
         quickView = quick
     }
@@ -67,41 +70,78 @@ private struct FloatingOrbRoot: View {
     @ObservedObject var model: MonitorAppModel
     @ObservedObject var preferences: MonitorPreferences
     let action: () -> Void
-    var body: some View { MonitorOrbView(snapshot: model.snapshot, size: preferences.orbSize).contentShape(Circle()).onTapGesture(perform: action) }
-}
-
-struct MonitorOrbView: View {
-    let snapshot: MonitorRuntimeSnapshot?
-    let size: CGFloat
-
     var body: some View {
-        Circle().fill(color.opacity(0.2)).overlay(Circle().stroke(color, lineWidth: max(2, size / 32))).overlay(Text(label).font(.system(size: max(9, size / 9), weight: .bold)).multilineTextAlignment(.center).padding(size / 8)).frame(width: size, height: size)
-    }
-    private var label: String {
-        guard let snapshot else { return "OFFLINE" }
-        if snapshot.sourceHealth[.desktopLocal]?.availability == .unavailable { return "SOURCE\nUNAVAILABLE" }
-        if snapshot.currentState == .disconnected { return "CODEX\nUNAVAILABLE" }
-        return snapshot.currentState.rawValue.replacingOccurrences(of: "_", with: "\n")
-    }
-    private var color: Color {
-        switch snapshot?.currentState { case .waitingApproval: .orange; case .working: .blue; case .thinking: .purple; case .failed, .interrupted: .red; case .completed: .green; case .idle: .gray; case .paused, .disconnected, .systemError, .none: .secondary }
+        MonitorOrbView(snapshot: model.snapshot, size: preferences.orbSize)
+            .contentShape(Circle())
+            .onTapGesture(perform: action)
     }
 }
 
 private struct QuickView: View {
     @ObservedObject var model: MonitorAppModel
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var isPresented = false
+
     var body: some View {
         let value = model.snapshot
-        VStack(alignment: .leading, spacing: 10) {
-            Text(value?.currentState.rawValue ?? "UNAVAILABLE").font(.headline)
-            LabeledContent("Session Token", value: value?.sessionToken.map(String.init) ?? label(value?.currentThread?.sessionTokenAvailability))
-            LabeledContent("Usage", value: value?.usage.usage?.totalTokens.map(String.init) ?? label(value?.usage.availability))
-            LabeledContent("Quota", value: value?.quota.primary?.usedPercent.map { String(format: "%.0f%% used", $0) } ?? label(value?.quota.primaryAvailability))
-            LabeledContent("Reset", value: value?.resetInformation.count.map(String.init) ?? label(value?.resetInformation.countAvailability))
-            if value?.currentState == .waitingApproval { Text("Waiting Approval").foregroundStyle(.orange) }
-            Divider(); Text("Source Health").font(.subheadline.weight(.medium))
-            ForEach(MonitorRuntimeSource.allCases, id: \.rawValue) { source in LabeledContent(source.rawValue, value: label(value?.sourceHealth[source]?.availability)) }
+        GlassSurface(cornerRadius: 24) {
+            VStack(alignment: .leading, spacing: 15) {
+                HStack(alignment: .top, spacing: 12) {
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text(MonitorDisplayValue.state(value))
+                            .font(.system(size: 20, weight: .semibold, design: .rounded))
+                        Text(MonitorDisplayValue.activity(value))
+                            .font(.system(size: 12, weight: .regular))
+                            .foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    MonitorStatusCapsule(snapshot: value)
+                }
+
+                if value?.currentState == .waitingApproval {
+                    Label("Waiting Approval", systemImage: "hand.raised.fill")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(Color(nsColor: .systemYellow))
+                }
+
+                MonitorDivider()
+                VStack(alignment: .leading, spacing: 10) {
+                    MonitorSectionTitle(title: "Session")
+                    MonitorValueRow(title: "Session Token", value: MonitorDisplayValue.token(value))
+                }
+                VStack(alignment: .leading, spacing: 10) {
+                    MonitorSectionTitle(title: "Account")
+                    MonitorValueRow(title: "Usage", value: MonitorDisplayValue.usage(value))
+                    MonitorValueRow(title: "Quota", value: MonitorDisplayValue.quota(value))
+                    MonitorValueRow(title: "Reset", value: MonitorDisplayValue.reset(value))
+                }
+                VStack(alignment: .leading, spacing: 10) {
+                    MonitorSectionTitle(title: "Source Health")
+                    ForEach(MonitorRuntimeSource.allCases, id: \.rawValue) { source in
+                        MonitorValueRow(
+                            title: MonitorDisplayValue.source(source),
+                            value: MonitorDisplayValue.availability(value?.sourceHealth[source]?.availability),
+                            valueColor: source == .desktopLocal && value?.sourceHealth[source]?.availability == .available ? Color(nsColor: .systemGreen) : .secondary
+                        )
+                    }
+                }
+            }
+            .padding(20)
+        }
+        .frame(width: 320, height: 330)
+        .scaleEffect(isPresented || reduceMotion ? 1 : 0.97)
+        .opacity(isPresented || reduceMotion ? 1 : 0)
+        .onAppear {
+            if reduceMotion {
+                isPresented = true
+            } else {
+                withAnimation(.easeOut(duration: 0.2)) {
+                    isPresented = true
+                }
+            }
+        }
+        .onChange(of: reduceMotion) { value in
+            if value { isPresented = true }
         }
     }
-    private func label(_ availability: MonitorDataAvailability?) -> String { availability?.rawValue.uppercased() ?? "UNAVAILABLE" }
 }
