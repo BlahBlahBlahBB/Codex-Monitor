@@ -92,7 +92,11 @@ public struct ApprovalLifecycleCheckpoint: Sendable, Equatable {
     public let unresolved: [ApprovalRequested]
     public init(cursor: ApprovalLogCursor?, unresolved: [ApprovalRequested]) {
         self.cursor = cursor
-        self.unresolved = unresolved.sorted { $0.requestID.rawID < $1.requestID.rawID }
+        self.unresolved = unresolved.sorted { lhs, rhs in
+            let left = (lhs.threadID.rawID, lhs.turnID.rawID, lhs.requestID.rawID)
+            let right = (rhs.threadID.rawID, rhs.turnID.rawID, rhs.requestID.rawID)
+            return left < right
+        }
     }
 }
 
@@ -139,7 +143,9 @@ public final class ApprovalLocalAdapter: @unchecked Sendable {
     private let schema: ApprovalLogSchema
     private let retryPolicy: ApprovalDBRetryPolicy
     private var cursor: ApprovalLogCursor?
-    private var unresolved: [NamespacedID: ApprovalRequested] = [:]
+    /// Raw request IDs are not globally unique: the lifecycle key is always
+    /// the exact source-thread + turn + request triple.
+    private var unresolved: [ApprovalLifecycleKey: ApprovalRequested] = [:]
     private var stopped = false
 
     public init(databaseURL: URL, sourceID: ApprovalLocalSourceID, schema: ApprovalLogSchema, checkpoint: ApprovalLogCursor? = nil, retryPolicy: ApprovalDBRetryPolicy = .init()) {
@@ -149,7 +155,7 @@ public final class ApprovalLocalAdapter: @unchecked Sendable {
 
     public convenience init(databaseURL: URL, sourceID: ApprovalLocalSourceID, schema: ApprovalLogSchema, lifecycleCheckpoint: ApprovalLifecycleCheckpoint, retryPolicy: ApprovalDBRetryPolicy = .init()) {
         self.init(databaseURL: databaseURL, sourceID: sourceID, schema: schema, checkpoint: lifecycleCheckpoint.cursor, retryPolicy: retryPolicy)
-        self.unresolved = Dictionary(uniqueKeysWithValues: lifecycleCheckpoint.unresolved.map { ($0.requestID, $0) })
+        self.unresolved = Dictionary(uniqueKeysWithValues: lifecycleCheckpoint.unresolved.map { (ApprovalLifecycleKey($0), $0) })
     }
 
     public func poll() throws -> ApprovalPollResult {
@@ -184,12 +190,16 @@ public final class ApprovalLocalAdapter: @unchecked Sendable {
         sqlite3_busy_timeout(database, retryPolicy.busyTimeoutMilliseconds)
         try validateSchema(database)
         let lastID = cursor?.lastLogID ?? 0
-        let sql = "SELECT \(schema.idColumn), \(schema.threadIDColumn), \(schema.timestampColumn), \(schema.targetColumn), \(schema.levelColumn), \(schema.bodyColumn) FROM \(schema.tableName) WHERE \(schema.idColumn) > ? ORDER BY \(schema.idColumn) ASC LIMIT ?"
+        // Filter at SQLite before materializing rows.  Other logger targets
+        // are not approval evidence and may legitimately have a different
+        // nullability/shape; they must not block this allow-listed reader.
+        let sql = "SELECT \(schema.idColumn), \(schema.threadIDColumn), \(schema.timestampColumn), \(schema.targetColumn), \(schema.levelColumn), \(schema.bodyColumn) FROM \(schema.tableName) WHERE \(schema.idColumn) > ? AND \(schema.targetColumn) = ? ORDER BY \(schema.idColumn) ASC LIMIT ?"
         var statement: OpaquePointer?
         guard sqlite3_prepare_v2(database, sql, -1, &statement, nil) == SQLITE_OK, let statement else { throw error(for: database) }
         defer { sqlite3_finalize(statement) }
         sqlite3_bind_int64(statement, 1, lastID)
-        sqlite3_bind_int(statement, 2, Int32(retryPolicy.maximumRowsPerPoll))
+        _ = installedLoggerTarget.withCString { sqlite3_bind_text(statement, 2, $0, -1, SQLITE_TRANSIENT) }
+        sqlite3_bind_int(statement, 3, Int32(retryPolicy.maximumRowsPerPoll))
         var observations: [ApprovalObservation] = []
         var advancedID = lastID
         var nextUnresolved = unresolved
@@ -198,16 +208,21 @@ public final class ApprovalLocalAdapter: @unchecked Sendable {
             if stepped == SQLITE_DONE { break }
             guard stepped == SQLITE_ROW else { throw error(for: database) }
             guard let row = parseRow(statement) else { throw ApprovalReadError.malformed }
-            // No cursor or lifecycle mutation occurs until the entire bounded
-            // batch has decoded and been admitted.  A repeated malformed row
-            // therefore stays unavailable rather than self-healing on poll 2.
-            guard let observation = try decode(row: row) else { advancedID = row.id; continue }
+            // A malformed approval-looking row is unavailable evidence for
+            // that row, but must not pin the reader before later, known-good
+            // lifecycle rows in the same append-only source.  The cursor is
+            // committed only with this closed unavailable observation, never
+            // as a silent recovery to "not waiting".
+            guard let observation = decode(row: row) else { advancedID = row.id; continue }
             switch observation {
-            case .requested(let request): nextUnresolved[request.requestID] = request
+            case .requested(let request): nextUnresolved[ApprovalLifecycleKey(request)] = request
             case .resolved(let resolution):
-                guard nextUnresolved[resolution.requestID]?.threadID == resolution.threadID,
-                      nextUnresolved[resolution.requestID]?.turnID == resolution.turnID else { break }
-                nextUnresolved.removeValue(forKey: resolution.requestID)
+                let key = ApprovalLifecycleKey(resolution)
+                // A resolution is lifecycle evidence only after it exactly
+                // correlates to an admitted request.  Do not checkpoint or
+                // expose cross-thread/turn/raw-ID lookalikes.
+                guard nextUnresolved[key] != nil else { advancedID = row.id; continue }
+                nextUnresolved.removeValue(forKey: key)
             case .sourceHealth, .sourceUnavailable: break
             }
             observations.append(observation)
@@ -216,7 +231,12 @@ public final class ApprovalLocalAdapter: @unchecked Sendable {
         let next = ApprovalLogCursor(fileIdentity: identity, lastLogID: advancedID)
         // This is the single successful admission commit point.
         cursor = next; unresolved = nextUnresolved
-        let health = ApprovalSourceHealth(state: .available, observedAt: now)
+        let health = observations.contains { observation in
+            if case .sourceUnavailable = observation { return true }
+            return false
+        }
+            ? ApprovalSourceHealth(state: .unavailable, observedAt: now, reason: .malformedRecord)
+            : ApprovalSourceHealth(state: .available, observedAt: now)
         return ApprovalPollResult(observations: observations, cursor: next, health: health)
     }
 
@@ -252,7 +272,7 @@ public final class ApprovalLocalAdapter: @unchecked Sendable {
         return ApprovalLogRow(id: sqlite3_column_int64(statement, 0), threadRawID: thread, observedAt: date, target: target, level: level, body: body)
     }
 
-    private func decode(row: ApprovalLogRow) throws -> ApprovalObservation? {
+    private func decode(row: ApprovalLogRow) -> ApprovalObservation? {
         // Installed 0.147 evidence pins this exact logger target.  The body is
         // structured text, not a whole-body JSON contract.  It is inspected
         // transiently by a closed marker parser and discarded immediately.
@@ -260,13 +280,16 @@ public final class ApprovalLocalAdapter: @unchecked Sendable {
         guard let structured = StructuredApprovalBody.parse(row.body) else {
             // Ordinary stream-event rows are irrelevant.  A row that claims an
             // approval marker but is not one pinned observed shape fails closed.
-            if StructuredApprovalBody.mentionsApproval(row.body) { throw ApprovalReadError.malformed }
+            if StructuredApprovalBody.mentionsApproval(row.body) {
+                return .sourceUnavailable(ApprovalSourceHealth(state: .unavailable, observedAt: row.observedAt, reason: .malformedRecord))
+            }
             return nil
         }
         guard let threadID = NamespacedID(sourceID: sourceID.value, entityKind: .thread, rawID: row.threadRawID),
               let requestID = NamespacedID(sourceID: sourceID.value, entityKind: .item, rawID: structured.requestID),
-              let turnID = NamespacedID(sourceID: sourceID.value, entityKind: .turn, rawID: structured.turnID) else { throw ApprovalReadError.malformed }
-        if let bodyThread = structured.threadID, bodyThread != row.threadRawID { throw ApprovalReadError.malformed }
+              let turnID = NamespacedID(sourceID: sourceID.value, entityKind: .turn, rawID: structured.turnID) else {
+            return .sourceUnavailable(ApprovalSourceHealth(state: .unavailable, observedAt: row.observedAt, reason: .malformedRecord))
+        }
         switch structured.variant {
         case .request:
             return .requested(ApprovalRequested(threadID: threadID, turnID: turnID, requestID: requestID, observedAt: row.observedAt))
@@ -289,6 +312,15 @@ public final class ApprovalLocalAdapter: @unchecked Sendable {
 private enum ApprovalReadError: Error { case source, busy, schema, malformed }
 private struct ApprovalLogRow { let id: Int64; let threadRawID: String; let observedAt: Date; let target: String; let level: String; let body: String }
 private let installedLoggerTarget = "codex_core::stream_events_utils"
+private let SQLITE_TRANSIENT = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
+
+private struct ApprovalLifecycleKey: Hashable {
+    let threadID: NamespacedID
+    let turnID: NamespacedID
+    let requestID: NamespacedID
+    init(_ request: ApprovalRequested) { threadID = request.threadID; turnID = request.turnID; requestID = request.requestID }
+    init(_ resolution: ApprovalResolved) { threadID = resolution.threadID; turnID = resolution.turnID; requestID = resolution.requestID }
+}
 
 private func sqliteText(_ statement: OpaquePointer, _ column: Int32) -> String? {
     guard sqlite3_column_type(statement, column) != SQLITE_NULL, let value = sqlite3_column_text(statement, column) else { return nil }
@@ -298,12 +330,14 @@ private func sqliteText(_ statement: OpaquePointer, _ column: Int32) -> String? 
 private enum StructuredApprovalVariant { case request, resolution(ApprovalResolutionStatus) }
 private struct StructuredApprovalBody {
     let variant: StructuredApprovalVariant
-    let threadID: String?
     let turnID: String
     let requestID: String
 
     static func mentionsApproval(_ body: String) -> Bool {
-        ["requestApproval", "waitingOnApproval", "approvalResolved", "approvalApproved", "approvalDeclined", "approvalCancelled", "itemCompleted", "approvalTerminal"].contains { containsMarker($0, in: body) }
+        // The installed source uses a structured event body.  Any new
+        // approval-looking variant is unavailable evidence, never an ordinary
+        // ignorable stream row that could advance the cursor to a false green.
+        approvalLookingMarker(in: body)
     }
 
     static func parse(_ body: String) -> StructuredApprovalBody? {
@@ -311,35 +345,57 @@ private struct StructuredApprovalBody {
         // exact correlation key/value markers.  Delimiters may be logfmt (=)
         // or an embedded structured fragment (:); accepting neither JSON as a
         // whole nor arbitrary nested maps prevents target-lookalike admission.
-        let fields = [
-            "thread_id": field("thread_id", in: body),
-            "turn_id": field("turn_id", in: body),
-            "request_id": field("request_id", in: body) ?? field("call_id", in: body) ?? field("item_id", in: body)
-        ]
-        guard let turn = fields["turn_id"]!, let request = fields["request_id"]! else { return nil }
+        // Privacy-bounded installed-source probe (V3-2FR) pinned this exact
+        // diagnostic wrapper shape: four ordered `turn_id` fields and two
+        // duplicate `call_id` fields.  The first turn field belongs to the
+        // stream event envelope; the two call IDs must agree.  Other apparent
+        // approval words/field layouts are unavailable evidence, not a loose
+        // fallback grammar.
+        guard let turns = fields("turn_id", in: body), let calls = fields("call_id", in: body) else { return nil }
+        let turn = turns[0], request = calls[0]
         let requestMarkers = containsMarker("requestApproval", in: body) && containsMarker("waitingOnApproval", in: body)
-        let resolution: ApprovalResolutionStatus? = containsMarker("approvalApproved", in: body) ? .approved :
-            (containsMarker("approvalDeclined", in: body) ? .declined :
-            (containsMarker("approvalCancelled", in: body) ? .cancelled :
-            (containsMarker("itemCompleted", in: body) ? .itemCompleted : (containsMarker("approvalTerminal", in: body) ? .terminal : nil))))
-        if requestMarkers, resolution == nil { return StructuredApprovalBody(variant: .request, threadID: fields["thread_id"]!, turnID: turn, requestID: request) }
-        if !requestMarkers, let resolution { return StructuredApprovalBody(variant: .resolution(resolution), threadID: fields["thread_id"]!, turnID: turn, requestID: request) }
+        let resolutionMarkers: [(String, ApprovalResolutionStatus)] = [
+            ("approvalApproved", .approved), ("approvalDeclined", .declined),
+            ("approvalCancelled", .cancelled), ("itemCompleted", .itemCompleted),
+            ("approvalTerminal", .terminal)
+        ]
+        let matches = resolutionMarkers.filter { containsMarker($0.0, in: body) }
+        // The request wrapper has four event-context turns and two equal call
+        // IDs.  The independently observed resolution wrapper has three
+        // event-context turns and one call ID.  Both forms are closed and
+        // correlation is exact against the lifecycle map before admission.
+        if requestMarkers, matches.isEmpty, turns.count == 4, calls.count == 2, calls[0] == calls[1] {
+            return StructuredApprovalBody(variant: .request, turnID: turn, requestID: request)
+        }
+        if !requestMarkers, matches.count == 1, turns.count == 3, calls.count == 1 {
+            return StructuredApprovalBody(variant: .resolution(matches[0].1), turnID: turn, requestID: request)
+        }
         return nil
     }
 
-    private static func field(_ key: String, in body: String) -> String? {
-        // Closed, bounded ID grammar.  It keeps arbitrary structured-body text
-        // from being transported and rejects partial/ambiguous values.
-        let pattern = "(?:\\\"|\\b)" + NSRegularExpression.escapedPattern(for: key) + "(?:\\\")?\\s*(?:=|:)\\s*(?:\\\")?([A-Za-z0-9._:-]{1,256})"
+    private static func fields(_ key: String, in body: String) -> [String]? {
+        // Logger debug wrappers escape their structural quotes (`\\\"key\\\"`),
+        // while logfmt rows leave them bare.  Accept only those two delimiters
+        // around a bounded opaque identity; neither form transports body text.
+        let pattern = #"(?:\\?"|\b)"# + NSRegularExpression.escapedPattern(for: key) + #"(?:\\?")?\s*(?:=|:)\s*(?:\\?"|')?([A-Za-z0-9._:-]{1,256})"#
         guard let regex = try? NSRegularExpression(pattern: pattern) else { return nil }
         let matches = regex.matches(in: body, range: NSRange(body.startIndex..., in: body))
-        guard matches.count == 1, let match = matches.first,
-              let range = Range(match.range(at: 1), in: body) else { return nil }
-        return String(body[range])
+        let values = matches.compactMap { match -> String? in
+            guard let range = Range(match.range(at: 1), in: body) else { return nil }
+            return String(body[range])
+        }
+        return values.isEmpty ? nil : values
     }
 
-    private static func containsMarker(_ marker: String, in body: String) -> Bool {
+    private static func containsMarker(_ marker: String, in body: String, caseInsensitive: Bool = false) -> Bool {
         let pattern = "(?<![A-Za-z0-9_])" + NSRegularExpression.escapedPattern(for: marker) + "(?![A-Za-z0-9_])"
+        let options: NSRegularExpression.Options = caseInsensitive ? [.caseInsensitive] : []
+        guard let regex = try? NSRegularExpression(pattern: pattern, options: options) else { return false }
+        return regex.firstMatch(in: body, range: NSRange(body.startIndex..., in: body)) != nil
+    }
+
+    private static func approvalLookingMarker(in body: String) -> Bool {
+        let pattern = "(?i)(?<![A-Za-z0-9_])(?:requestApproval|waitingOnApproval|approval[A-Za-z0-9_]*|itemCompleted)(?![A-Za-z0-9_])"
         guard let regex = try? NSRegularExpression(pattern: pattern) else { return false }
         return regex.firstMatch(in: body, range: NSRange(body.startIndex..., in: body)) != nil
     }

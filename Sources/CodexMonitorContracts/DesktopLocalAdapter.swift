@@ -251,6 +251,27 @@ public struct RolloutReadResult: Sendable, Equatable {
     public let observations: [DesktopObservation]
     public let cursor: RolloutCursor?
     public let invalidation: RolloutReadInvalidation?
+    /// Reconstructed only from the exact descriptor before a persisted cursor.
+    /// It contains IDs and source times, never rollout content.
+    public let hydration: RolloutCheckpointHydration?
+    public init(observations: [DesktopObservation], cursor: RolloutCursor?, invalidation: RolloutReadInvalidation?, hydration: RolloutCheckpointHydration? = nil) {
+        self.observations = observations; self.cursor = cursor; self.invalidation = invalidation; self.hydration = hydration
+    }
+}
+
+public struct RolloutCheckpointHydration: Sendable, Equatable {
+    public let activeTurnID: NamespacedID?
+    public let turnStartedAt: Date?
+    public let activeItemID: NamespacedID?
+    public let activeItemCategory: RolloutActivityCategory?
+    public let latestActiveState: MonitorRuntimeState?
+    public let latestActiveStateAt: Date?
+    public let terminal: ReconciledTerminal?
+    public let authoritativeTokenTotal: Int64?
+    public init(activeTurnID: NamespacedID?, turnStartedAt: Date?, activeItemID: NamespacedID?, activeItemCategory: RolloutActivityCategory?, latestActiveState: MonitorRuntimeState?, latestActiveStateAt: Date?, terminal: ReconciledTerminal?, authoritativeTokenTotal: Int64?) {
+        self.activeTurnID = activeTurnID; self.turnStartedAt = turnStartedAt; self.activeItemID = activeItemID; self.activeItemCategory = activeItemCategory
+        self.latestActiveState = latestActiveState; self.latestActiveStateAt = latestActiveStateAt; self.terminal = terminal; self.authoritativeTokenTotal = authoritativeTokenTotal
+    }
 }
 
 /// Incremental, file-identity-aware JSONL reader.  It never scans an entire
@@ -266,6 +287,12 @@ public final class RolloutIncrementalReader: @unchecked Sendable {
     private var sessionValidated = false
     private var activeTurnID: NamespacedID?
     private var lastTokenTotal: Int64?
+    private var activeTurnStartedAt: Date?
+    private var activeItemID: NamespacedID?
+    private var activeItemCategory: RolloutActivityCategory?
+    private var latestActiveState: MonitorRuntimeState?
+    private var latestActiveStateAt: Date?
+    private var latestTerminal: ReconciledTerminal?
     /// An exact open binds a descriptor identity before it is allowed to own a
     /// thread.  Every later poll compares its *opened* descriptor to this value.
     private var admittedIdentity: FileIdentity?
@@ -337,10 +364,14 @@ public final class RolloutIncrementalReader: @unchecked Sendable {
             return RolloutReadResult(observations: [.capabilityUnavailable(threadID: binding.threadID, capability: .rolloutSessionIdentity)], cursor: nil, invalidation: .sessionMismatch)
         }
         sessionValidated = true
-        if size <= maxHeaderBytes { return consume(header, identity: identity, offset: 0, endingOffset: size, modified: modified, skipFirstPartial: false) }
+        if size <= maxHeaderBytes {
+            let result = consume(header, identity: identity, offset: 0, endingOffset: size, modified: modified, skipFirstPartial: false)
+            return RolloutReadResult(observations: result.observations, cursor: result.cursor, invalidation: result.invalidation, hydration: checkpointHydration())
+        }
         let start = size - min(size, maxTailBytes)
         guard let tail = read(transaction, offset: start, count: Int(size - start)) else { return invalidated(.fileMissing, reason: .sourceMissing, identity: identity) }
-        return consume(tail, identity: identity, offset: start, endingOffset: size, modified: modified, skipFirstPartial: start > 0)
+        let result = consume(tail, identity: identity, offset: start, endingOffset: size, modified: modified, skipFirstPartial: start > 0)
+        return RolloutReadResult(observations: result.observations, cursor: result.cursor, invalidation: result.invalidation, hydration: checkpointHydration())
     }
 
     /// A persisted cursor contains no raw rollout content or decoded state.  On
@@ -358,12 +389,15 @@ public final class RolloutIncrementalReader: @unchecked Sendable {
         }
         reconstructCheckpointState(from: reconstruction, offset: reconstructionStart, skipFirstPartial: reconstructionStart > 0)
         sessionValidated = true
-        return appended(transaction: transaction, identity: identity, size: size, modified: modified, from: offset)
+        let appended = appended(transaction: transaction, identity: identity, size: size, modified: modified, from: offset)
+        return RolloutReadResult(observations: appended.observations, cursor: appended.cursor, invalidation: appended.invalidation, hydration: checkpointHydration())
     }
 
     private func reconstructCheckpointState(from bytes: Data, offset: UInt64, skipFirstPartial: Bool) {
         activeTurnID = nil
         lastTokenTotal = nil
+        activeTurnStartedAt = nil; activeItemID = nil; activeItemCategory = nil
+        latestActiveState = nil; latestActiveStateAt = nil; latestTerminal = nil
         partialLine = Data()
         let lines = bytes.split(separator: 0x0A, omittingEmptySubsequences: false)
         let endedWithNewline = bytes.last == 0x0A
@@ -419,9 +453,12 @@ public final class RolloutIncrementalReader: @unchecked Sendable {
         if outerType == "session_meta" { return [] }
         guard let payload = object["payload"] as? [String: Any] else { return [.capabilityUnavailable(threadID: binding.threadID, capability: .rolloutFormat)] }
         let observedAt = Date()
-        func envelope(_ kind: RolloutEventKind, turn: NamespacedID? = activeTurnID, itemRaw: String? = nil, activity: RolloutActivityCategory? = nil, token: TokenSnapshot? = nil, model: String? = nil, effort: String? = nil) -> DesktopObservation {
+        let sourceAt = sourceDate(object["timestamp"])
+        func envelope(_ kind: RolloutEventKind, turn: NamespacedID? = activeTurnID, itemRaw: String? = nil, activity: RolloutActivityCategory? = nil, token: TokenSnapshot? = nil, model: String? = nil, effort: String? = nil, eventID: String? = nil, authoritativeAt: Date? = sourceAt) -> DesktopObservation {
             let item = itemRaw.flatMap { NamespacedID(sourceID: binding.sourceID.value, entityKind: .item, rawID: $0) }
-            return .rollout(RolloutRecordEnvelope(threadID: binding.threadID, turnID: turn, itemID: item, kind: kind, activity: activity, tokenSnapshot: token, model: model, reasoningEffort: effort, observedAt: observedAt, fileOffset: offset))
+            let record = RolloutRecordEnvelope(threadID: binding.threadID, turnID: turn, itemID: item, kind: kind, activity: activity, tokenSnapshot: token, model: model, reasoningEffort: effort, eventID: eventID, authoritativeEventAt: authoritativeAt, observedAt: observedAt, fileOffset: offset)
+            applyDecodedState(record)
+            return .rollout(record)
         }
         let type = payload["type"] as? String
         switch (outerType, type) {
@@ -437,14 +474,25 @@ public final class RolloutIncrementalReader: @unchecked Sendable {
             lastTokenTotal = totalTokens
             return [envelope(.tokenCount, turn: turn, token: TokenSnapshot(totalTokens: totalTokens, lastCallTokens: last))]
         case ("event_msg", "task_complete"):
-            guard let rawTurn = payload["turn_id"] as? String, let turn = NamespacedID(sourceID: binding.sourceID.value, entityKind: .turn, rawID: rawTurn), payload.keys.contains("error") else { return [.capabilityUnavailable(threadID: binding.threadID, capability: .rolloutFormat)] }
+            guard let rawTurn = payload["turn_id"] as? String, let turn = NamespacedID(sourceID: binding.sourceID.value, entityKind: .turn, rawID: rawTurn) else { return [.capabilityUnavailable(threadID: binding.threadID, capability: .rolloutFormat)] }
             let error = payload["error"]
-            guard error is NSNull || error is [String: Any] else { return [.capabilityUnavailable(threadID: binding.threadID, capability: .rolloutFormat)] }
-            return [envelope(error is NSNull ? .taskCompletedSuccess : .taskCompletedFailure, turn: turn)]
+            guard error == nil || error is NSNull || error is [String: Any] else { return [.capabilityUnavailable(threadID: binding.threadID, capability: .rolloutFormat)] }
+            guard let completedAt = sourceDate(payload["completed_at"]) else { return [.capabilityUnavailable(threadID: binding.threadID, capability: .rolloutFormat)] }
+            // `completed_at` is the terminal event's own source timestamp.
+            // Prefer the outer transport timestamp when it decodes, but never
+            // fall back to monitor decode time for terminal retention.
+            let authoritativeAt = sourceAt ?? completedAt
+            // Installed successful terminals omit `error`; older records use
+            // an explicit null.  Both are success, while a structured error is
+            // the closed failure form.
+            let kind: RolloutEventKind = error == nil || error is NSNull ? .taskCompletedSuccess : .taskCompletedFailure
+            return [envelope(kind, turn: turn, eventID: terminalEventID(kind: kind, turn: rawTurn, sourceAt: authoritativeAt, completedAt: completedAt), authoritativeAt: authoritativeAt)]
         case ("event_msg", "turn_aborted"):
             guard payload["reason"] as? String == "interrupted", let rawTurn = payload["turn_id"] as? String,
                   let turn = NamespacedID(sourceID: binding.sourceID.value, entityKind: .turn, rawID: rawTurn) else { return [.capabilityUnavailable(threadID: binding.threadID, capability: .rolloutFormat)] }
-            return [envelope(.turnAbortedInterrupted, turn: turn)]
+            guard let completedAt = sourceDate(payload["completed_at"]) else { return [.capabilityUnavailable(threadID: binding.threadID, capability: .rolloutFormat)] }
+            let authoritativeAt = sourceAt ?? completedAt
+            return [envelope(.turnAbortedInterrupted, turn: turn, eventID: terminalEventID(kind: .turnAbortedInterrupted, turn: rawTurn, sourceAt: authoritativeAt, completedAt: completedAt), authoritativeAt: authoritativeAt)]
         case ("event_msg", "turn_context"):
             guard let rawTurn = payload["turn_id"] as? String, let model = payload["model"] as? String,
                   let turn = NamespacedID(sourceID: binding.sourceID.value, entityKind: .turn, rawID: rawTurn) else { return [.capabilityUnavailable(threadID: binding.threadID, capability: .rolloutFormat)] }
@@ -457,7 +505,10 @@ public final class RolloutIncrementalReader: @unchecked Sendable {
             return [envelope(.activity, turn: turn, itemRaw: item, activity: .tool)]
         case ("response_item", "function_call_output"), ("response_item", "custom_tool_call_output"):
             guard let turn = activeTurnID, let item = payload["call_id"] as? String else { return [.capabilityUnavailable(threadID: binding.threadID, capability: .rolloutFormat)] }
-            return [envelope(.activity, turn: turn, itemRaw: item, activity: .thinking)]
+            // Codex output is the exact completion of a function/custom call,
+            // not a reasoning item.  The reducer's completion branch owns the
+            // item and approval-resolution transition.
+            return [envelope(.activity, turn: turn, itemRaw: item, activity: .agentResponse)]
         case ("event_msg", "patch_apply_end"):
             guard let turn = activeTurnID, let item = payload["call_id"] as? String else { return [.capabilityUnavailable(threadID: binding.threadID, capability: .rolloutFormat)] }
             return [envelope(.activity, turn: turn, itemRaw: item, activity: .fileChange)]
@@ -467,6 +518,34 @@ public final class RolloutIncrementalReader: @unchecked Sendable {
         default:
             return []
         }
+    }
+
+    private func applyDecodedState(_ record: RolloutRecordEnvelope) {
+        let at = record.authoritativeEventAt ?? record.observedAt
+        if let tokens = record.tokenSnapshot?.totalTokens { lastTokenTotal = max(lastTokenTotal ?? tokens, tokens) }
+        switch record.kind {
+        case .taskStarted:
+            activeTurnID = record.turnID; activeTurnStartedAt = at; activeItemID = nil; activeItemCategory = nil
+            latestActiveState = .thinking; latestActiveStateAt = at; latestTerminal = nil
+        case .activity where record.turnID == activeTurnID:
+            switch record.activity {
+            case .tool?, .fileChange?:
+                activeItemID = record.itemID; activeItemCategory = record.activity; latestActiveState = .working; latestActiveStateAt = at
+            case .thinking?, .agentResponse?:
+                if activeItemID == nil || activeItemID == record.itemID { activeItemID = nil; activeItemCategory = nil; latestActiveState = .thinking; latestActiveStateAt = at }
+            case nil: break
+            }
+        case .taskCompletedSuccess, .taskCompletedFailure, .turnAbortedInterrupted:
+            guard let turn = record.turnID, let eventID = record.eventID else { return }
+            let state: MonitorRuntimeState = record.kind == .taskCompletedSuccess ? .completed : (record.kind == .taskCompletedFailure ? .failed : .interrupted)
+            latestTerminal = ReconciledTerminal(turnID: turn, eventID: eventID, state: state, authoritativeEventAt: at)
+            activeTurnID = nil; activeTurnStartedAt = nil; activeItemID = nil; activeItemCategory = nil; latestActiveState = nil; latestActiveStateAt = nil
+        default: break
+        }
+    }
+
+    private func checkpointHydration() -> RolloutCheckpointHydration {
+        RolloutCheckpointHydration(activeTurnID: activeTurnID, turnStartedAt: activeTurnStartedAt, activeItemID: activeItemID, activeItemCategory: activeItemCategory, latestActiveState: latestActiveState, latestActiveStateAt: latestActiveStateAt, terminal: latestTerminal, authoritativeTokenTotal: lastTokenTotal)
     }
 
     private func invalidated(_ invalidation: RolloutReadInvalidation, reason: DesktopSourceHealthReason, identity: FileIdentity?) -> RolloutReadResult {
@@ -484,6 +563,32 @@ private func number(_ value: Any?) -> Int64? {
     let double = number.doubleValue
     guard double.rounded() == double, double >= Double(Int64.min), double <= Double(Int64.max) else { return nil }
     return Int64(double)
+}
+
+/// The installed rollout shape carries an ISO-8601 outer `timestamp` and a
+/// numeric payload `completed_at`.  This decoder accepts only those source
+/// timestamp representations; it never substitutes monitor decode time.
+private func sourceDate(_ value: Any?) -> Date? {
+    if let number = number(value), number >= 0 {
+        let seconds = number > 10_000_000_000 ? Double(number) / 1_000 : Double(number)
+        return Date(timeIntervalSince1970: seconds)
+    }
+    guard let string = value as? String else { return nil }
+    let fractional = ISO8601DateFormatter()
+    fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+    if let date = fractional.date(from: string) { return date }
+    if let date = ISO8601DateFormatter().date(from: string) { return date }
+    let formatter = DateFormatter()
+    formatter.locale = Locale(identifier: "en_US_POSIX")
+    formatter.timeZone = TimeZone(secondsFromGMT: 0)
+    formatter.dateFormat = "yyyy-MM-dd'T'HH:mm:ss.SSSXXXXX"
+    return formatter.date(from: string)
+}
+
+private func terminalEventID(kind: RolloutEventKind, turn: String, sourceAt: Date, completedAt: Date) -> String {
+    // Stable source fields, rather than a monitor decode-time or in-memory
+    // counter, provide terminal replay identity for this JSONL record shape.
+    "terminal-\(kind.rawValue)-\(turn)-\(sourceAt.timeIntervalSince1970)-\(completedAt.timeIntervalSince1970)"
 }
 private final class OpenedRollout {
     let handle: FileHandle

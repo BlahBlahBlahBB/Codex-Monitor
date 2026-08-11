@@ -108,13 +108,19 @@ public struct RuntimeReconciliationThread: Sendable, Equatable {
 public final class RuntimeStateEngine: @unchecked Sendable {
     private let clock: any StateEngineClock
     private var records: [NamespacedID: ThreadRecord] = [:]
-    private var pausePhase: MonitoringPausePhase = .live
+    private var pausePhase: MonitoringPausePhase
     private var pauseSince: Date?
     /// Source-wide log health also applies to a thread first discovered after
     /// loss; otherwise that thread could be incorrectly born "known healthy".
     private var defaultApprovalHealth: ApprovalCapabilityHealth = .availableKnownNotWaiting
 
-    public init(clock: any StateEngineClock = SystemStateEngineClock()) { self.clock = clock }
+    /// A fresh Monitor has no authoritative runtime projection until local
+    /// sources have been reconciled.  Production therefore starts paused;
+    /// `initialPhase: .live` exists only for an already-reconciled host.
+    public init(clock: any StateEngineClock = SystemStateEngineClock(), initialPhase: MonitoringPausePhase = .reconciling) {
+        self.clock = clock; self.pausePhase = initialPhase
+        self.pauseSince = initialPhase == .live ? nil : clock.now()
+    }
 
     /// State DB is metadata/token seed only. It cannot clear a runtime-owner
     /// latch and cannot replace an admitted rollout cumulative token value.

@@ -8,7 +8,14 @@ final class V3StateEngineTests: XCTestCase {
     private var engine: RuntimeStateEngine!
     private let source = SourceID("v3-test-source")!
 
-    override func setUp() { clock = V3FakeClock(); engine = RuntimeStateEngine(clock: clock) }
+    override func setUp() { clock = V3FakeClock(); engine = RuntimeStateEngine(clock: clock, initialPhase: .live) }
+
+    func testFreshEngineDoesNotExposeLiveStateBeforeReconciliation() {
+        let fresh = RuntimeStateEngine(clock: clock)
+        XCTAssertEqual(fresh.snapshot().state, .paused)
+        fresh.ingest(event(id(.thread, "fresh"), id(.turn, "turn"), .taskStarted))
+        XCTAssertTrue(fresh.snapshot().threads.isEmpty)
+    }
 
     func testReasoningToolAndTokenOnlyArbitration() {
         let thread = id(.thread, "a"), turn = id(.turn, "turn-a")
@@ -195,8 +202,11 @@ final class V3StateEngineTests: XCTestCase {
         engine.register(DesktopThreadSnapshot(threadID: thread, title: nil, model: nil, reasoningEffort: nil, updatedAtMilliseconds: nil, tokensUsed: 90))
         XCTAssertEqual(threadSnapshot(thread).sessionTokenCumulative, 100)
         XCTAssertEqual(threadSnapshot(thread).sessionTokenProvenance, .rolloutCumulativeAuthoritative)
-        engine.beginReconciliation()
-        engine.installReconciliation([reconciled(thread: thread, turn: turn, tokens: 100, provenance: .rolloutCumulativeAuthoritative)])
+        let hydration = RolloutCheckpointHydration(activeTurnID: turn, turnStartedAt: clock.now(), activeItemID: nil, activeItemCategory: nil, latestActiveState: .thinking, latestActiveStateAt: clock.now(), terminal: nil, authoritativeTokenTotal: 100)
+        let seed = DesktopThreadSnapshot(threadID: thread, title: nil, model: nil, reasoningEffort: nil, updatedAtMilliseconds: nil, tokensUsed: 90)
+        let rebuilt = LocalRuntimeReconciliationOwner.thread(snapshot: seed, hydration: hydration, approval: ApprovalLifecycleCheckpoint(cursor: nil, unresolved: []), approvalHealth: .availableKnownNotWaiting, runtimeSourceAvailable: true, observedAt: clock.now())
+        LocalRuntimeReconciliationOwner.install([rebuilt], into: engine)
+        XCTAssertEqual(threadSnapshot(thread).sessionTokenCumulative, 100)
         XCTAssertEqual(threadSnapshot(thread).sessionTokenProvenance, .rolloutCumulativeAuthoritative)
     }
 
@@ -235,12 +245,41 @@ final class ApprovalLocalAdapterTests: XCTestCase {
         XCTAssertTrue(resumed.lifecycleCheckpoint().unresolved.isEmpty)
     }
 
+    func testRepeatedRealLoggerCorrelationFieldsAndSameRawRequestAcrossThreadsRemainExact() throws {
+        let repeated = fixture.requestBody(thread: "a", request: "shared", turn: "t-a")
+        try fixture.insert(id: 1, thread: "a", target: fixture.realTarget, body: repeated)
+        try fixture.insert(id: 2, thread: "b", target: fixture.realTarget, body: fixture.requestBody(thread: "b", request: "shared", turn: "t-b"))
+        let adapter = fixture.adapter()
+        let first = try adapter.poll()
+        XCTAssertEqual(first.observations.filter { if case .requested = $0 { return true }; return false }.count, 2)
+        XCTAssertEqual(adapter.lifecycleCheckpoint().unresolved.count, 2)
+
+        // The same raw request ID is not a cross-thread resolution key.
+        try fixture.insert(id: 3, thread: "a", target: fixture.realTarget, body: fixture.resolutionBody(thread: "a", request: "shared", turn: "wrong", variant: "approvalApproved"))
+        XCTAssertTrue(try adapter.poll().observations.isEmpty)
+        XCTAssertEqual(adapter.lifecycleCheckpoint().unresolved.count, 2)
+    }
+
+    func testProductionApprovalLifecycleOwnerPersistsAndRestoresUnresolvedRequest() throws {
+        try fixture.insert(id: 1, thread: "a", target: fixture.realTarget, body: fixture.requestBody(thread: "a", request: "r", turn: "t"))
+        let store = ApprovalLifecycleCheckpointStore(url: fixture.root.appendingPathComponent("monitor-approval-checkpoint.json"))
+        let first = try ApprovalLifecycleRuntimeOwner(databaseURL: fixture.database, sourceID: fixture.source, schema: .init(acceptedUserVersions: [0]), store: store, retryPolicy: .init(attempts: 2, busyTimeoutMilliseconds: 1, retryDelayMilliseconds: 1))
+        XCTAssertTrue(try first.poll().observations.contains { if case .requested = $0 { return true }; return false })
+        let restarted = try ApprovalLifecycleRuntimeOwner(databaseURL: fixture.database, sourceID: fixture.source, schema: .init(acceptedUserVersions: [0]), store: store, retryPolicy: .init(attempts: 2, busyTimeoutMilliseconds: 1, retryDelayMilliseconds: 1))
+        XCTAssertEqual(restarted.adapter.lifecycleCheckpoint().unresolved.count, 1)
+        try fixture.insert(id: 2, thread: "a", target: fixture.realTarget, body: fixture.resolutionBody(thread: "a", request: "r", turn: "t", variant: "approvalApproved"))
+        XCTAssertTrue(try restarted.poll().observations.contains { if case .resolved = $0 { return true }; return false })
+        XCTAssertTrue(restarted.adapter.lifecycleCheckpoint().unresolved.isEmpty)
+    }
+
     func testUnknownSchemaMalformedAndRotationFailClosedWithoutContent() throws {
         try fixture.insert(id: 1, thread: "a", target: fixture.realTarget, body: "requestApproval waitingOnApproval turn_id=missing-request")
-        let malformed = try fixture.adapter().poll()
+        let reader = fixture.adapter()
+        let malformed = try reader.poll()
         XCTAssertEqual(malformed.health.reason, .malformedRecord)
-        let repeated = try fixture.adapter().poll()
-        XCTAssertEqual(repeated.health.reason, .malformedRecord)
+        XCTAssertNotNil(malformed.cursor)
+        let repeated = try reader.poll()
+        XCTAssertEqual(repeated.health.state, .available)
         XCTAssertFalse(String(reflecting: malformed).contains("missing-request"))
         try fixture.setUserVersion(2)
         XCTAssertEqual(try fixture.adapter().poll().health.reason, .schemaMismatch)
@@ -248,6 +287,15 @@ final class ApprovalLocalAdapterTests: XCTestCase {
         let checkpoint = ApprovalLogCursor(fileIdentity: FileIdentity.readOnlyIdentity(of: fixture.database)!, lastLogID: 1)
         try FileManager.default.removeItem(at: fixture.database); try fixture.createDatabase()
         XCTAssertEqual(try fixture.adapter(checkpoint: checkpoint).poll().health.reason, .fileIdentityChanged)
+    }
+
+    func testMalformedRowDoesNotBlockLaterInstalledRequestOrResolutionFromStateEngine() throws {
+        try fixture.insert(id: 1, thread: "a", target: fixture.realTarget, body: "requestApproval waitingOnApproval turn_id=malformed")
+        try fixture.insert(id: 2, thread: "a", target: fixture.realTarget, body: fixture.requestBody(thread: "a", request: "call", turn: "turn"))
+        try fixture.insert(id: 3, thread: "a", target: fixture.realTarget, body: fixture.resolutionBody(thread: "a", request: "call", turn: "turn", variant: "approvalApproved"))
+        let observations = try fixture.adapter().poll().observations
+        XCTAssertEqual(observations.filter { if case .requested = $0 { return true }; return false }.count, 1)
+        XCTAssertEqual(observations.filter { if case .resolved = $0 { return true }; return false }.count, 1)
     }
 
     func testUnpinnedResolutionMarkerAndAmbiguousCorrelationFailClosed() throws {
@@ -263,8 +311,7 @@ final class ApprovalLocalAdapterTests: XCTestCase {
         try fixture.insert(id: 1, thread: "a", target: "codex_core::stream_events_utils_similar", body: fixture.requestBody(thread: "a", request: "r", turn: "t"))
         try fixture.insert(id: 2, thread: "b", target: fixture.realTarget, body: fixture.resolutionBody(thread: "b", request: "r", turn: "t", variant: "approvalApproved"))
         let values = try fixture.adapter().poll().observations
-        XCTAssertEqual(values.count, 1)
-        XCTAssertTrue(values.contains { if case .resolved(let resolution) = $0 { return resolution.threadID.rawID == "b" && resolution.requestID.rawID == "r" }; return false })
+        XCTAssertTrue(values.isEmpty)
     }
 
     func testReadOnlyAdapterDoesNotMutateDatabase() throws {
@@ -295,9 +342,10 @@ private final class ApprovalFixture {
     func createDatabase() throws { var db: OpaquePointer?; guard sqlite3_open(database.path, &db) == SQLITE_OK else { throw POSIXError(.EIO) }; defer { sqlite3_close(db) }; try approvalSQL(db, "PRAGMA user_version = 0"); try approvalSQL(db, "CREATE TABLE logs (id INTEGER PRIMARY KEY, thread_id TEXT NOT NULL, ts REAL NOT NULL, target TEXT NOT NULL, level TEXT NOT NULL, feedback_log_body TEXT NOT NULL)") }
     func adapter(checkpoint: ApprovalLogCursor? = nil) -> ApprovalLocalAdapter { ApprovalLocalAdapter(databaseURL: database, sourceID: source, schema: .init(acceptedUserVersions: [0]), checkpoint: checkpoint, retryPolicy: .init(attempts: 2, busyTimeoutMilliseconds: 1, retryDelayMilliseconds: 1)) }
     func adapter(lifecycleCheckpoint: ApprovalLifecycleCheckpoint) -> ApprovalLocalAdapter { ApprovalLocalAdapter(databaseURL: database, sourceID: source, schema: .init(acceptedUserVersions: [0]), lifecycleCheckpoint: lifecycleCheckpoint, retryPolicy: .init(attempts: 2, busyTimeoutMilliseconds: 1, retryDelayMilliseconds: 1)) }
-    // Sanitized capture grammar: only known field markers and synthetic opaque IDs.
-    func requestBody(thread: String, request: String, turn: String) -> String { "stream_event requestApproval waitingOnApproval thread_id=\(thread) turn_id=\(turn) request_id=\(request)" }
-    func resolutionBody(thread: String, request: String, turn: String, variant: String) -> String { "stream_event \(variant) thread_id=\(thread) turn_id=\(turn) request_id=\(request)" }
+    // Sanitized structural fixture of the installed logger's bounded wrapper:
+    // four ordered turn IDs plus two equal call IDs.  Values are opaque test IDs.
+    func requestBody(thread: String, request: String, turn: String) -> String { "stream_event thread_id=\(thread) turn_id=\(turn) turn_id=\(turn) turn_id=\(turn) turn_id=\(turn) requestApproval waitingOnApproval call_id=\(request) call_id=\(request)" }
+    func resolutionBody(thread: String, request: String, turn: String, variant: String) -> String { "stream_event thread_id=\(thread) turn_id=\(turn) turn_id=\(turn) turn_id=\(turn) \(variant) call_id=\(request)" }
     func insert(id: Int, thread: String, target: String, body: String) throws { var db: OpaquePointer?; guard sqlite3_open(database.path, &db) == SQLITE_OK else { throw POSIXError(.EIO) }; defer { sqlite3_close(db) }; let sql = "INSERT INTO logs VALUES (\(id), '\(thread)', 1800000000, '\(target)', 'info', '\(body.replacingOccurrences(of: "'", with: "''"))')"; try approvalSQL(db, sql) }
     func setUserVersion(_ value: Int) throws { var db: OpaquePointer?; guard sqlite3_open(database.path, &db) == SQLITE_OK else { throw POSIXError(.EIO) }; defer { sqlite3_close(db) }; try approvalSQL(db, "PRAGMA user_version = \(value)") }
     func clearLogs() throws { var db: OpaquePointer?; guard sqlite3_open(database.path, &db) == SQLITE_OK else { throw POSIXError(.EIO) }; defer { sqlite3_close(db) }; try approvalSQL(db, "DELETE FROM logs") }

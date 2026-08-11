@@ -195,6 +195,62 @@ final class DesktopLocalAdapterTests: XCTestCase {
         XCTAssertTrue(second.isEmpty)
     }
 
+    func testCheckpointHydrationCarriesAuthoritativeTokenAndTerminalSourceTime() throws {
+        let file = try fixture.rollout("thread-a", lines: [fixture.session("thread-a"), fixture.started("turn-a"), fixture.token(total: 100, last: 100)])
+        try fixture.addThread("thread-a", rollout: file)
+        let initial = try fixture.adapter(); let thread = try initial.open(threadRawID: "thread-a")
+        let checkpoint = try XCTUnwrap(try initial.poll(threadID: thread.threadID).cursor)
+        try fixture.append(to: file, text: fixture.complete("turn-a") + "\n")
+        let resumed = try fixture.adapter(); let recovered = try resumed.open(threadRawID: "thread-a", checkpoint: checkpoint)
+        let result = try resumed.poll(threadID: recovered.threadID)
+        let hydration = try XCTUnwrap(result.hydration)
+        XCTAssertEqual(hydration.authoritativeTokenTotal, 100)
+        XCTAssertEqual(hydration.terminal?.state, .completed)
+        XCTAssertEqual(hydration.terminal?.authoritativeEventAt, fixture.authoritativeTerminalDate)
+    }
+
+    func testProductionReconciliationInstallerBuildsAndInstallsRestartState() throws {
+        let file = try fixture.rollout("thread-a", lines: [fixture.session("thread-a"), fixture.started("turn-a"), fixture.token(total: 100, last: 100)])
+        try fixture.addThread("thread-a", rollout: file)
+        let initial = try fixture.adapter(); let thread = try initial.open(threadRawID: "thread-a")
+        let checkpoint = try XCTUnwrap(try initial.poll(threadID: thread.threadID).cursor)
+
+        let approvalStore = ApprovalLifecycleCheckpointStore(url: fixture.root.appendingPathComponent("approval-checkpoint.json"))
+        let approvals = try ApprovalLifecycleRuntimeOwner(databaseURL: fixture.root.appendingPathComponent("missing-logs.sqlite"), sourceID: ApprovalLocalSourceID("test-desktop-source")!, schema: .init(acceptedUserVersions: [0]), store: approvalStore)
+        let engine = RuntimeStateEngine()
+        XCTAssertEqual(engine.snapshot().state, .paused)
+        let installer = LocalRuntimeReconciliationInstaller(desktop: try fixture.adapter(), approvals: approvals, engine: engine)
+        let rebuilt = try installer.install(threadCheckpoints: [try XCTUnwrap(LocalRuntimeThreadCheckpoint(threadRawID: "thread-a", rolloutCursor: checkpoint))])
+
+        XCTAssertEqual(rebuilt.count, 1)
+        let snapshot = try XCTUnwrap(engine.snapshot().threads.first)
+        XCTAssertEqual(snapshot.state, .thinking)
+        XCTAssertEqual(snapshot.sessionTokenCumulative, 100)
+        XCTAssertEqual(snapshot.sessionTokenProvenance, .rolloutCumulativeAuthoritative)
+    }
+
+    func testFunctionOutputUsesCompletionBranchAndTerminalNeverUsesDecodeTime() throws {
+        let file = try fixture.rollout("thread-a", lines: [fixture.session("thread-a"), fixture.started("turn-a"), fixture.tool("call-a"), fixture.toolOutput("call-a"), fixture.complete("turn-a")])
+        try fixture.addThread("thread-a", rollout: file)
+        let adapter = try fixture.adapter(); let thread = try adapter.open(threadRawID: "thread-a")
+        let records = try adapter.poll(threadID: thread.threadID).observations.rollouts
+        XCTAssertTrue(records.contains { $0.activity == .agentResponse && $0.itemID?.rawID == "call-a" })
+        let terminal = try XCTUnwrap(records.first { $0.kind == .taskCompletedSuccess })
+        XCTAssertEqual(terminal.authoritativeEventAt, fixture.authoritativeTerminalDate)
+        XCTAssertNotEqual(terminal.authoritativeEventAt, terminal.observedAt)
+
+        // Exercise the real decoder-to-reducer path: the output clears only
+        // the exact request/call, through agentResponse rather than thinking.
+        let engine = RuntimeStateEngine(initialPhase: .live)
+        for record in records.prefix(2) { engine.ingest(record) }
+        let turn = try XCTUnwrap(records.first { $0.kind == .taskStarted }?.turnID)
+        let call = try XCTUnwrap(records.first { $0.activity == .tool }?.itemID)
+        engine.ingest(.requested(ApprovalRequested(threadID: thread.threadID, turnID: turn, requestID: call, observedAt: Date())))
+        XCTAssertEqual(engine.snapshot().threads.first?.state, .waitingApproval)
+        engine.ingest(try XCTUnwrap(records.first { $0.activity == .agentResponse }))
+        XCTAssertEqual(engine.snapshot().threads.first?.state, .thinking)
+    }
+
     func testCheckpointRejectsReplacedFileAndSameInodeSessionMismatch() throws {
         let file = try fixture.rollout("thread-a", lines: [fixture.session("thread-a"), fixture.started("turn-a")])
         try fixture.addThread("thread-a", rollout: file)
@@ -374,6 +430,7 @@ private final class LocalFixture {
     let root: URL
     let database: URL
     let sourceID = DesktopLocalSourceID("test-desktop-source")!
+    let authoritativeTerminalDate = ISO8601DateFormatter().date(from: "2030-01-01T00:00:00Z")!
 
     init() throws {
         root = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("codex-monitor-v31-\(UUID().uuidString)")
@@ -415,7 +472,8 @@ private final class LocalFixture {
     func token(total: Int, last: Int) -> String { "{\"type\":\"event_msg\",\"payload\":{\"type\":\"token_count\",\"info\":{\"total_token_usage\":{\"total_tokens\":\(total)},\"last_token_usage\":{\"total_tokens\":\(last)}}}}" }
     func reasoning(_ id: String) -> String { "{\"type\":\"response_item\",\"payload\":{\"type\":\"reasoning\",\"id\":\"\(id)\"}}" }
     func tool(_ id: String) -> String { "{\"type\":\"response_item\",\"payload\":{\"type\":\"function_call\",\"call_id\":\"\(id)\"}}" }
-    func complete(_ turn: String) -> String { "{\"type\":\"event_msg\",\"payload\":{\"type\":\"task_complete\",\"turn_id\":\"\(turn)\",\"error\":null}}" }
+    func complete(_ turn: String) -> String { "{\"timestamp\":\"2030-01-01T00:00:00Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"task_complete\",\"turn_id\":\"\(turn)\",\"completed_at\":1893456000,\"error\":null}}" }
+    func toolOutput(_ id: String) -> String { "{\"type\":\"response_item\",\"payload\":{\"type\":\"function_call_output\",\"call_id\":\"\(id)\"}}" }
 
     private func executeDatabase(_ sql: String) throws {
         var db: OpaquePointer?; guard sqlite3_open(database.path, &db) == SQLITE_OK else { throw POSIXError(.EIO) }; defer { sqlite3_close(db) }
