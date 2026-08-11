@@ -9,6 +9,7 @@ import CodexMonitorContracts
 final class MonitorSurfaceCoordinator: NSObject {
     private let model: MonitorAppModel
     private let preferences: MonitorPreferences
+    private let localization: LocalizationController
     private let refreshMonitoring: () -> Void
     private let setMonitoringPaused: (Bool) -> Void
     private let ownership = MonitorSurfaceOwnership()
@@ -21,9 +22,10 @@ final class MonitorSurfaceCoordinator: NSObject {
     private var settingsWindowController: SettingsWindowController?
     private var diagnosticsWindowController: DiagnosticsWindowController?
 
-    init(model: MonitorAppModel, preferences: MonitorPreferences, refreshMonitoring: @escaping () -> Void, setMonitoringPaused: @escaping (Bool) -> Void) {
+    init(model: MonitorAppModel, preferences: MonitorPreferences, localization: LocalizationController, refreshMonitoring: @escaping () -> Void, setMonitoringPaused: @escaping (Bool) -> Void) {
         self.model = model
         self.preferences = preferences
+        self.localization = localization
         self.refreshMonitoring = refreshMonitoring
         self.setMonitoringPaused = setMonitoringPaused
     }
@@ -40,8 +42,8 @@ final class MonitorSurfaceCoordinator: NSObject {
             showDiagnostics: { [weak self] in self?.showDiagnostics() }
         )
 
-        statusItemController = MonitorStatusItemController(model: model, preferences: preferences, actions: actions)
-        floatingController = FloatingStatusPanelController(actions: actions)
+        statusItemController = MonitorStatusItemController(model: model, preferences: preferences, localization: localization, actions: actions)
+        floatingController = FloatingStatusPanelController(localization: localization, actions: actions)
         floatingController?.configure(model: model, preferences: preferences)
         notifications.start(model: model, preferences: preferences)
 
@@ -78,7 +80,7 @@ final class MonitorSurfaceCoordinator: NSObject {
     func showUsage() {
         if usageWindowController == nil {
             guard ownership.acquire(.usage) else { return }
-            usageWindowController = UsageWindowController(model: model, preferences: preferences)
+            usageWindowController = UsageWindowController(model: model, preferences: preferences, localization: localization)
             DiagnosticEvent.record(.localization, ["event": "usageFirstCreation", "resolvedLocale": L10n.resolvedLanguage])
         }
         usageWindowController?.show()
@@ -89,6 +91,7 @@ final class MonitorSurfaceCoordinator: NSObject {
             guard ownership.acquire(.settings) else { return }
             settingsWindowController = SettingsWindowController(
                 preferences: preferences,
+                localization: localization,
                 actions: SettingsSystemActions(
                     refresh: { [weak self] in self?.refreshMonitoring() },
                     openCodex: { [weak self] in self?.openCodex() },
@@ -111,7 +114,7 @@ final class MonitorSurfaceCoordinator: NSObject {
     func showDiagnostics() {
         if diagnosticsWindowController == nil {
             guard ownership.acquire(.diagnostics) else { return }
-            diagnosticsWindowController = DiagnosticsWindowController(model: model)
+            diagnosticsWindowController = DiagnosticsWindowController(model: model, localization: localization)
         }
         diagnosticsWindowController?.show()
     }
@@ -159,14 +162,16 @@ struct MonitorSurfaceActions {
 final class MonitorStatusItemController: NSObject, NSPopoverDelegate {
     private let model: MonitorAppModel
     private let preferences: MonitorPreferences
+    private let localization: LocalizationController
     private let actions: MonitorSurfaceActions
     private let statusItem: NSStatusItem
     private let popover = NSPopover()
     private var hostedCapsule: NSHostingView<AnyView>?
 
-    init(model: MonitorAppModel, preferences: MonitorPreferences, actions: MonitorSurfaceActions) {
+    init(model: MonitorAppModel, preferences: MonitorPreferences, localization: LocalizationController, actions: MonitorSurfaceActions) {
         self.model = model
         self.preferences = preferences
+        self.localization = localization
         self.actions = actions
         statusItem = NSStatusBar.system.statusItem(withLength: 48)
         super.init()
@@ -175,7 +180,7 @@ final class MonitorStatusItemController: NSObject, NSPopoverDelegate {
     }
 
     func refresh() {
-        hostedCapsule?.rootView = AnyView(MenuStatusCapsuleView(model: model).allowsHitTesting(false).environment(\.locale, L10n.locale))
+        hostedCapsule?.rootView = AnyView(LocalizedRoot(localization: localization) { MenuStatusCapsuleView(model: model).allowsHitTesting(false) })
     }
 
     func invalidate() {
@@ -188,20 +193,10 @@ final class MonitorStatusItemController: NSObject, NSPopoverDelegate {
         if popover.isShown {
             popover.performClose(sender)
         } else {
-            let local = button.convert(button.bounds, to: nil)
-            let anchor = button.window?.convertToScreen(local) ?? .zero
-            let visible = button.window?.screen?.visibleFrame ?? NSScreen.main?.visibleFrame ?? .zero
-            let target = PopoverAnchorLayout.frame(anchor: anchor, contentSize: popover.contentSize, visibleFrame: visible)
-            // AppKit still owns the arrow and click-away behavior; the frame is
-            // recalculated from the current item on every open, then clamped.
             button.toolTip = nil
             popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
-            popover.contentViewController?.view.window?.setFrame(target, display: true)
-            popover.contentViewController?.view.window?.makeKey()
             DiagnosticEvent.record(.popover, [
-                "event": "show", "anchorX": String(Int(anchor.midX)), "anchorY": String(Int(anchor.minY)),
-                "frameX": String(Int(target.minX)), "frameY": String(Int(target.minY)),
-                "frameWidth": String(Int(target.width)), "frameHeight": String(Int(target.height)),
+                "event": "show", "placementOwner": "AppKitNativePopover",
                 "locale": L10n.resolvedLanguage
             ])
         }
@@ -216,7 +211,7 @@ final class MonitorStatusItemController: NSObject, NSPopoverDelegate {
         button.sendAction(on: [.leftMouseUp])
         button.toolTip = "Codex Monitor"
 
-        let hosting = NSHostingView(rootView: AnyView(MenuStatusCapsuleView(model: model).allowsHitTesting(false).environment(\.locale, L10n.locale)))
+        let hosting = NSHostingView(rootView: AnyView(LocalizedRoot(localization: localization) { MenuStatusCapsuleView(model: model).allowsHitTesting(false) }))
         hosting.frame = NSRect(x: 0, y: 0, width: 48, height: 22)
         hosting.autoresizingMask = [.width, .height]
         button.addSubview(hosting)
@@ -228,7 +223,7 @@ final class MonitorStatusItemController: NSObject, NSPopoverDelegate {
         popover.behavior = .transient
         popover.contentSize = NSSize(width: 340, height: 350)
         popover.contentViewController = NSHostingController(
-            rootView: MenuBarPopoverView(model: model, preferences: preferences, actions: actions).environment(\.locale, L10n.locale)
+            rootView: LocalizedRoot(localization: localization) { MenuBarPopoverView(model: model, preferences: preferences, actions: actions) }
         )
         DiagnosticEvent.record(.localization, ["event": "popoverFirstCreation", "resolvedLocale": L10n.resolvedLanguage])
     }
@@ -270,9 +265,9 @@ class ReusableNativeWindowController: NSWindowController {
 
 @MainActor
 final class UsageWindowController: ReusableNativeWindowController {
-    init(model: MonitorAppModel, preferences: MonitorPreferences) {
+    init(model: MonitorAppModel, preferences: MonitorPreferences, localization: LocalizationController) {
         let window = Self.makeWindow(size: NSSize(width: 600, height: 560), minSize: NSSize(width: 500, height: 460))
-        window.contentView = NSHostingView(rootView: UsageWindowView(model: model, preferences: preferences).environment(\.locale, L10n.locale))
+        window.contentView = NSHostingView(rootView: LocalizedRoot(localization: localization) { UsageWindowView(model: model, preferences: preferences) })
         super.init(window: window)
     }
 
@@ -286,15 +281,15 @@ final class SettingsWindowController: ReusableNativeWindowController, NSWindowDe
     let presentation: SettingsPresentationModel
     let hostingController: NSHostingController<AnyView>
 
-    init(preferences: MonitorPreferences, actions: SettingsSystemActions) {
+    init(preferences: MonitorPreferences, localization: LocalizationController, actions: SettingsSystemActions) {
         let presentation = SettingsPresentationModel()
         let window = Self.makeWindow(size: NSSize(width: 780, height: 540), minSize: NSSize(width: 760, height: 460))
         let hostingController = NSHostingController(
-            rootView: AnyView(NativeSettingsWindowView(
+            rootView: AnyView(LocalizedRoot(localization: localization) { NativeSettingsWindowView(
                 preferences: preferences,
                 presentation: presentation,
                 actions: actions
-            ).environment(\.locale, L10n.locale))
+            ) })
         )
         window.contentViewController = hostingController
         self.presentation = presentation
@@ -315,9 +310,9 @@ final class SettingsWindowController: ReusableNativeWindowController, NSWindowDe
 
 @MainActor
 final class DiagnosticsWindowController: ReusableNativeWindowController {
-    init(model: MonitorAppModel) {
+    init(model: MonitorAppModel, localization: LocalizationController) {
         let window = Self.makeWindow(size: NSSize(width: 520, height: 510), minSize: NSSize(width: 460, height: 400))
-        window.contentView = NSHostingView(rootView: DiagnosticsWindowView(model: model))
+        window.contentView = NSHostingView(rootView: LocalizedRoot(localization: localization) { DiagnosticsWindowView(model: model) })
         super.init(window: window)
     }
 

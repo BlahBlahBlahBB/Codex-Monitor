@@ -131,6 +131,36 @@ final class MonitorRuntimeTests: XCTestCase {
         XCTAssertEqual(snapshot.threads.first { $0.threadID == first }?.state, .working)
     }
 
+    func testSnapshotStreamImmediatelyYieldsThenDeliversMutation() async {
+        let clock = RuntimeSnapshotTestClock()
+        let store = makeStore(clock: clock)
+        let stream = await store.snapshots()
+        var iterator = stream.makeAsyncIterator()
+        let initial = await iterator.next()
+        XCTAssertEqual(initial?.currentState, .disconnected)
+
+        let thread = id(.thread, "event-thread")
+        await store.registerDesktopThread(DesktopThreadSnapshot(threadID: thread, title: nil, model: nil, reasoningEffort: nil, updatedAtMilliseconds: nil, tokensUsed: nil))
+        let updated = await iterator.next()
+        XCTAssertEqual(updated?.currentState, .idle)
+        XCTAssertEqual(updated?.sourceHealth[.desktopLocal]?.availability, .available)
+    }
+
+    func testOldUnavailableThreadDoesNotPoisonFreshRepresentativeIdleThread() async {
+        let clock = RuntimeSnapshotTestClock()
+        let store = makeStore(clock: clock)
+        let old = id(.thread, "old"), current = id(.thread, "current")
+        await store.registerDesktopThread(DesktopThreadSnapshot(threadID: old, title: nil, model: nil, reasoningEffort: nil, updatedAtMilliseconds: nil, tokensUsed: nil))
+        await store.ingest(.sourceHealth(DesktopSourceHealth(threadID: old, state: .unavailable, processEpoch: nil, fileIdentity: nil, reason: .sourceMissing)))
+        clock.advance(1)
+        await store.registerDesktopThread(DesktopThreadSnapshot(threadID: current, title: nil, model: nil, reasoningEffort: nil, updatedAtMilliseconds: nil, tokensUsed: nil))
+
+        let snapshot = await store.snapshot()
+        XCTAssertEqual(snapshot.currentThread?.threadID, current)
+        XCTAssertEqual(snapshot.currentState, .idle)
+        XCTAssertEqual(snapshot.sourceHealth[.desktopLocal]?.availability, .available)
+    }
+
     private func makeStore(clock: RuntimeSnapshotTestClock, freshness: MonitorRuntimeFreshnessPolicy = .init()) -> MonitorRuntimeStore {
         MonitorRuntimeStore(engine: RuntimeStateEngine(clock: clock, initialPhase: .live), clock: clock, freshnessPolicy: freshness, initialPhase: .live)
     }

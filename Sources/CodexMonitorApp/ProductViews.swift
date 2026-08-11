@@ -9,13 +9,14 @@ struct MenuBarPopoverView: View {
 
     var body: some View {
         let snapshot = model.snapshot
+        let presentation = model.presentation
         GlassSurface(cornerRadius: 18, shadow: true, level: .floating) {
             VStack(alignment: .leading, spacing: 0) {
                 // Block 1 — information only.
                 HStack(alignment: .top, spacing: 10) {
-                    Circle().fill(VisualStatePresentation.forSnapshot(snapshot).orbTone.color).frame(width: 8, height: 8).padding(.top, 5)
+                    Circle().fill(presentation.orbTone.color).frame(width: 8, height: 8).padding(.top, 5)
                     VStack(alignment: .leading, spacing: 3) {
-                        Text(MonitorDisplayValue.state(snapshot)).font(.system(size: 17, weight: .semibold))
+                        Text(MonitorDisplayValue.state(presentation)).font(.system(size: 17, weight: .semibold))
                         Text(MonitorDisplayValue.activity(snapshot)).font(.system(size: 12)).foregroundStyle(.secondary).lineLimit(1)
                     }
                     Spacer(minLength: 6)
@@ -260,11 +261,11 @@ private struct UsageHistoryChart: View {
                             let desired = CGPoint(x: UsagePresentation.tooltipOffset(for: selectedBucket, buckets: buckets, width: geometry.size.width), y: 8)
                             let frame = UsagePresentation.tooltipFrame(
                                 desiredOrigin: desired,
-                                tooltipSize: CGSize(width: 132, height: 62),
+                                tooltipSize: UsagePresentation.tooltipSize,
                                 bounds: CGRect(origin: .zero, size: geometry.size)
                             )
                             UsageChartTooltip(bucket: selectedBucket)
-                                .frame(width: 132)
+                                .frame(width: UsagePresentation.tooltipSize.width, height: UsagePresentation.tooltipSize.height, alignment: .leading)
                                 .offset(x: frame.minX, y: frame.minY)
                                 .allowsHitTesting(false)
                         }
@@ -295,7 +296,7 @@ private struct UsageChartTooltip: View {
             .padding(.vertical, 6)
             .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 7, style: .continuous))
             .overlay(RoundedRectangle(cornerRadius: 7, style: .continuous).strokeBorder(Color.primary.opacity(0.12), lineWidth: 0.5))
-            .fixedSize()
+            .lineLimit(2)
     }
 }
 
@@ -303,6 +304,9 @@ enum UsagePresentation {
     /// A reset date before modern Codex account service dates is a decoded
     /// epoch/default value, not user-facing reset information.
     private static let earliestValidReset = Date(timeIntervalSince1970: 1_577_836_800) // 2020-01-01 UTC
+    /// This is the tooltip's rendered frame, not a guessed clamp width. Long
+    /// token totals wrap within the same compact native-material surface.
+    static let tooltipSize = CGSize(width: 188, height: 62)
 
     static func resetTime(_ date: Date?, languageCode: String? = nil) -> String {
         guard let date, date >= earliestValidReset else {
@@ -328,7 +332,7 @@ enum UsagePresentation {
     static func tooltipOffset(for bucket: AccountUsageDailyBucket, buckets: [AccountUsageDailyBucket], width: CGFloat) -> CGFloat {
         guard let index = buckets.firstIndex(where: { $0.id == bucket.id }) else { return 0 }
         let point = (CGFloat(index) + 0.5) / CGFloat(max(1, buckets.count)) * width
-        return min(max(point - 62, 0), max(0, width - 124))
+        return point - tooltipSize.width / 2
     }
 
     static func tooltipFrame(desiredOrigin: CGPoint, tooltipSize: CGSize, bounds: CGRect, padding: CGFloat = 6) -> CGRect {
@@ -519,8 +523,8 @@ private struct FloatingSettingsDetail: View {
             SettingsRow(title: L10n.tr("settings.lockPosition")) { Toggle("", isOn: $preferences.lockPosition).labelsHidden().toggleStyle(.switch) }
             SettingsRow(title: L10n.tr("settings.floatingSize")) {
                 HStack(spacing: 10) {
-                    Slider(value: $preferences.orbSize, in: 72...180, step: 1)
-                    Text("\(Int(preferences.orbSize)) pt").foregroundStyle(.secondary).monospacedDigit().frame(width: 48, alignment: .trailing)
+                    Slider(value: $preferences.orbSize, in: 72...180)
+                    Text("\(Int(preferences.orbSize.rounded())) pt").foregroundStyle(.secondary).monospacedDigit().frame(width: 48, alignment: .trailing)
                 }
             }
             SettingsRow(title: L10n.tr("settings.showUsageMenu")) { Toggle("", isOn: $preferences.showUsageMenu).labelsHidden().toggleStyle(.switch) }
@@ -603,9 +607,10 @@ struct DiagnosticsWindowView: View {
     @ObservedObject var model: MonitorAppModel
     var body: some View {
         let snapshot = model.snapshot
+        let presentation = model.presentation
         Form {
             Section(L10n.tr("diagnostics.runtime")) {
-                LabeledContent(L10n.tr("diagnostics.state"), value: MonitorDisplayValue.state(snapshot))
+                LabeledContent(L10n.tr("diagnostics.state"), value: MonitorDisplayValue.state(presentation))
                 LabeledContent(L10n.tr("label.session"), value: MonitorDisplayValue.taskTitle(snapshot))
             }
             Section(L10n.tr("diagnostics.sourceHealth")) {

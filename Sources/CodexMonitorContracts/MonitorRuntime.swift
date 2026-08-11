@@ -247,6 +247,7 @@ public actor MonitorRuntimeStore {
     private var desktopSource: SourceState
     private var approvalSource: SourceState
     private var monitoringPhase: MonitoringPausePhase
+    private var snapshotContinuations: [UUID: AsyncStream<MonitorRuntimeSnapshot>.Continuation] = [:]
 
     public init(
         engine: RuntimeStateEngine = RuntimeStateEngine(),
@@ -271,6 +272,7 @@ public actor MonitorRuntimeStore {
         let at = observedAt ?? clock.now()
         engine.register(snapshot, sourceHealthAvailable: sourceHealthAvailable, observedAt: at)
         desktopSource = SourceState(availability: sourceHealthAvailable ? .available : .unavailable, observedAt: at, reason: sourceHealthAvailable ? nil : .sourceUnavailable)
+        publishSnapshot()
     }
 
     public func ingest(_ observation: DesktopObservation) {
@@ -284,6 +286,7 @@ public actor MonitorRuntimeStore {
         case .capabilityUnavailable:
             desktopSource = SourceState(availability: .unavailable, observedAt: at, reason: .capabilityUnsupported)
         }
+        publishSnapshot()
     }
 
     /// Resolution is deliberately not admitted here. V3-2 established that
@@ -300,6 +303,7 @@ public actor MonitorRuntimeStore {
             approvalSource = SourceState(availability: health.state == .available ? .available : .unavailable, observedAt: health.observedAt, reason: health.state == .available ? nil : .sourceUnavailable)
         }
         engine.ingest(observation)
+        publishSnapshot()
     }
 
     public func ingestApprovalPoll(_ result: ApprovalPollResult) {
@@ -307,12 +311,14 @@ public actor MonitorRuntimeStore {
         let health = result.health
         approvalSource = SourceState(availability: health.state == .available ? .available : .unavailable, observedAt: health.observedAt, reason: health.state == .available ? nil : .sourceUnavailable)
         engine.ingest(.sourceHealth(health))
+        publishSnapshot()
     }
 
     public func ingest(account snapshot: AccountSnapshot) {
         accountSnapshot = snapshot
         let freshness = snapshot.provenance.freshness
         accountSource = SourceState(availability: freshness.state == .fresh ? .available : monitorAvailability(for: freshness.state), observedAt: freshness.observedAt, reason: freshness.state == .fresh ? nil : monitorReason(for: freshness.state))
+        publishSnapshot()
     }
 
     public func markSourceUnavailable(_ source: MonitorRuntimeSource, observedAt: Date? = nil) {
@@ -322,6 +328,7 @@ public actor MonitorRuntimeStore {
         case .approvalLocal: approvalSource = state
         case .account: accountSource = state; accountSnapshot = nil
         }
+        publishSnapshot()
     }
 
     public func setPaused(_ paused: Bool) {
@@ -335,6 +342,7 @@ public actor MonitorRuntimeStore {
             desktopSource = SourceState(availability: .stale, observedAt: clock.now(), reason: .monitorPausedOrRevalidating)
             approvalSource = SourceState(availability: .stale, observedAt: clock.now(), reason: .monitorPausedOrRevalidating)
         }
+        publishSnapshot()
     }
 
     public func beginReconciliation() {
@@ -343,6 +351,7 @@ public actor MonitorRuntimeStore {
         let now = clock.now()
         desktopSource = SourceState(availability: .stale, observedAt: now, reason: .monitorPausedOrRevalidating)
         approvalSource = SourceState(availability: .stale, observedAt: now, reason: .monitorPausedOrRevalidating)
+        publishSnapshot()
     }
 
     public func installReconciliation(_ values: [RuntimeReconciliationThread]) {
@@ -351,6 +360,22 @@ public actor MonitorRuntimeStore {
         let now = clock.now()
         desktopSource = SourceState(availability: values.isEmpty ? .unknown : .available, observedAt: now, reason: nil)
         approvalSource = SourceState(availability: values.isEmpty ? .unknown : .available, observedAt: now, reason: nil)
+        publishSnapshot()
+    }
+
+    /// Event-driven UI subscription. A new subscriber receives one coherent
+    /// snapshot immediately, then only mutations that can change the product
+    /// projection. No UI-side timer or source reread is involved.
+    public func snapshots() -> AsyncStream<MonitorRuntimeSnapshot> {
+        let id = UUID()
+        let stream = AsyncStream<MonitorRuntimeSnapshot>(bufferingPolicy: .bufferingNewest(1)) { continuation in
+            snapshotContinuations[id] = continuation
+            continuation.onTermination = { [weak self] _ in
+                Task { await self?.removeSnapshotContinuation(id) }
+            }
+        }
+        snapshotContinuations[id]?.yield(snapshot())
+        return stream
     }
 
     public func snapshot() -> MonitorRuntimeSnapshot {
@@ -361,7 +386,7 @@ public actor MonitorRuntimeStore {
         let account = freshAccount(at: now)
         let effectiveAccountSource = accountSourceForSnapshot(at: now)
         let accountHealth = sourceHealth(for: .account, state: effectiveAccountSource, now: now)
-        let desktopHealth = sourceHealth(for: .desktopLocal, state: desktopSource, fallback: runtime.sourceFreshness, now: now)
+        let desktopHealth = desktopHealth(for: current, lane: desktopSource, now: now)
         let approvalHealth = sourceHealth(for: .approvalLocal, state: approvalSource, now: now)
         let capabilities = MonitorRuntimeSnapshotBuilder.capabilities(
             runtime: runtime,
@@ -409,6 +434,40 @@ public actor MonitorRuntimeStore {
         let observedAt = fallback?.observedAt ?? state.observedAt
         let freshnessState: FreshnessState = switch resolvedAvailability { case .available: .fresh; case .stale: .stale; case .unavailable, .unknown: .unknown }
         return MonitorSourceHealth(source: source, availability: resolvedAvailability, freshness: Freshness(state: freshnessState, assessedAt: now, observedAt: observedAt, reason: resolvedReason?.rawValue), reason: resolvedReason)
+    }
+
+    /// Historical threads remain in `threads`, but their freshness is not a
+    /// presentation veto for a fresh representative thread. This prevents an
+    /// old unavailable record from turning a current IDLE/WORKING/THINKING
+    /// snapshot into Source Unavailable.
+    private func desktopHealth(for current: MonitorThreadViewModel?, lane: SourceState, now: Date) -> MonitorSourceHealth {
+        guard let current else {
+            return sourceHealth(for: .desktopLocal, state: lane, now: now)
+        }
+        // A representative thread with unknown runtime freshness is an exact
+        // current-source loss, not an innocuous absence of metadata. Preserve
+        // the established fail-closed `unavailable` contract for that case.
+        let availability: MonitorDataAvailability = switch current.freshness.state {
+        case .fresh: .available
+        case .stale: .stale
+        case .unknown: .unavailable
+        }
+        let reason = monitorReason(for: current.freshness.state)
+        return MonitorSourceHealth(
+            source: .desktopLocal,
+            availability: availability,
+            freshness: Freshness(state: current.freshness.state, assessedAt: now, observedAt: current.freshness.observedAt, reason: reason?.rawValue),
+            reason: reason
+        )
+    }
+
+    private func publishSnapshot() {
+        let value = snapshot()
+        for continuation in snapshotContinuations.values { continuation.yield(value) }
+    }
+
+    private func removeSnapshotContinuation(_ id: UUID) {
+        snapshotContinuations.removeValue(forKey: id)
     }
 
     private func monitorAvailability(for state: FreshnessState) -> MonitorDataAvailability {

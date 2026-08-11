@@ -7,11 +7,13 @@ final class FloatingStatusPanelController: NSObject, ObservableObject, NSWindowD
     private var panel: NSPanel?
     private var quickView: NSPanel?
     private weak var preferences: MonitorPreferences?
+    private let localization: LocalizationController
     private let actions: MonitorSurfaceActions
     private var hasPlacedPanel = false
     private var liveResizeCenter: CGPoint?
 
-    init(actions: MonitorSurfaceActions) {
+    init(localization: LocalizationController, actions: MonitorSurfaceActions) {
+        self.localization = localization
         self.actions = actions
         super.init()
     }
@@ -62,7 +64,7 @@ final class FloatingStatusPanelController: NSObject, ObservableObject, NSWindowD
         quick.hasShadow = false
         quick.isReleasedWhenClosed = false
         quick.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
-        quick.contentView = NSHostingView(rootView: QuickView(model: model).environment(\.locale, L10n.locale))
+        quick.contentView = NSHostingView(rootView: LocalizedRoot(localization: localization) { QuickView(model: model) })
         DiagnosticEvent.record(.localization, ["event": "quickViewFirstCreation", "resolvedLocale": L10n.resolvedLanguage])
         quick.orderFrontRegardless()
         quickView = quick
@@ -107,9 +109,9 @@ final class FloatingStatusPanelController: NSObject, ObservableObject, NSWindowD
         panel.isMovableByWindowBackground = true
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         panel.delegate = self
-        let root = FloatingOrbRoot(model: model, preferences: preferences) { [weak self] in
+        let root = AnyView(LocalizedRoot(localization: localization) { FloatingOrbRoot(model: model, preferences: preferences) { [weak self] in
             self?.toggleQuickView(model: model)
-        }
+        } })
         let hostingView = OrbHostingView(rootView: root, menuProvider: { [weak self] in
             self?.makeContextMenu() ?? NSMenu()
         })
@@ -209,15 +211,19 @@ final class FloatingStatusPanelController: NSObject, ObservableObject, NSWindowD
     @objc private func toggleLockPosition() { preferences?.lockPosition.toggle() }
 }
 
-final class OrbHostingView: NSHostingView<FloatingOrbRoot> {
+final class OrbHostingView: NSHostingView<AnyView> {
     private let menuProvider: () -> NSMenu
 
-    init(rootView: FloatingOrbRoot, menuProvider: @escaping () -> NSMenu) {
+    init(rootView: AnyView, menuProvider: @escaping () -> NSMenu) {
         self.menuProvider = menuProvider
         super.init(rootView: rootView)
     }
 
-    required init(rootView: FloatingOrbRoot) {
+    convenience init(rootView: FloatingOrbRoot, menuProvider: @escaping () -> NSMenu = { NSMenu() }) {
+        self.init(rootView: AnyView(rootView), menuProvider: menuProvider)
+    }
+
+    required init(rootView: AnyView) {
         menuProvider = { NSMenu() }
         super.init(rootView: rootView)
     }
@@ -247,7 +253,7 @@ struct FloatingOrbRoot: View {
     let action: () -> Void
 
     var body: some View {
-        MonitorOrbView(snapshot: model.snapshot, size: preferences.orbSize)
+        MonitorOrbView(snapshot: model.snapshot, presentation: model.presentation, size: preferences.orbSize)
             .contentShape(Circle())
             .onTapGesture(perform: action)
     }
@@ -259,6 +265,7 @@ private struct QuickView: View {
 
     var body: some View {
         let snapshot = model.snapshot
+        let presentation = model.presentation
         GlassSurface(cornerRadius: 22, shadow: false) {
             VStack(alignment: .leading, spacing: 0) {
                 HStack(alignment: .firstTextBaseline, spacing: 8) {
@@ -270,8 +277,8 @@ private struct QuickView: View {
                         .foregroundStyle(.secondary)
                 }
                 HStack(spacing: 6) {
-                    Circle().fill(VisualStatePresentation.forSnapshot(snapshot).orbTone.color).frame(width: 7, height: 7)
-                    Text(MonitorDisplayValue.state(snapshot))
+                    Circle().fill(presentation.orbTone.color).frame(width: 7, height: 7)
+                    Text(MonitorDisplayValue.state(presentation))
                         .font(.system(size: 15, weight: .semibold))
                 }
                 .padding(.top, 5)
@@ -303,6 +310,6 @@ private struct QuickView: View {
         }
         .frame(width: 350, height: 214)
         .accessibilityElement(children: .combine)
-        .accessibilityLabel(String(format: L10n.tr("accessibility.quickView"), MonitorDisplayValue.state(snapshot), MonitorDisplayValue.activity(snapshot)))
+        .accessibilityLabel(String(format: L10n.tr("accessibility.quickView"), MonitorDisplayValue.state(presentation), MonitorDisplayValue.activity(snapshot)))
     }
 }

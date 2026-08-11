@@ -42,6 +42,7 @@ final class CodexMonitorAppDelegate: NSObject, NSApplicationDelegate {
         let surfaces = MonitorSurfaceCoordinator(
             model: model,
             preferences: preferences,
+            localization: localization,
             refreshMonitoring: { [weak self] in self?.restartObservation() },
             setMonitoringPaused: { [weak self] in self?.setMonitoringPaused($0) }
         )

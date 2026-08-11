@@ -158,7 +158,7 @@ final class MonitorProductIntegrationTests: XCTestCase {
         let suite = "CodexMonitorTests.settings.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suite)!
         defer { defaults.removePersistentDomain(forName: suite) }
-        let controller = SettingsWindowController(preferences: MonitorPreferences(defaults: defaults), actions: testSettingsActions())
+        let controller = SettingsWindowController(preferences: MonitorPreferences(defaults: defaults), localization: LocalizationController(preference: .system), actions: testSettingsActions())
         let root = controller.window?.contentView
         let host = controller.hostingController
         XCTAssertNotNil(root)
@@ -231,6 +231,8 @@ final class MonitorProductIntegrationTests: XCTestCase {
 
     func testFollowSystemLocaleResolvesSynchronouslyBeforeAnySurfaceCreation() {
         XCTAssertEqual(LocalizationController.resolve(preference: .system, preferredLanguages: ["zh-Hans", "en"]), "zh-Hans")
+        XCTAssertEqual(LocalizationController.resolve(preference: .system, preferredLanguages: ["zh-CN", "en"]), "zh-Hans")
+        XCTAssertEqual(LocalizationController.resolve(preference: .system, preferredLanguages: ["zh-SG", "en"]), "zh-Hans")
         XCTAssertEqual(LocalizationController.resolve(preference: .english, preferredLanguages: ["zh-Hans"]), "en")
         XCTAssertEqual(LocalizationController.resolve(preference: .simplifiedChinese, preferredLanguages: ["en"]), "zh-Hans")
         XCTAssertEqual(L10n.tr("menu.settings", languageCode: "zh-Hans"), "设置")
@@ -265,10 +267,10 @@ final class MonitorProductIntegrationTests: XCTestCase {
         XCTAssertTrue(UsagePresentation.tooltip(for: buckets[0], languageCode: "en").contains("Token: 0 Token"))
         XCTAssertTrue(UsagePresentation.axisDate("2026-08-01", languageCode: "en").contains("Aug 1"))
         let bounds = CGRect(x: 0, y: 0, width: 300, height: 164)
-        let right = UsagePresentation.tooltipFrame(desiredOrigin: CGPoint(x: 280, y: 150), tooltipSize: CGSize(width: 132, height: 62), bounds: bounds)
+        let right = UsagePresentation.tooltipFrame(desiredOrigin: CGPoint(x: 280, y: 150), tooltipSize: UsagePresentation.tooltipSize, bounds: bounds)
         XCTAssertLessThanOrEqual(right.maxX, bounds.maxX - 6)
         XCTAssertLessThanOrEqual(right.maxY, bounds.maxY - 6)
-        let left = UsagePresentation.tooltipFrame(desiredOrigin: CGPoint(x: -30, y: -20), tooltipSize: CGSize(width: 132, height: 62), bounds: bounds)
+        let left = UsagePresentation.tooltipFrame(desiredOrigin: CGPoint(x: -30, y: -20), tooltipSize: UsagePresentation.tooltipSize, bounds: bounds)
         XCTAssertGreaterThanOrEqual(left.minX, bounds.minX + 6)
         XCTAssertGreaterThanOrEqual(left.minY, bounds.minY + 6)
     }

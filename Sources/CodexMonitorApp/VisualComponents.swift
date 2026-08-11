@@ -143,16 +143,17 @@ private struct PersistentGlassCapsule: View {
 
 struct MonitorOrbView: View {
     let snapshot: MonitorRuntimeSnapshot?
+    let presentation: VisualStatePresentation
     let size: CGFloat
 
     var body: some View {
-        let presentation = VisualStatePresentation.forSnapshot(snapshot)
         let ringWidth = max(5.6, min(13.5, size * (7 / 90)))
         let ringDiameter = size * 0.90
         let valueSize = max(13, min(30, size * (24 / 90)))
 
         ZStack {
             PersistentGlassCircle()
+                .shadow(color: Color.black.opacity(0.10), radius: 8, y: 4)
             Circle()
                 .stroke(presentation.orbTone.color, style: StrokeStyle(lineWidth: ringWidth, lineCap: .round))
                 .frame(width: ringDiameter, height: ringDiameter)
@@ -169,10 +170,8 @@ struct MonitorOrbView: View {
                 .minimumScaleFactor(0.72)
         }
         .frame(width: size, height: size)
-        .clipShape(Circle())
-        .shadow(color: Color.black.opacity(0.12), radius: 10, y: 5)
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel(String(format: L10n.tr("accessibility.orb"), MonitorDisplayValue.state(snapshot), MonitorDisplayValue.orbQuota(snapshot)))
+        .accessibilityLabel(String(format: L10n.tr("accessibility.orb"), MonitorDisplayValue.state(presentation), MonitorDisplayValue.orbQuota(snapshot)))
         .accessibilityHint(L10n.tr("accessibility.orbHint"))
     }
 }
@@ -181,8 +180,7 @@ struct MenuStatusCapsuleView: View {
     @ObservedObject var model: MonitorAppModel
 
     var body: some View {
-        let snapshot = model.snapshot
-        let presentation = VisualStatePresentation.forSnapshot(snapshot)
+        let presentation = model.presentation
         let dots = presentation.dots
         HStack(spacing: 5) {
             ForEach(Array(dots.enumerated()), id: \.offset) { _, dot in
@@ -193,7 +191,7 @@ struct MenuStatusCapsuleView: View {
         .background(PersistentGlassCapsule())
         .overlay(Capsule().strokeBorder(Color.white.opacity(0.74), lineWidth: 0.7))
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel(String(format: L10n.tr("accessibility.menuStatus"), MonitorDisplayValue.state(snapshot)))
+        .accessibilityLabel(String(format: L10n.tr("accessibility.menuStatus"), MonitorDisplayValue.state(presentation)))
     }
 
     private func dotView(_ presentation: VisualStateDot) -> some View {
@@ -301,6 +299,10 @@ enum MonitorDisplayValue {
 
     static func state(_ snapshot: MonitorRuntimeSnapshot?) -> String {
         L10n.tr(VisualStatePresentation.forSnapshot(snapshot).stateTextKey)
+    }
+
+    static func state(_ presentation: VisualStatePresentation) -> String {
+        L10n.tr(presentation.stateTextKey)
     }
 
     static func activity(_ snapshot: MonitorRuntimeSnapshot?) -> String {

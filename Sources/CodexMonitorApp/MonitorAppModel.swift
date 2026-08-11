@@ -7,6 +7,9 @@ import CodexMonitorContracts
 public final class MonitorAppModel: ObservableObject {
     @Published public private(set) var snapshot: MonitorRuntimeSnapshot?
     public private(set) var acceptedSnapshotCount = 0
+    /// Every live state surface reads this one presentation projection. Views
+    /// do not independently translate runtime state into colors or breathing.
+    var presentation: VisualStatePresentation { VisualStatePresentation.forSnapshot(snapshot) }
     private var observationTask: Task<Void, Never>?
 
     public init() {}
@@ -38,17 +41,15 @@ public final class MonitorAppModel: ObservableObject {
         return String(hash, radix: 16)
     }
 
-    /// Snapshot reads are actor hops, never source I/O on the main actor. The
-    /// store itself is passive; this small UI observation cadence does not
-    /// create parser/database polling and duplicate presentations are ignored.
-    public func startObserving(_ runtime: MonitorRuntimeStore, interval: Duration = .seconds(1)) {
+    /// Runtime delivery is event-driven. The store yields its current coherent
+    /// snapshot on subscription and publishes only after a projection mutation.
+    public func startObserving(_ runtime: MonitorRuntimeStore) {
         observationTask?.cancel()
         observationTask = Task { [weak self] in
-            while !Task.isCancelled {
-                let next = await runtime.snapshot()
+            let updates = await runtime.snapshots()
+            for await next in updates {
                 guard !Task.isCancelled else { return }
                 self?.apply(next)
-                try? await Task.sleep(for: interval)
             }
         }
     }

@@ -53,6 +53,21 @@ final class MonitorAppModelTests: XCTestCase {
         XCTAssertEqual(model.snapshot?.sourceHealth[.desktopLocal]?.availability, .unavailable)
     }
 
+    func testFreshRepresentativeIdleHasTheExactSteadyGreenPresentation() async {
+        let clock = AppModelTestClock()
+        let runtime = MonitorRuntimeStore(engine: RuntimeStateEngine(clock: clock, initialPhase: .live), clock: clock, initialPhase: .live)
+        let old = id(.thread, "old"), current = id(.thread, "current")
+        await runtime.registerDesktopThread(DesktopThreadSnapshot(threadID: old, title: nil, model: nil, reasoningEffort: nil, updatedAtMilliseconds: nil, tokensUsed: nil))
+        await runtime.ingest(.sourceHealth(DesktopSourceHealth(threadID: old, state: .unavailable, processEpoch: nil, fileIdentity: nil, reason: .sourceMissing)))
+        clock.advance(1)
+        await runtime.registerDesktopThread(DesktopThreadSnapshot(threadID: current, title: nil, model: nil, reasoningEffort: nil, updatedAtMilliseconds: nil, tokensUsed: nil))
+
+        let snapshot = await runtime.snapshot()
+        XCTAssertEqual(snapshot.currentState, .idle)
+        XCTAssertEqual(snapshot.sourceHealth[.desktopLocal]?.availability, .available)
+        XCTAssertEqual(VisualStatePresentation.forSnapshot(snapshot), .init(dots: [.green, .green, .green], orbTone: .green, breathes: false, stateTextKey: "state.idle"))
+    }
+
     private func id(_ kind: EntityKind, _ raw: String) -> NamespacedID {
         NamespacedID(sourceID: source, entityKind: kind, rawID: raw)!
     }

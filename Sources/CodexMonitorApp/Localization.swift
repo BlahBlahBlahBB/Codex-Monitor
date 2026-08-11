@@ -17,7 +17,17 @@ final class LocalizationController: ObservableObject {
     }
 
     static func resolve(preference: InterfaceLanguage, preferredLanguages: [String]) -> String {
-        preference.localeIdentifier ?? preferredLanguages.first ?? Locale.current.identifier
+        if let explicit = preference.localeIdentifier { return normalize(explicit) }
+        return normalize(preferredLanguages.first ?? Locale.current.identifier)
+    }
+
+    static func normalize(_ identifier: String) -> String {
+        let locale = Locale(identifier: identifier)
+        switch locale.language.languageCode?.identifier.lowercased() {
+        case "zh": return "zh-Hans"
+        case "en": return "en"
+        default: return identifier
+        }
     }
 
     /// AppKit does not consume `-AppleLanguages` during its manual bootstrap.
@@ -39,6 +49,25 @@ final class LocalizationController: ObservableObject {
             "preferredLanguages": preferredLanguages.map { Locale(identifier: $0).language.languageCode?.identifier ?? "unknown" }.joined(separator: ","),
             "resolvedLocale": next
         ])
+    }
+}
+
+/// The single live localization root for every SwiftUI surface. Changing the
+/// controller invalidates the root identity, so strings evaluated through the
+/// shared `L10n` boundary cannot remain mixed with a previous locale.
+struct LocalizedRoot<Content: View>: View {
+    @ObservedObject var localization: LocalizationController
+    let content: Content
+
+    init(localization: LocalizationController, @ViewBuilder content: () -> Content) {
+        self.localization = localization
+        self.content = content()
+    }
+
+    var body: some View {
+        content
+            .environment(\.locale, localization.locale)
+            .id(localization.resolvedLanguage)
     }
 }
 
