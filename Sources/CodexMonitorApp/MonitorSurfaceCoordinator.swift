@@ -49,6 +49,14 @@ final class MonitorSurfaceCoordinator: NSObject {
             // Published sends before mutation; schedule after the value lands.
             DispatchQueue.main.async { [weak self] in
                 guard let self else { return }
+                DiagnosticEvent.record(.settings, [
+                    "event": "preferencesApplied",
+                    "showOrb": String(self.preferences.showOrb),
+                    "orbSize": String(Int(self.preferences.orbSize)),
+                    "alwaysOnTop": String(self.preferences.alwaysOnTop),
+                    "locked": String(self.preferences.lockPosition),
+                    "language": self.preferences.interfaceLanguage.rawValue
+                ])
                 self.floatingController?.configure(model: self.model, preferences: self.preferences)
                 self.statusItemController?.refresh()
             }
@@ -71,6 +79,7 @@ final class MonitorSurfaceCoordinator: NSObject {
         if usageWindowController == nil {
             guard ownership.acquire(.usage) else { return }
             usageWindowController = UsageWindowController(model: model, preferences: preferences)
+            DiagnosticEvent.record(.localization, ["event": "usageFirstCreation", "resolvedLocale": L10n.resolvedLanguage])
         }
         usageWindowController?.show()
     }
@@ -89,10 +98,12 @@ final class MonitorSurfaceCoordinator: NSObject {
                         guard let self else { return }
                         self.notifications.requestPermissionThenEnable(preference, preferences: self.preferences)
                     },
+                    exportDiagnostics: { [weak self] in self?.exportDiagnostics() },
                     loginItem: loginItem,
                     showDiagnostics: { [weak self] in self?.showDiagnostics() }
                 )
             )
+            DiagnosticEvent.record(.localization, ["event": "settingsFirstCreation", "resolvedLocale": L10n.resolvedLanguage])
         }
         settingsWindowController?.show()
     }
@@ -118,6 +129,19 @@ final class MonitorSurfaceCoordinator: NSObject {
         let logs = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".codex", isDirectory: true)
         guard FileManager.default.fileExists(atPath: logs.path) else { return }
         NSWorkspace.shared.open(logs)
+    }
+
+    private func exportDiagnostics() {
+        let snapshot = DiagnosticPreferenceSnapshot(preferences)
+        Task {
+            do {
+                let url = try await MonitorDiagnostics.shared.export(preferences: snapshot)
+                DiagnosticEvent.record(.settings, ["event": "diagnosticsExported", "file": url.lastPathComponent])
+                NSWorkspace.shared.activateFileViewerSelecting([url])
+            } catch {
+                DiagnosticEvent.record(.settings, ["event": "diagnosticsExportFailed", "reason": "fileWriteFailure"])
+            }
+        }
     }
 }
 
@@ -151,7 +175,7 @@ final class MonitorStatusItemController: NSObject, NSPopoverDelegate {
     }
 
     func refresh() {
-        hostedCapsule?.rootView = AnyView(MenuStatusCapsuleView(model: model).allowsHitTesting(false))
+        hostedCapsule?.rootView = AnyView(MenuStatusCapsuleView(model: model).allowsHitTesting(false).environment(\.locale, L10n.locale))
     }
 
     func invalidate() {
@@ -174,6 +198,12 @@ final class MonitorStatusItemController: NSObject, NSPopoverDelegate {
             popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
             popover.contentViewController?.view.window?.setFrame(target, display: true)
             popover.contentViewController?.view.window?.makeKey()
+            DiagnosticEvent.record(.popover, [
+                "event": "show", "anchorX": String(Int(anchor.midX)), "anchorY": String(Int(anchor.minY)),
+                "frameX": String(Int(target.minX)), "frameY": String(Int(target.minY)),
+                "frameWidth": String(Int(target.width)), "frameHeight": String(Int(target.height)),
+                "locale": L10n.resolvedLanguage
+            ])
         }
     }
 
@@ -186,7 +216,7 @@ final class MonitorStatusItemController: NSObject, NSPopoverDelegate {
         button.sendAction(on: [.leftMouseUp])
         button.toolTip = "Codex Monitor"
 
-        let hosting = NSHostingView(rootView: AnyView(MenuStatusCapsuleView(model: model).allowsHitTesting(false)))
+        let hosting = NSHostingView(rootView: AnyView(MenuStatusCapsuleView(model: model).allowsHitTesting(false).environment(\.locale, L10n.locale)))
         hosting.frame = NSRect(x: 0, y: 0, width: 48, height: 22)
         hosting.autoresizingMask = [.width, .height]
         button.addSubview(hosting)
@@ -198,12 +228,14 @@ final class MonitorStatusItemController: NSObject, NSPopoverDelegate {
         popover.behavior = .transient
         popover.contentSize = NSSize(width: 340, height: 350)
         popover.contentViewController = NSHostingController(
-            rootView: MenuBarPopoverView(model: model, preferences: preferences, actions: actions)
+            rootView: MenuBarPopoverView(model: model, preferences: preferences, actions: actions).environment(\.locale, L10n.locale)
         )
+        DiagnosticEvent.record(.localization, ["event": "popoverFirstCreation", "resolvedLocale": L10n.resolvedLanguage])
     }
 
     func popoverDidClose(_ notification: Notification) {
         statusItem.button?.toolTip = "Codex Monitor"
+        DiagnosticEvent.record(.popover, ["event": "close", "locale": L10n.resolvedLanguage])
     }
 }
 
@@ -240,7 +272,7 @@ class ReusableNativeWindowController: NSWindowController {
 final class UsageWindowController: ReusableNativeWindowController {
     init(model: MonitorAppModel, preferences: MonitorPreferences) {
         let window = Self.makeWindow(size: NSSize(width: 600, height: 560), minSize: NSSize(width: 500, height: 460))
-        window.contentView = NSHostingView(rootView: UsageWindowView(model: model, preferences: preferences))
+        window.contentView = NSHostingView(rootView: UsageWindowView(model: model, preferences: preferences).environment(\.locale, L10n.locale))
         super.init(window: window)
     }
 
@@ -252,17 +284,17 @@ final class UsageWindowController: ReusableNativeWindowController {
 @MainActor
 final class SettingsWindowController: ReusableNativeWindowController, NSWindowDelegate {
     let presentation: SettingsPresentationModel
-    let hostingController: NSHostingController<NativeSettingsWindowView>
+    let hostingController: NSHostingController<AnyView>
 
     init(preferences: MonitorPreferences, actions: SettingsSystemActions) {
         let presentation = SettingsPresentationModel()
         let window = Self.makeWindow(size: NSSize(width: 780, height: 540), minSize: NSSize(width: 760, height: 460))
         let hostingController = NSHostingController(
-            rootView: NativeSettingsWindowView(
+            rootView: AnyView(NativeSettingsWindowView(
                 preferences: preferences,
                 presentation: presentation,
                 actions: actions
-            )
+            ).environment(\.locale, L10n.locale))
         )
         window.contentViewController = hostingController
         self.presentation = presentation

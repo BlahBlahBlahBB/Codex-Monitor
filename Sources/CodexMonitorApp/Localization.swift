@@ -1,17 +1,73 @@
 import Foundation
+import SwiftUI
+
+@MainActor
+final class LocalizationController: ObservableObject {
+    @Published private(set) var resolvedLanguage: String
+    @Published private(set) var locale: Locale
+    private(set) var storedPreference: InterfaceLanguage
+    private(set) var preferredLanguages: [String]
+
+    init(preference: InterfaceLanguage, preferredLanguages: [String] = Locale.preferredLanguages) {
+        let resolved = Self.resolve(preference: preference, preferredLanguages: preferredLanguages)
+        storedPreference = preference
+        self.preferredLanguages = preferredLanguages
+        resolvedLanguage = resolved
+        locale = Locale(identifier: resolved)
+    }
+
+    static func resolve(preference: InterfaceLanguage, preferredLanguages: [String]) -> String {
+        preference.localeIdentifier ?? preferredLanguages.first ?? Locale.current.identifier
+    }
+
+    /// AppKit does not consume `-AppleLanguages` during its manual bootstrap.
+    /// Resolve it before the first menu or SwiftUI root is constructed.
+    static var launchPreferredLanguages: [String] {
+        if let override = L10n.commandLineLanguageOverride { return [override] }
+        return Locale.preferredLanguages
+    }
+
+    func refresh(preference: InterfaceLanguage, preferredLanguages: [String] = Locale.preferredLanguages) {
+        storedPreference = preference
+        self.preferredLanguages = preferredLanguages
+        let next = Self.resolve(preference: preference, preferredLanguages: preferredLanguages)
+        resolvedLanguage = next
+        locale = Locale(identifier: next)
+        L10n.setResolvedLanguage(next)
+        DiagnosticEvent.record(.localization, [
+            "event": "resolved", "preference": preference.rawValue,
+            "preferredLanguages": preferredLanguages.map { Locale(identifier: $0).language.languageCode?.identifier ?? "unknown" }.joined(separator: ","),
+            "resolvedLocale": next
+        ])
+    }
+}
 
 /// The sole localization boundary for presentation strings. Runtime IDs, model
 /// names, and protocol data remain untouched; only user-facing copy comes here.
 enum L10n {
-    private static let interfaceLanguageKey = "monitor.interfaceLanguage"
+    private static let stateLock = NSLock()
+    nonisolated(unsafe) private static var configuredLanguage: String?
+
+    @MainActor
+    static func configure(_ controller: LocalizationController) {
+        controller.refresh(preference: controller.storedPreference, preferredLanguages: controller.preferredLanguages)
+    }
+
+    @MainActor
+    static func setResolvedLanguage(_ language: String) {
+        stateLock.lock()
+        configuredLanguage = language
+        stateLock.unlock()
+    }
 
     static var resolvedLanguage: String {
-        if let selected = InterfaceLanguage(rawValue: UserDefaults.standard.string(forKey: interfaceLanguageKey) ?? ""),
-           let locale = selected.localeIdentifier {
-            return locale
-        }
-        return commandLineLanguageOverride ?? Locale.preferredLanguages.first ?? Locale.current.identifier
+        stateLock.lock()
+        let configured = configuredLanguage
+        stateLock.unlock()
+        return configured ?? commandLineLanguageOverride ?? Locale.preferredLanguages.first ?? Locale.current.identifier
     }
+
+    static var locale: Locale { Locale(identifier: resolvedLanguage) }
 
     static func tr(_ key: String, languageCode: String? = nil) -> String {
         // SwiftPM writes the directory as `zh-hans.lproj` inside an app
@@ -40,7 +96,7 @@ enum L10n {
     /// way SwiftUI's application bootstrap does. Honor that standard launch
     /// argument here so packaged language QA exercises the exact same bundle
     /// resolution path as a real system-language launch.
-    private static var commandLineLanguageOverride: String? {
+    fileprivate static var commandLineLanguageOverride: String? {
         let arguments = ProcessInfo.processInfo.arguments
         guard let index = arguments.firstIndex(of: "-AppleLanguages"), arguments.indices.contains(index + 1) else {
             return nil

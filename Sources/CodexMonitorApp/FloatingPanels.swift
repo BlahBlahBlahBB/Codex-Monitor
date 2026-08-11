@@ -62,7 +62,8 @@ final class FloatingStatusPanelController: NSObject, ObservableObject, NSWindowD
         quick.hasShadow = false
         quick.isReleasedWhenClosed = false
         quick.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
-        quick.contentView = NSHostingView(rootView: QuickView(model: model))
+        quick.contentView = NSHostingView(rootView: QuickView(model: model).environment(\.locale, L10n.locale))
+        DiagnosticEvent.record(.localization, ["event": "quickViewFirstCreation", "resolvedLocale": L10n.resolvedLanguage])
         quick.orderFrontRegardless()
         quickView = quick
     }
@@ -115,8 +116,20 @@ final class FloatingStatusPanelController: NSObject, ObservableObject, NSWindowD
         hostingView.wantsLayer = true
         hostingView.layer?.backgroundColor = NSColor.clear.cgColor
         hostingView.layer?.isOpaque = false
+        hostingView.layer?.cornerRadius = 0
+        hostingView.layer?.masksToBounds = false
+        hostingView.layer?.shadowOpacity = 0
         panel.contentView = hostingView
         self.panel = panel
+        OrbHostDiagnostics.capture(panel: panel, contentView: hostingView)
+        DispatchQueue.main.async {
+            let layerContract = OrbTransparencyProbe.passes(for: panel, host: hostingView)
+            var probe = OrbTransparencyProbe.renderedBackgroundResults(for: hostingView)
+            probe["event"] = "compositorProbe"
+            probe["layerContract"] = String(layerContract)
+            probe["glassEffectContainer"] = "absentFromOrbHost"
+            DiagnosticEvent.record(.orbHost, probe)
+        }
     }
 
     private func applyPreferences() {
@@ -167,6 +180,7 @@ final class FloatingStatusPanelController: NSObject, ObservableObject, NSWindowD
     }
 
     private func makeContextMenu() -> NSMenu {
+        DiagnosticEvent.record(.localization, ["event": "contextMenuCreation", "resolvedLocale": L10n.resolvedLanguage])
         let menu = NSMenu(title: "Codex Monitor")
         menu.addItem(withTitle: L10n.tr("menu.refresh"), action: #selector(refresh), keyEquivalent: "").target = self
         menu.addItem(withTitle: L10n.tr("menu.usage"), action: #selector(showUsage), keyEquivalent: "").target = self

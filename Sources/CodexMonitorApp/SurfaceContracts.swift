@@ -32,6 +32,12 @@ enum UIInteractionContract {
     static let disabledOpacity: Double = 0.42
 }
 
+enum SettingsLayoutContract {
+    /// The size row is one native Slider plus its value label. It has no
+    /// custom track, tick, dashed line, Canvas, or decoration beneath it.
+    static let hasCustomSliderDecoration = false
+}
+
 enum PopoverActionVisualState: Equatable {
     case rest, hover, pressed, keyboardFocus, disabled
 }

@@ -97,3 +97,4 @@
 "settings.productName" = "产品";
 "settings.version" = "版本";
 "settings.build" = "构建";
+"settings.exportDiagnostics" = "导出诊断";

@@ -24,10 +24,15 @@ final class CodexMonitorAppDelegate: NSObject, NSApplicationDelegate {
     private lazy var accountProvider = AccountUsageProvider(runtime: runtime)
     private let model = MonitorAppModel()
     let preferences = MonitorPreferences()
+    private lazy var localization = LocalizationController(
+        preference: preferences.interfaceLanguage,
+        preferredLanguages: LocalizationController.launchPreferredLanguages
+    )
     private var surfaces: MonitorSurfaceCoordinator?
     private var languageObserver: AnyCancellable?
 
     func applicationWillFinishLaunching(_ notification: Notification) {
+        L10n.configure(localization)
         installApplicationMenu()
     }
 
@@ -46,8 +51,10 @@ final class CodexMonitorAppDelegate: NSObject, NSApplicationDelegate {
         Task { await driver.start() }
         Task { await accountProvider.start() }
         if preferences.pauseMonitoring { setMonitoringPaused(true) }
-        languageObserver = preferences.$interfaceLanguage.sink { [weak self] _ in
-            self?.installApplicationMenu()
+        languageObserver = preferences.$interfaceLanguage.sink { [weak self] preference in
+            guard let self else { return }
+            localization.refresh(preference: preference, preferredLanguages: LocalizationController.launchPreferredLanguages)
+            installApplicationMenu()
         }
         startSmokeExitIfRequested()
     }

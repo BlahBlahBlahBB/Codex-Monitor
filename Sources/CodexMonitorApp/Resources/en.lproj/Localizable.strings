@@ -97,3 +97,4 @@
 "settings.productName" = "Product";
 "settings.version" = "Version";
 "settings.build" = "Build";
+"settings.exportDiagnostics" = "Export Diagnostics";

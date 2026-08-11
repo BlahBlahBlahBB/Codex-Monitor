@@ -2,6 +2,33 @@ import AppKit
 import SwiftUI
 import CodexMonitorContracts
 
+/// A Timeline exists only for an active presentation. Unlike a retained
+/// `repeatForever` animation it is removed synchronously when the state turns
+/// idle/error, so a terminal animation cannot leak into a steady state.
+private struct PresentationBreathing: ViewModifier {
+    let enabled: Bool
+    let steadyOpacity: Double
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    @ViewBuilder
+    func body(content: Content) -> some View {
+        if enabled && !reduceMotion {
+            TimelineView(.animation(minimumInterval: 1.0 / 30.0, paused: false)) { timeline in
+                let phase = (sin(timeline.date.timeIntervalSinceReferenceDate * .pi * 2 / 0.8) + 1) / 2
+                content.opacity(0.62 + phase * 0.36)
+            }
+        } else {
+            content.opacity(steadyOpacity)
+        }
+    }
+}
+
+private extension View {
+    func presentationBreathing(_ enabled: Bool, steadyOpacity: Double = 0.90) -> some View {
+        modifier(PresentationBreathing(enabled: enabled, steadyOpacity: steadyOpacity))
+    }
+}
+
 extension VisualStateTone {
     var color: Color {
         switch self {
@@ -117,21 +144,19 @@ private struct PersistentGlassCapsule: View {
 struct MonitorOrbView: View {
     let snapshot: MonitorRuntimeSnapshot?
     let size: CGFloat
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @State private var breathing = false
 
     var body: some View {
         let presentation = VisualStatePresentation.forSnapshot(snapshot)
         let ringWidth = max(5.6, min(13.5, size * (7 / 90)))
         let ringDiameter = size * 0.90
         let valueSize = max(13, min(30, size * (24 / 90)))
-        let ringOpacity = presentation.breathes && !reduceMotion && breathing ? 0.98 : (presentation.breathes ? 0.62 : 0.88)
 
         ZStack {
             PersistentGlassCircle()
             Circle()
-                .stroke(presentation.orbTone.color.opacity(ringOpacity), style: StrokeStyle(lineWidth: ringWidth, lineCap: .round))
+                .stroke(presentation.orbTone.color, style: StrokeStyle(lineWidth: ringWidth, lineCap: .round))
                 .frame(width: ringDiameter, height: ringDiameter)
+                .presentationBreathing(presentation.breathes, steadyOpacity: 0.88)
                 .overlay {
                     Circle()
                         .strokeBorder(Color.white.opacity(0.20), lineWidth: 0.7)
@@ -149,22 +174,11 @@ struct MonitorOrbView: View {
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(String(format: L10n.tr("accessibility.orb"), MonitorDisplayValue.state(snapshot), MonitorDisplayValue.orbQuota(snapshot)))
         .accessibilityHint(L10n.tr("accessibility.orbHint"))
-        .onAppear { breathing = presentation.breathes && !reduceMotion }
-        .onChange(of: reduceMotion) { value in breathing = presentation.breathes && !value }
-        .onChange(of: presentation.breathes) { value in breathing = value && !reduceMotion }
-        .animation(
-            presentation.breathes && !reduceMotion
-                ? .easeInOut(duration: 0.8).repeatForever(autoreverses: true)
-                : .easeOut(duration: 0.18),
-            value: breathing
-        )
     }
 }
 
 struct MenuStatusCapsuleView: View {
     @ObservedObject var model: MonitorAppModel
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @State private var breathing = false
 
     var body: some View {
         let snapshot = model.snapshot
@@ -180,22 +194,13 @@ struct MenuStatusCapsuleView: View {
         .overlay(Capsule().strokeBorder(Color.white.opacity(0.74), lineWidth: 0.7))
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(String(format: L10n.tr("accessibility.menuStatus"), MonitorDisplayValue.state(snapshot)))
-        .onAppear { breathing = dots.contains(where: \.breathes) && !reduceMotion }
-        .onChange(of: reduceMotion) { value in breathing = dots.contains(where: \.breathes) && !value }
-        .onChange(of: dots) { value in breathing = value.contains(where: \.breathes) && !reduceMotion }
-        .animation(
-            dots.contains(where: \.breathes) && !reduceMotion
-                ? .easeInOut(duration: 0.8).repeatForever(autoreverses: true)
-                : .easeOut(duration: 0.18),
-            value: breathing
-        )
     }
 
     private func dotView(_ presentation: VisualStateDot) -> some View {
-        let activeOpacity = presentation.breathes && !reduceMotion ? (breathing ? 1.0 : 0.58) : 0.90
         return Circle()
-            .fill(presentation.tone.color.opacity(presentation.tone == .inactive ? 0.32 : activeOpacity))
+            .fill(presentation.tone.color)
             .frame(width: 7, height: 7)
+            .presentationBreathing(presentation.breathes, steadyOpacity: presentation.tone == .inactive ? 0.32 : 0.90)
     }
 }
 

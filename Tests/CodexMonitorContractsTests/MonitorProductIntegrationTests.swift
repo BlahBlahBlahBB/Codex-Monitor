@@ -213,6 +213,30 @@ final class MonitorProductIntegrationTests: XCTestCase {
         XCTAssertEqual(VisualStatePresentation.unavailable.orbTone, .gray)
     }
 
+    func testIdlePresentationCannotCarryBreathingFromWorkingOrTerminalState() {
+        let working = VisualStatePresentation.forState(.working)
+        XCTAssertTrue(working.breathes)
+        XCTAssertEqual(working.orbTone, .blue)
+
+        let idle = VisualStatePresentation.forState(.idle)
+        XCTAssertFalse(idle.breathes)
+        XCTAssertEqual(idle.dots, [.green, .green, .green])
+        XCTAssertEqual(idle.orbTone, .green)
+
+        let newTurn = VisualStatePresentation.forState(.thinking)
+        XCTAssertEqual(newTurn.dots.first, .init(tone: .green, breathes: true))
+        XCTAssertEqual(newTurn.orbTone, .blue)
+        XCTAssertNotEqual(newTurn.dots.last?.tone, .red)
+    }
+
+    func testFollowSystemLocaleResolvesSynchronouslyBeforeAnySurfaceCreation() {
+        XCTAssertEqual(LocalizationController.resolve(preference: .system, preferredLanguages: ["zh-Hans", "en"]), "zh-Hans")
+        XCTAssertEqual(LocalizationController.resolve(preference: .english, preferredLanguages: ["zh-Hans"]), "en")
+        XCTAssertEqual(LocalizationController.resolve(preference: .simplifiedChinese, preferredLanguages: ["en"]), "zh-Hans")
+        XCTAssertEqual(L10n.tr("menu.settings", languageCode: "zh-Hans"), "设置")
+        XCTAssertEqual(L10n.tr("menu.settings", languageCode: "en"), "Settings")
+    }
+
     func testPopoverAnchorUsesOnlyCurrentGeometryAcrossRepeatedReopen() {
         let visible = CGRect(x: 0, y: 0, width: 1_200, height: 800)
         for index in 0..<50 {
@@ -240,6 +264,32 @@ final class MonitorProductIntegrationTests: XCTestCase {
         XCTAssertEqual(UsagePresentation.bucket(closestTo: 299, plotWidth: 300, buckets: buckets)?.startDate, "2026-08-30")
         XCTAssertTrue(UsagePresentation.tooltip(for: buckets[0], languageCode: "en").contains("Token: 0 Token"))
         XCTAssertTrue(UsagePresentation.axisDate("2026-08-01", languageCode: "en").contains("Aug 1"))
+        let bounds = CGRect(x: 0, y: 0, width: 300, height: 164)
+        let right = UsagePresentation.tooltipFrame(desiredOrigin: CGPoint(x: 280, y: 150), tooltipSize: CGSize(width: 132, height: 62), bounds: bounds)
+        XCTAssertLessThanOrEqual(right.maxX, bounds.maxX - 6)
+        XCTAssertLessThanOrEqual(right.maxY, bounds.maxY - 6)
+        let left = UsagePresentation.tooltipFrame(desiredOrigin: CGPoint(x: -30, y: -20), tooltipSize: CGSize(width: 132, height: 62), bounds: bounds)
+        XCTAssertGreaterThanOrEqual(left.minX, bounds.minX + 6)
+        XCTAssertGreaterThanOrEqual(left.minY, bounds.minY + 6)
+    }
+
+    func testOrbHostTransparencyAndSettingsSingleTrackContracts() {
+        let preferences = MonitorPreferences(defaults: UserDefaults(suiteName: "CodexMonitorTests.orbHost.\(UUID().uuidString)")!)
+        let host = OrbHostingView(rootView: FloatingOrbRoot(model: MonitorAppModel(), preferences: preferences, action: {}), menuProvider: { NSMenu() })
+        host.wantsLayer = true
+        host.layer?.backgroundColor = NSColor.clear.cgColor
+        host.layer?.shadowOpacity = 0
+        let panel = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 90, height: 90), styleMask: [.borderless], backing: .buffered, defer: false)
+        panel.isOpaque = false
+        panel.backgroundColor = .clear
+        panel.hasShadow = false
+        XCTAssertTrue(OrbTransparencyProbe.passes(for: panel, host: host))
+        XCTAssertEqual(
+            OrbTransparencyProbe.renderedBackgroundResults(for: host).values.filter { $0 == "fail" }.count,
+            0,
+            "An unavailable headless bitmap probe is allowed, but a rendered opaque corner is not."
+        )
+        XCTAssertFalse(SettingsLayoutContract.hasCustomSliderDecoration)
     }
 
     func testAccountUsageProviderMapsAuthoritativeReadShapesAndQuotaRemaining() async throws {
@@ -274,7 +324,7 @@ final class MonitorProductIntegrationTests: XCTestCase {
 
     private func testSettingsActions() -> SettingsSystemActions {
         SettingsSystemActions(
-            refresh: {}, openCodex: {}, openLogsFolder: {}, setMonitoringPaused: { _ in }, requestNotificationPermission: { _ in }, loginItem: LoginItemController(), showDiagnostics: {}
+            refresh: {}, openCodex: {}, openLogsFolder: {}, setMonitoringPaused: { _ in }, requestNotificationPermission: { _ in }, exportDiagnostics: {}, loginItem: LoginItemController(), showDiagnostics: {}
         )
     }
 }

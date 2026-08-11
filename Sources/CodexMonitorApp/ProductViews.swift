@@ -240,20 +240,32 @@ private struct UsageHistoryChart: View {
                         switch phase {
                         case .active(let location):
                             let plotX = location.x
+                            let selected: AccountUsageDailyBucket?
                             if let date: String = proxy.value(atX: plotX, as: String.self),
                                let exact = buckets.first(where: { $0.startDate == date }) {
-                                selectedBucket = exact
+                                selected = exact
                             } else {
-                                selectedBucket = UsagePresentation.bucket(closestTo: plotX, plotWidth: geometry.size.width, buckets: buckets)
+                                selected = UsagePresentation.bucket(closestTo: plotX, plotWidth: geometry.size.width, buckets: buckets)
                             }
+                            if selectedBucket?.id != selected?.id, let selected {
+                                DiagnosticEvent.record(.usageChart, ["event": "bucketSelected", "bucket": selected.startDate, "tokens": String(selected.tokens)])
+                            }
+                            selectedBucket = selected
                         case .ended:
                             selectedBucket = nil
                         }
                     }
                     .overlay(alignment: .topLeading) {
                         if let selectedBucket {
+                            let desired = CGPoint(x: UsagePresentation.tooltipOffset(for: selectedBucket, buckets: buckets, width: geometry.size.width), y: 8)
+                            let frame = UsagePresentation.tooltipFrame(
+                                desiredOrigin: desired,
+                                tooltipSize: CGSize(width: 132, height: 62),
+                                bounds: CGRect(origin: .zero, size: geometry.size)
+                            )
                             UsageChartTooltip(bucket: selectedBucket)
-                                .offset(x: UsagePresentation.tooltipOffset(for: selectedBucket, buckets: buckets, width: geometry.size.width))
+                                .frame(width: 132)
+                                .offset(x: frame.minX, y: frame.minY)
                                 .allowsHitTesting(false)
                         }
                     }
@@ -319,6 +331,12 @@ enum UsagePresentation {
         return min(max(point - 62, 0), max(0, width - 124))
     }
 
+    static func tooltipFrame(desiredOrigin: CGPoint, tooltipSize: CGSize, bounds: CGRect, padding: CGFloat = 6) -> CGRect {
+        let x = min(max(desiredOrigin.x, bounds.minX + padding), bounds.maxX - tooltipSize.width - padding)
+        let y = min(max(desiredOrigin.y, bounds.minY + padding), bounds.maxY - tooltipSize.height - padding)
+        return CGRect(origin: CGPoint(x: x, y: y), size: tooltipSize)
+    }
+
     static func axisDate(_ raw: String?, languageCode: String? = nil) -> String {
         guard let raw else { return L10n.unavailable }
         return displayDate(raw, languageCode: languageCode)
@@ -332,7 +350,7 @@ enum UsagePresentation {
         parser.dateFormat = "yyyy-MM-dd"
         guard let date = parser.date(from: raw) else { return raw }
         return date.formatted(
-            .dateTime.year().month(.abbreviated).day().locale(Locale(identifier: languageCode ?? Locale.preferredLanguages.first ?? "en"))
+            .dateTime.year().month(.abbreviated).day().locale(Locale(identifier: languageCode ?? L10n.resolvedLanguage))
         )
     }
 }
@@ -374,6 +392,7 @@ struct SettingsSystemActions {
     let openLogsFolder: () -> Void
     let setMonitoringPaused: (Bool) -> Void
     let requestNotificationPermission: (NotificationPreference) -> Void
+    let exportDiagnostics: () -> Void
     let loginItem: LoginItemController
     let showDiagnostics: () -> Void
 }
@@ -454,7 +473,6 @@ private struct SettingsRow<Control: View>: View {
         }
         .padding(.horizontal, 16)
         .frame(minHeight: 58)
-        .overlay(alignment: .bottom) { Rectangle().fill(Color.primary.opacity(0.08)).frame(height: 0.5) }
     }
 }
 
@@ -508,6 +526,7 @@ private struct FloatingSettingsDetail: View {
             SettingsRow(title: L10n.tr("settings.showUsageMenu")) { Toggle("", isOn: $preferences.showUsageMenu).labelsHidden().toggleStyle(.switch) }
             SettingsRow(title: L10n.tr("settings.showSettingsMenu")) { Toggle("", isOn: $preferences.showSettingsMenu).labelsHidden().toggleStyle(.switch) }
         }
+        .onAppear { DiagnosticEvent.record(.settings, ["event": "floatingPresented", "slider": "nativeSingleTrack", "customSliderDecoration": "false"]) }
     }
 }
 
@@ -563,6 +582,9 @@ private struct AdvancedSettingsDetail: View {
             SettingsRow(title: L10n.tr("settings.openCodex")) { Button(L10n.tr("settings.openCodex"), action: actions.openCodex).buttonStyle(.bordered) }
             SettingsRow(title: L10n.tr("settings.openLogsFolder")) { Button(L10n.tr("settings.openLogsFolder"), action: actions.openLogsFolder).buttonStyle(.bordered) }
             SettingsRow(title: L10n.tr("settings.openDiagnostics")) { Button(L10n.tr("settings.openDiagnostics"), action: actions.showDiagnostics).buttonStyle(.bordered) }
+#if DEBUG
+            SettingsRow(title: L10n.tr("settings.exportDiagnostics")) { Button(L10n.tr("settings.exportDiagnostics"), action: actions.exportDiagnostics).buttonStyle(.bordered) }
+#endif
         }
     }
 }
