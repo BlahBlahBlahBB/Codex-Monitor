@@ -161,8 +161,17 @@ public actor AccountUsageProvider {
 
     private static func rateLimitWindow(_ value: JSONValue?) -> RateLimitWindow? {
         guard let value = value?.objectValue, let used = number(value["usedPercent"]), used.isFinite else { return nil }
-        let reset = number(value["resetsAt"]).map { Date(timeIntervalSince1970: $0 / 1_000) }
+        let reset = number(value["resetsAt"]).flatMap(normalizedUnixDate)
         return RateLimitWindow(usedPercent: min(max(used, 0), 100), windowDurationMinutes: integer(value["windowDurationMins"]), resetsAt: reset)
+    }
+
+    /// The validated account route has emitted Unix seconds (10 digits).
+    /// Accept millisecond values only when their magnitude proves that unit;
+    /// never unconditionally divide a valid seconds timestamp into 1970.
+    private static func normalizedUnixDate(_ value: Double) -> Date? {
+        guard value.isFinite, value > 0 else { return nil }
+        let seconds = value >= 100_000_000_000 ? value / 1_000 : value
+        return Date(timeIntervalSince1970: seconds)
     }
 
     private static func mostRestricted(_ windows: [RateLimitWindow]) -> RateLimitWindow? {

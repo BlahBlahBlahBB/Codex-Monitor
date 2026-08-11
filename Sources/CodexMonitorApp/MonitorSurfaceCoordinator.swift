@@ -167,6 +167,7 @@ final class MonitorStatusItemController: NSObject, NSPopoverDelegate {
     private let statusItem: NSStatusItem
     private let popover = NSPopover()
     private var hostedCapsule: NSHostingView<AnyView>?
+    private var popoverHost: NSHostingController<AnyView>?
 
     init(model: MonitorAppModel, preferences: MonitorPreferences, localization: LocalizationController, actions: MonitorSurfaceActions) {
         self.model = model
@@ -193,12 +194,13 @@ final class MonitorStatusItemController: NSObject, NSPopoverDelegate {
         if popover.isShown {
             popover.performClose(sender)
         } else {
-            button.toolTip = nil
+            preparePopoverContent(for: button)
             popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
             DiagnosticEvent.record(.popover, [
                 "event": "show", "placementOwner": "AppKitNativePopover",
                 "locale": L10n.resolvedLanguage
             ])
+            DispatchQueue.main.async { [weak self] in self?.recordPresentedPopoverFrame() }
         }
     }
 
@@ -209,7 +211,9 @@ final class MonitorStatusItemController: NSObject, NSPopoverDelegate {
         button.target = self
         button.action = #selector(togglePopover(_:))
         button.sendAction(on: [.leftMouseUp])
-        button.toolTip = "Codex Monitor"
+        // A status-item tooltip can overlap an attached NSPopover. This item
+        // always uses its accessible label instead.
+        button.toolTip = nil
 
         let hosting = NSHostingView(rootView: AnyView(LocalizedRoot(localization: localization) { MenuStatusCapsuleView(model: model).allowsHitTesting(false) }))
         hosting.frame = NSRect(x: 0, y: 0, width: 48, height: 22)
@@ -221,17 +225,62 @@ final class MonitorStatusItemController: NSObject, NSPopoverDelegate {
     private func configurePopover() {
         popover.delegate = self
         popover.behavior = .transient
-        popover.contentSize = NSSize(width: 340, height: 350)
-        popover.contentViewController = NSHostingController(
-            rootView: LocalizedRoot(localization: localization) { MenuBarPopoverView(model: model, preferences: preferences, actions: actions) }
-        )
+        let host = NSHostingController(rootView: popoverRoot(maximumContentHeight: nil))
+        popoverHost = host
+        popover.contentViewController = host
         DiagnosticEvent.record(.localization, ["event": "popoverFirstCreation", "resolvedLocale": L10n.resolvedLanguage])
     }
 
     func popoverDidClose(_ notification: Notification) {
-        statusItem.button?.toolTip = "Codex Monitor"
         DiagnosticEvent.record(.popover, ["event": "close", "locale": L10n.resolvedLanguage])
     }
+
+    private func popoverRoot(maximumContentHeight: CGFloat?) -> AnyView {
+        AnyView(LocalizedRoot(localization: localization) {
+            MenuBarPopoverView(
+                model: model,
+                preferences: preferences,
+                actions: actions,
+                maximumContentHeight: maximumContentHeight
+            )
+        })
+    }
+
+    /// Measures the actual SwiftUI hierarchy immediately before every native
+    /// attachment. No window frame is set here: AppKit remains the sole
+    /// placement owner for the NSPopover.
+    private func preparePopoverContent(for button: NSStatusBarButton) {
+        guard let host = popoverHost else { return }
+        host.rootView = popoverRoot(maximumContentHeight: nil)
+        host.loadView()
+        host.view.setFrameSize(NSSize(width: 340, height: 1))
+        host.view.layoutSubtreeIfNeeded()
+        let fitting = host.view.fittingSize
+        let visible = button.window?.screen?.visibleFrame ?? NSScreen.main?.visibleFrame ?? .zero
+        let maximumHeight = max(1, visible.height - 24)
+        let desiredHeight = max(1, ceil(fitting.height))
+        if desiredHeight > maximumHeight {
+            host.rootView = popoverRoot(maximumContentHeight: maximumHeight)
+            host.view.layoutSubtreeIfNeeded()
+            popover.contentSize = NSSize(width: 340, height: maximumHeight)
+            DiagnosticEvent.record(.popover, ["event": "contentScrollEnabled", "height": String(Int(maximumHeight))])
+        } else {
+            popover.contentSize = NSSize(width: 340, height: desiredHeight)
+        }
+    }
+
+    private func recordPresentedPopoverFrame() {
+        guard let frame = popover.contentViewController?.view.window?.frame else { return }
+        let visible = statusItem.button?.window?.screen?.visibleFrame ?? NSScreen.main?.visibleFrame
+        let contained = visible.map { $0.contains(frame) } ?? false
+        DiagnosticEvent.record(.popover, [
+            "event": "presentedFrame",
+            "containedInVisibleFrame": String(contained),
+            "width": String(Int(frame.width)),
+            "height": String(Int(frame.height))
+        ])
+    }
+
 }
 
 @MainActor

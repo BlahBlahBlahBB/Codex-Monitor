@@ -248,6 +248,8 @@ public actor MonitorRuntimeStore {
     private var approvalSource: SourceState
     private var monitoringPhase: MonitoringPausePhase
     private var snapshotContinuations: [UUID: AsyncStream<MonitorRuntimeSnapshot>.Continuation] = [:]
+    private var terminalTransitionTask: Task<Void, Never>?
+    private var terminalTransitionDeadline: Date?
 
     public init(
         engine: RuntimeStateEngine = RuntimeStateEngine(),
@@ -464,6 +466,36 @@ public actor MonitorRuntimeStore {
     private func publishSnapshot() {
         let value = snapshot()
         for continuation in snapshotContinuations.values { continuation.yield(value) }
+        scheduleTerminalPresentationTransition()
+    }
+
+    /// A single deadline wake-up preserves the event-driven runtime contract.
+    /// It exists only while a terminal retention interval is visible, and is
+    /// replaced or cancelled by every later source mutation/reconciliation.
+    private func scheduleTerminalPresentationTransition() {
+        let next = engine.nextPresentationTransitionDeadline()
+        guard next != terminalTransitionDeadline || terminalTransitionTask == nil else { return }
+        terminalTransitionTask?.cancel()
+        terminalTransitionTask = nil
+        terminalTransitionDeadline = next
+        guard let next else { return }
+
+        let delay = max(0, next.timeIntervalSince(clock.now()))
+        terminalTransitionTask = Task { [weak self] in
+            do {
+                try await Task.sleep(for: .seconds(delay))
+            } catch {
+                return
+            }
+            await self?.terminalPresentationDeadlineDidFire(expected: next)
+        }
+    }
+
+    private func terminalPresentationDeadlineDidFire(expected: Date) {
+        guard terminalTransitionDeadline == expected else { return }
+        terminalTransitionTask = nil
+        terminalTransitionDeadline = nil
+        publishSnapshot()
     }
 
     private func removeSnapshotContinuation(_ id: UUID) {

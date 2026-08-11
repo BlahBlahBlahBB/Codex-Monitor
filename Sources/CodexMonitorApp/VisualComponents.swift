@@ -5,6 +5,8 @@ import CodexMonitorContracts
 /// A Timeline exists only for an active presentation. Unlike a retained
 /// `repeatForever` animation it is removed synchronously when the state turns
 /// idle/error, so a terminal animation cannot leak into a steady state.
+/// The cadence is intentionally slow: this is state indication, not a busy
+/// decorative animation.
 private struct PresentationBreathing: ViewModifier {
     let enabled: Bool
     let steadyOpacity: Double
@@ -14,7 +16,7 @@ private struct PresentationBreathing: ViewModifier {
     func body(content: Content) -> some View {
         if enabled && !reduceMotion {
             TimelineView(.animation(minimumInterval: 1.0 / 30.0, paused: false)) { timeline in
-                let phase = (sin(timeline.date.timeIntervalSinceReferenceDate * .pi * 2 / 0.8) + 1) / 2
+                let phase = (sin(timeline.date.timeIntervalSinceReferenceDate * .pi * 2 / 2.4) + 1) / 2
                 content.opacity(0.62 + phase * 0.36)
             }
         } else {
@@ -106,24 +108,74 @@ struct GlassSurface<Content: View>: View {
     }
 }
 
-private struct PersistentGlassCircle: View {
+/// The floating Orb cannot use SwiftUI's glass compositor: it is mounted in
+/// a transparent rectangular NSHostingView and that path can retain a
+/// rectangular backing layer. This representable owns exactly one circular
+/// NSVisualEffectView; its parent remains completely transparent.
+struct CircularVisualEffectView: NSViewRepresentable {
+    let material: NSVisualEffectView.Material
+    let blendingMode: NSVisualEffectView.BlendingMode
+    let state: NSVisualEffectView.State
+
+    func makeNSView(context: Context) -> CircularVisualEffectHost {
+        CircularVisualEffectHost(material: material, blendingMode: blendingMode, state: state)
+    }
+
+    func updateNSView(_ view: CircularVisualEffectHost, context: Context) {
+        view.configure(material: material, blendingMode: blendingMode, state: state)
+    }
+}
+
+final class CircularVisualEffectHost: NSView {
+    private let effectView = NSVisualEffectView()
+    private let circularMask = CAShapeLayer()
+
+    init(material: NSVisualEffectView.Material, blendingMode: NSVisualEffectView.BlendingMode, state: NSVisualEffectView.State) {
+        super.init(frame: .zero)
+        wantsLayer = true
+        layer?.backgroundColor = NSColor.clear.cgColor
+        layer?.isOpaque = false
+        effectView.wantsLayer = true
+        effectView.layer?.backgroundColor = NSColor.clear.cgColor
+        effectView.layer?.masksToBounds = true
+        effectView.layer?.mask = circularMask
+        addSubview(effectView)
+        configure(material: material, blendingMode: blendingMode, state: state)
+    }
+
+    required init?(coder: NSCoder) { nil }
+
+    override var isOpaque: Bool { false }
+
+    override func layout() {
+        super.layout()
+        effectView.frame = bounds
+        let diameter = min(bounds.width, bounds.height)
+        let circle = NSRect(
+            x: bounds.midX - diameter / 2,
+            y: bounds.midY - diameter / 2,
+            width: diameter,
+            height: diameter
+        )
+        circularMask.path = CGPath(ellipseIn: circle, transform: nil)
+        effectView.layer?.cornerRadius = diameter / 2
+    }
+
+    func configure(material: NSVisualEffectView.Material, blendingMode: NSVisualEffectView.BlendingMode, state: NSVisualEffectView.State) {
+        effectView.material = material
+        effectView.blendingMode = blendingMode
+        effectView.state = state
+    }
+}
+
+private struct PersistentOrbMaterial: View {
     @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
+
     @ViewBuilder var body: some View {
-        if #available(macOS 26.0, *), !reduceTransparency {
-            Circle()
-                .fill(.clear)
-                .glassEffect(.regular, in: Circle())
-                .overlay {
-                    Circle().strokeBorder(Color.white.opacity(0.42), lineWidth: 0.8)
-                }
-        } else if reduceTransparency {
+        if reduceTransparency {
             Circle().fill(Color(nsColor: .windowBackgroundColor))
         } else {
-            Circle()
-                .fill(.ultraThinMaterial)
-                .overlay {
-                    Circle().strokeBorder(Color.white.opacity(0.40), lineWidth: 0.8)
-                }
+            CircularVisualEffectView(material: .hudWindow, blendingMode: .behindWindow, state: .active)
         }
     }
 }
@@ -152,7 +204,13 @@ struct MonitorOrbView: View {
         let valueSize = max(13, min(30, size * (24 / 90)))
 
         ZStack {
-            PersistentGlassCircle()
+            PersistentOrbMaterial()
+                .frame(width: size, height: size)
+                .overlay {
+                    Circle().strokeBorder(Color.white.opacity(0.40), lineWidth: 0.8)
+                }
+                // The shadow belongs to the circular material itself, never
+                // to the transparent rectangular floating-panel root.
                 .shadow(color: Color.black.opacity(0.10), radius: 8, y: 4)
             Circle()
                 .stroke(presentation.orbTone.color, style: StrokeStyle(lineWidth: ringWidth, lineCap: .round))
@@ -243,11 +301,11 @@ enum MonitorDisplayValue {
     }
 
     static func token(_ snapshot: MonitorRuntimeSnapshot?) -> String {
-        snapshot?.sessionToken.map(tokenFormat) ?? availability(snapshot?.currentThread?.sessionTokenAvailability)
+        snapshot?.sessionToken.map(preciseTokenFormat) ?? availability(snapshot?.currentThread?.sessionTokenAvailability)
     }
 
     static func usage(_ snapshot: MonitorRuntimeSnapshot?) -> String {
-        snapshot?.usage.usage?.totalTokens.map { tokenFormat(Int64($0)) } ?? availability(snapshot?.usage.availability)
+        snapshot?.usage.usage?.totalTokens.map { summaryTokenFormat(Int64($0)) } ?? availability(snapshot?.usage.availability)
     }
 
     static func account(_ snapshot: MonitorRuntimeSnapshot?, hidden: Bool = false) -> String {
@@ -265,7 +323,7 @@ enum MonitorDisplayValue {
               let value = snapshot?.usage.usage?.dailyBuckets?.last?.tokens else {
             return availability(snapshot?.usage.availability)
         }
-        return tokenFormat(Int64(value))
+        return summaryTokenFormat(Int64(value))
     }
 
     static func last30DaysUsage(_ snapshot: MonitorRuntimeSnapshot?) -> String {
@@ -273,7 +331,7 @@ enum MonitorDisplayValue {
               let buckets = snapshot?.usage.usage?.dailyBuckets else {
             return availability(snapshot?.usage.availability)
         }
-        return tokenFormat(Int64(buckets.reduce(0) { $0 + $1.tokens }))
+        return summaryTokenFormat(Int64(buckets.reduce(0) { $0 + $1.tokens }))
     }
 
     static func remainingQuota(_ snapshot: MonitorRuntimeSnapshot?) -> String {
@@ -380,10 +438,47 @@ enum MonitorDisplayValue {
         capability.rawValue.replacingOccurrences(of: "([a-z])([A-Z])", with: "$1 $2", options: .regularExpression)
     }
 
-    static func tokenFormat(_ value: Int64) -> String {
+    /// Exact values are reserved for places where a user inspects a single
+    /// datapoint (session attribution and chart tooltips).
+    static func preciseTokenFormat(_ value: Int64) -> String {
         let formatter = NumberFormatter()
         formatter.numberStyle = .decimal
         return "\(formatter.string(from: NSNumber(value: value)) ?? String(value)) Token"
+    }
+
+    /// Summary metrics may be compact, while preserving a separate exact
+    /// formatter for tooltips. Chinese follows the native 万/亿 convention;
+    /// English uses K/M/B suffixes.
+    static func summaryTokenFormat(_ value: Int64, languageCode: String? = nil) -> String {
+        let language = languageCode ?? L10n.resolvedLanguage
+        let locale = Locale(identifier: language)
+        let number = Double(value)
+        let rendered: String
+        if language.hasPrefix("zh") {
+            if value >= 100_000_000 {
+                rendered = String(format: "%.2f亿", locale: locale, number / 100_000_000)
+            } else if value >= 10_000 {
+                rendered = String(format: "%.2f万", locale: locale, number / 10_000)
+            } else {
+                rendered = preciseNumber(value, locale: locale)
+            }
+        } else if value >= 1_000_000_000 {
+            rendered = String(format: "%.2fB", locale: locale, number / 1_000_000_000)
+        } else if value >= 1_000_000 {
+            rendered = String(format: "%.2fM", locale: locale, number / 1_000_000)
+        } else if value >= 1_000 {
+            rendered = String(format: "%.2fK", locale: locale, number / 1_000)
+        } else {
+            rendered = preciseNumber(value, locale: locale)
+        }
+        return "\(rendered) Token"
+    }
+
+    private static func preciseNumber(_ value: Int64, locale: Locale) -> String {
+        let formatter = NumberFormatter()
+        formatter.locale = locale
+        formatter.numberStyle = .decimal
+        return formatter.string(from: NSNumber(value: value)) ?? String(value)
     }
 
     private static func duration(_ seconds: Int) -> String {

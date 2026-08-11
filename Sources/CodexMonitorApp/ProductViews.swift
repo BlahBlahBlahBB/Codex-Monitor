@@ -6,12 +6,33 @@ struct MenuBarPopoverView: View {
     @ObservedObject var model: MonitorAppModel
     @ObservedObject var preferences: MonitorPreferences
     let actions: MonitorSurfaceActions
+    /// When native NSPopover chrome cannot fit the measured contents above or
+    /// below a status item, only this interior scrolls. The popover itself is
+    /// still positioned exclusively by AppKit.
+    var maximumContentHeight: CGFloat?
 
     var body: some View {
         let snapshot = model.snapshot
         let presentation = model.presentation
-        GlassSurface(cornerRadius: 18, shadow: true, level: .floating) {
-            VStack(alignment: .leading, spacing: 0) {
+        Group {
+            if let maximumContentHeight {
+                ScrollView {
+                    contents(snapshot: snapshot, presentation: presentation)
+                        .padding(16)
+                }
+                .frame(width: 340, height: maximumContentHeight)
+            } else {
+                contents(snapshot: snapshot, presentation: presentation)
+                    .padding(16)
+                    .frame(width: 340)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func contents(snapshot: MonitorRuntimeSnapshot?, presentation: VisualStatePresentation) -> some View {
+        VStack(alignment: .leading, spacing: 0) {
                 // Block 1 — information only.
                 HStack(alignment: .top, spacing: 10) {
                     Circle().fill(presentation.orbTone.color).frame(width: 8, height: 8).padding(.top, 5)
@@ -43,11 +64,7 @@ struct MenuBarPopoverView: View {
                     PopoverActionRow(title: L10n.tr("menu.openCodex"), symbol: "arrow.up.right.square", action: actions.openCodex)
                     PopoverActionRow(title: L10n.tr("menu.quitMonitor"), symbol: "power", action: actions.quit)
                 }
-            }
-            .padding(16)
         }
-        .frame(width: 340)
-        .fixedSize(horizontal: false, vertical: true)
     }
 }
 
@@ -312,14 +329,17 @@ enum UsagePresentation {
         guard let date, date >= earliestValidReset else {
             return L10n.tr("value.unavailable", languageCode: languageCode)
         }
-        return date.formatted(date: .abbreviated, time: .shortened)
+        return date.formatted(
+            .dateTime.year().month(.abbreviated).day().hour().minute()
+                .locale(Locale(identifier: languageCode ?? L10n.resolvedLanguage))
+        )
     }
 
     static func tooltip(for bucket: AccountUsageDailyBucket, languageCode: String? = nil) -> String {
         String(
             format: L10n.tr("usage.tooltip", languageCode: languageCode),
             displayDate(bucket.startDate, languageCode: languageCode),
-            MonitorDisplayValue.tokenFormat(Int64(bucket.tokens))
+            MonitorDisplayValue.preciseTokenFormat(Int64(bucket.tokens))
         )
     }
 
@@ -354,7 +374,7 @@ enum UsagePresentation {
         parser.dateFormat = "yyyy-MM-dd"
         guard let date = parser.date(from: raw) else { return raw }
         return date.formatted(
-            .dateTime.year().month(.abbreviated).day().locale(Locale(identifier: languageCode ?? L10n.resolvedLanguage))
+            .dateTime.month(.abbreviated).day().locale(Locale(identifier: languageCode ?? L10n.resolvedLanguage))
         )
     }
 }

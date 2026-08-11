@@ -239,18 +239,6 @@ final class MonitorProductIntegrationTests: XCTestCase {
         XCTAssertEqual(L10n.tr("menu.settings", languageCode: "en"), "Settings")
     }
 
-    func testPopoverAnchorUsesOnlyCurrentGeometryAcrossRepeatedReopen() {
-        let visible = CGRect(x: 0, y: 0, width: 1_200, height: 800)
-        for index in 0..<50 {
-            let anchor = CGRect(x: index.isMultiple(of: 2) ? 10 : 1_160, y: 760, width: 48, height: 22)
-            let frame = PopoverAnchorLayout.frame(anchor: anchor, contentSize: CGSize(width: 340, height: 350), visibleFrame: visible)
-            XCTAssertGreaterThanOrEqual(frame.minX, 8)
-            XCTAssertLessThanOrEqual(frame.maxX, visible.maxX - 8)
-            XCTAssertGreaterThanOrEqual(frame.minY, 8)
-            XCTAssertEqual(frame.midX, min(max(anchor.midX, frame.width / 2 + 8), visible.maxX - frame.width / 2 - 8), accuracy: 0.001)
-        }
-    }
-
     func testUsageHoverPresentationAndInvalidEpochSuppression() {
         let zero = AccountUsageDailyBucket(startDate: "2026-08-11", tokens: 0)
         XCTAssertTrue(UsagePresentation.tooltip(for: zero, languageCode: "en").contains("Token: 0 Token"))
@@ -258,6 +246,16 @@ final class MonitorProductIntegrationTests: XCTestCase {
         XCTAssertEqual(UsagePresentation.resetTime(Date(timeIntervalSince1970: 1_380), languageCode: "en"), "Unavailable")
         XCTAssertEqual(UsagePresentation.resetTime(Date(timeIntervalSince1970: 1_380), languageCode: "zh-Hans"), "不可用")
         XCTAssertNotEqual(UsagePresentation.resetTime(Date(timeIntervalSince1970: 1_800_000_000), languageCode: "en"), "Unavailable")
+        XCTAssertNotEqual(UsagePresentation.resetTime(Date(timeIntervalSince1970: 1_800_000_000), languageCode: "zh-Hans"), "不可用")
+        XCTAssertNotEqual(
+            UsagePresentation.resetTime(Date(timeIntervalSince1970: 1_800_000_000), languageCode: "en"),
+            UsagePresentation.resetTime(Date(timeIntervalSince1970: 1_800_000_000), languageCode: "zh-Hans")
+        )
+        XCTAssertFalse(UsagePresentation.axisDate("2026-08-01", languageCode: "en").contains("2026"))
+        XCTAssertFalse(UsagePresentation.axisDate("2026-08-01", languageCode: "zh-Hans").contains("2026"))
+        XCTAssertEqual(MonitorDisplayValue.summaryTokenFormat(12_400, languageCode: "zh-Hans"), "1.24万 Token")
+        XCTAssertEqual(MonitorDisplayValue.summaryTokenFormat(124_087_202, languageCode: "zh-Hans"), "1.24亿 Token")
+        XCTAssertEqual(MonitorDisplayValue.preciseTokenFormat(124_087_202), "124,087,202 Token")
     }
 
     func testUsageChartPointerMappingAndZeroDayTooltip() {
@@ -285,12 +283,22 @@ final class MonitorProductIntegrationTests: XCTestCase {
         panel.isOpaque = false
         panel.backgroundColor = .clear
         panel.hasShadow = false
-        XCTAssertTrue(OrbTransparencyProbe.passes(for: panel, host: host))
-        XCTAssertEqual(
-            OrbTransparencyProbe.renderedBackgroundResults(for: host).values.filter { $0 == "fail" }.count,
-            0,
-            "An unavailable headless bitmap probe is allowed, but a rendered opaque corner is not."
-        )
+        XCTAssertFalse(panel.isOpaque)
+        XCTAssertEqual(panel.backgroundColor, .clear)
+        XCTAssertFalse(panel.hasShadow)
+        XCTAssertFalse(host.isOpaque)
+        XCTAssertEqual(host.layer?.backgroundColor, NSColor.clear.cgColor)
+        XCTAssertEqual(host.layer?.shadowOpacity, 0)
+
+        let circularMaterial = CircularVisualEffectHost(material: .hudWindow, blendingMode: .behindWindow, state: .active)
+        circularMaterial.frame = NSRect(x: 0, y: 0, width: 90, height: 90)
+        circularMaterial.layoutSubtreeIfNeeded()
+        let effect = circularMaterial.subviews.first as? NSVisualEffectView
+        XCTAssertFalse(circularMaterial.isOpaque)
+        XCTAssertEqual(effect?.blendingMode, .behindWindow)
+        XCTAssertEqual(effect?.state, .active)
+        XCTAssertTrue(effect?.layer?.masksToBounds == true)
+        XCTAssertNotNil(effect?.layer?.mask)
         XCTAssertFalse(SettingsLayoutContract.hasCustomSliderDecoration)
     }
 
@@ -313,6 +321,9 @@ final class MonitorProductIntegrationTests: XCTestCase {
         XCTAssertEqual(mapped.authMode, "chatgpt")
         XCTAssertEqual(mapped.planType, "pro")
         XCTAssertEqual(mapped.primaryRateLimit?.usedPercent, 70)
+        let resetAt = try XCTUnwrap(mapped.primaryRateLimit?.resetsAt)
+        XCTAssertEqual(resetAt.timeIntervalSince1970, 1_725_000_500, accuracy: 0.001)
+        XCTAssertGreaterThan(resetAt.timeIntervalSince1970, 1_700_000_000)
         XCTAssertEqual(mapped.resetCreditCount, 2)
         XCTAssertEqual(mapped.usage?.dailyBuckets?.count, 30)
         XCTAssertEqual(mapped.usage?.dailyBuckets?.last?.tokens, 45)

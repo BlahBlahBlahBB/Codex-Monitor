@@ -305,6 +305,22 @@ public final class RuntimeStateEngine: @unchecked Sendable {
         return GlobalRuntimeSnapshot(state: representative?.state ?? .disconnected, stateSince: representative?.stateSince ?? now, representativeThreadID: representative?.threadID, currentActivityCategory: representative?.currentActivityCategory ?? .disconnected, currentActivityShortSafeLabel: (representative?.currentActivityCategory ?? .disconnected).shortSafeLabel, sourceFreshness: aggregateFreshness(threadSnapshots, now: now), activeThreadCount: threadSnapshots.filter { [.thinking, .working, .waitingApproval].contains($0.state) }.count, waitingApprovalCount: threadSnapshots.filter { $0.state == .waitingApproval }.count, representativeThread: representative, threads: threadSnapshots)
     }
 
+    /// Terminal states are deliberately retained for a brief, user-visible
+    /// interval. Hosts use this deadline to schedule one presentation wake-up
+    /// instead of polling the reducer; a new turn or source transition simply
+    /// replaces the deadline.
+    public func nextPresentationTransitionDeadline() -> Date? {
+        guard pausePhase == .live else { return nil }
+        let now = clock.now()
+        return records.values.compactMap { record -> Date? in
+            guard record.runtimeSourceAvailable, let terminal = record.terminal else { return nil }
+            let interval = retention(for: terminal.state)
+            guard interval > 0 else { return nil }
+            let deadline = terminal.authoritativeEventAt.addingTimeInterval(interval)
+            return deadline > now ? deadline : nil
+        }.min()
+    }
+
     private func updateApprovalHealth(_ health: ApprovalSourceHealth) {
         defaultApprovalHealth = health.state == .unavailable ? .unavailable : .availableKnownNotWaiting
         for id in records.keys {

@@ -70,10 +70,20 @@ final class V3StateEngineTests: XCTestCase {
         let thread = id(.thread, "a"), turn = id(.turn, "turn")
         engine.ingest(event(thread, turn, .taskStarted)); engine.ingest(event(thread, turn, .taskCompletedSuccess))
         XCTAssertEqual(state(thread), .completed)
+        XCTAssertEqual(engine.nextPresentationTransitionDeadline(), clock.now().addingTimeInterval(5))
         clock.advance(4.9); XCTAssertEqual(state(thread), .completed)
         clock.advance(0.1); XCTAssertEqual(state(thread), .idle)
         engine.ingest(event(thread, id(.turn, "next"), .taskStarted, activity: .tool))
         XCTAssertEqual(state(thread), .thinking)
+    }
+
+    func testTerminalPresentationDeadlineIsRemovedWhenTheSourceBecomesUnavailable() {
+        let thread = id(.thread, "deadline-source-loss"), turn = id(.turn, "turn")
+        engine.ingest(event(thread, turn, .taskStarted))
+        engine.ingest(event(thread, turn, .taskCompletedSuccess))
+        XCTAssertNotNil(engine.nextPresentationTransitionDeadline())
+        engine.ingest(DesktopSourceHealth(threadID: thread, state: .unavailable, processEpoch: nil, fileIdentity: nil, reason: .sourceMissing))
+        XCTAssertNil(engine.nextPresentationTransitionDeadline())
     }
 
     func testRedRetentionAndImmediateNewTurnOverride() {
@@ -81,6 +91,7 @@ final class V3StateEngineTests: XCTestCase {
             let thread = id(.thread, terminal.rawValue), turn = id(.turn, terminal.rawValue)
             engine.ingest(event(thread, turn, .taskStarted)); engine.ingest(event(thread, turn, terminal))
             XCTAssertNotEqual(state(thread), .idle)
+            XCTAssertEqual(engine.nextPresentationTransitionDeadline(), clock.now().addingTimeInterval(15))
             clock.advance(14.9); XCTAssertNotEqual(state(thread), .idle)
             clock.advance(0.1); XCTAssertEqual(state(thread), .idle)
         }

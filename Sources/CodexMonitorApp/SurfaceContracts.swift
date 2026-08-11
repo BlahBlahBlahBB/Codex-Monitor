@@ -116,16 +116,3 @@ struct VisualStatePresentation: Equatable {
         stateTextKey: "state.sourceUnavailable"
     )
 }
-
-/// Pure geometry contract for every status-item popover show. Coordinates are
-/// in the current screen's coordinate system, so no previous popover frame can
-/// influence a later open.
-enum PopoverAnchorLayout {
-    static func frame(anchor: CGRect, contentSize: CGSize, visibleFrame: CGRect, attachmentGap: CGFloat = 8, margin: CGFloat = 8) -> CGRect {
-        let width = min(contentSize.width, max(1, visibleFrame.width - 2 * margin))
-        let height = min(contentSize.height, max(1, visibleFrame.height - 2 * margin))
-        let x = min(max(anchor.midX - width / 2, visibleFrame.minX + margin), visibleFrame.maxX - width - margin)
-        let y = min(max(anchor.minY - attachmentGap - height, visibleFrame.minY + margin), visibleFrame.maxY - height - margin)
-        return CGRect(x: x, y: y, width: width, height: height)
-    }
-}

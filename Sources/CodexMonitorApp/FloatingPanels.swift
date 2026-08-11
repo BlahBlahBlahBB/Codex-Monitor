@@ -125,12 +125,14 @@ final class FloatingStatusPanelController: NSObject, ObservableObject, NSWindowD
         self.panel = panel
         OrbHostDiagnostics.capture(panel: panel, contentView: hostingView)
         DispatchQueue.main.async {
-            let layerContract = OrbTransparencyProbe.passes(for: panel, host: hostingView)
-            var probe = OrbTransparencyProbe.renderedBackgroundResults(for: hostingView)
-            probe["event"] = "compositorProbe"
-            probe["layerContract"] = String(layerContract)
-            probe["glassEffectContainer"] = "absentFromOrbHost"
-            DiagnosticEvent.record(.orbHost, probe)
+            DiagnosticEvent.record(.orbHost, [
+                "event": "hostCompositorContract",
+                "panelOpaque": String(panel.isOpaque),
+                "panelShadow": String(panel.hasShadow),
+                "hostOpaque": String(hostingView.isOpaque),
+                "hostBackgroundClear": String(hostingView.layer?.backgroundColor == NSColor.clear.cgColor),
+                "orbMaterial": "CircularVisualEffectView"
+            ])
         }
     }
 

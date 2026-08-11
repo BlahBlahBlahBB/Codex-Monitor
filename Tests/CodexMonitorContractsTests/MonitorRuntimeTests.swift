@@ -146,6 +146,36 @@ final class MonitorRuntimeTests: XCTestCase {
         XCTAssertEqual(updated?.sourceHealth[.desktopLocal]?.availability, .available)
     }
 
+    func testTerminalRetentionPublishesIdleWithoutAnotherExternalMutation() async throws {
+        let store = MonitorRuntimeStore(
+            engine: RuntimeStateEngine(initialPhase: .live),
+            initialPhase: .live
+        )
+        let thread = id(.thread, "terminal-deadline")
+        let turn = id(.turn, "terminal-turn")
+        let stream = await store.snapshots()
+        var iterator = stream.makeAsyncIterator()
+        _ = await iterator.next()
+
+        await store.registerDesktopThread(DesktopThreadSnapshot(threadID: thread, title: nil, model: nil, reasoningEffort: nil, updatedAtMilliseconds: nil, tokensUsed: nil))
+        _ = await iterator.next()
+        let now = Date()
+        await store.ingest(.rollout(RolloutRecordEnvelope(threadID: thread, turnID: turn, itemID: nil, kind: .taskStarted, activity: nil, tokenSnapshot: nil, model: nil, reasoningEffort: nil, observedAt: now, fileOffset: 0)))
+        _ = await iterator.next()
+
+        // Use an authoritative source time just before the retained deadline:
+        // this is a real one-shot scheduler regression without turning the
+        // normal unit suite into a twenty-second timer test.
+        let completedAt = Date().addingTimeInterval(-4.85)
+        await store.ingest(.rollout(RolloutRecordEnvelope(threadID: thread, turnID: turn, itemID: nil, kind: .taskCompletedSuccess, activity: nil, tokenSnapshot: nil, model: nil, reasoningEffort: nil, authoritativeEventAt: completedAt, observedAt: Date(), fileOffset: 1)))
+        let completed = await iterator.next()
+        XCTAssertEqual(completed?.currentState, .completed)
+
+        try await Task.sleep(for: .seconds(0.5))
+        let idle = await iterator.next()
+        XCTAssertEqual(idle?.currentState, .idle)
+    }
+
     func testOldUnavailableThreadDoesNotPoisonFreshRepresentativeIdleThread() async {
         let clock = RuntimeSnapshotTestClock()
         let store = makeStore(clock: clock)
