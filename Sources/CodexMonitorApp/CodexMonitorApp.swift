@@ -6,15 +6,11 @@ import CodexMonitorContracts
 struct CodexMonitorApp: App {
     @NSApplicationDelegateAdaptor(CodexMonitorAppDelegate.self) private var appDelegate
 
-    // The system Settings scene must never be blank. Popover/context actions
-    // still focus the reusable AppKit Settings window owned by the coordinator.
+    // Keep SwiftUI's lifecycle valid without creating a second Settings
+    // surface. The app delegate routes the system Settings command to the
+    // single retained native controller.
     var body: some Scene {
-        Settings {
-            NativeSettingsWindowView(
-                preferences: appDelegate.preferences,
-                showDiagnostics: { appDelegate.showDiagnostics() }
-            )
-        }
+        Settings { EmptyView() }
     }
 }
 
@@ -28,12 +24,14 @@ final class CodexMonitorAppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
+        UIBuildDiagnostics.logStartup()
         let surfaces = MonitorSurfaceCoordinator(
             model: model,
             preferences: preferences,
             refreshMonitoring: { [weak self] in self?.restartObservation() }
         )
         self.surfaces = surfaces
+        routeSystemSettingsCommand()
         model.startObserving(runtime)
         surfaces.start()
         Task { await driver.start() }
@@ -41,6 +39,7 @@ final class CodexMonitorAppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        preferences.flushPersistence()
         model.stopObserving()
         surfaces?.stop()
         Task { await driver.stop() }
@@ -54,6 +53,21 @@ final class CodexMonitorAppDelegate: NSObject, NSApplicationDelegate {
 
     func showDiagnostics() {
         surfaces?.showDiagnostics()
+    }
+
+    @objc func showSettingsWindow(_ sender: Any?) {
+        surfaces?.showSettings()
+    }
+
+    private func routeSystemSettingsCommand() {
+        guard let mainMenu = NSApp.mainMenu else { return }
+        for item in mainMenu.items {
+            guard let submenu = item.submenu else { continue }
+            for command in submenu.items where command.action == #selector(CodexMonitorAppDelegate.showSettingsWindow(_:)) || command.title.hasPrefix("Settings") {
+                command.target = self
+                command.action = #selector(showSettingsWindow(_:))
+            }
+        }
     }
 
     private func startSmokeExitIfRequested() {

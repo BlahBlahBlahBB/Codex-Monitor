@@ -8,6 +8,8 @@ final class FloatingStatusPanelController: NSObject, ObservableObject, NSWindowD
     private var quickView: NSPanel?
     private weak var preferences: MonitorPreferences?
     private let actions: MonitorSurfaceActions
+    private var hasPlacedPanel = false
+    private var liveResizeCenter: CGPoint?
 
     init(actions: MonitorSurfaceActions) {
         self.actions = actions
@@ -32,6 +34,7 @@ final class FloatingStatusPanelController: NSObject, ObservableObject, NSWindowD
         panel?.close()
         quickView = nil
         panel = nil
+        hasPlacedPanel = false
     }
 
     func toggleQuickView(model: MonitorAppModel) {
@@ -69,7 +72,24 @@ final class FloatingStatusPanelController: NSObject, ObservableObject, NSWindowD
     }
 
     func windowDidMove(_ notification: Notification) { persistFrame() }
-    func windowDidEndLiveResize(_ notification: Notification) { persistFrame() }
+    func windowWillStartLiveResize(_ notification: Notification) {
+        liveResizeCenter = panel.map { CGPoint(x: $0.frame.midX, y: $0.frame.midY) }
+    }
+
+    func windowDidEndLiveResize(_ notification: Notification) {
+        guard let panel else { return }
+        if let center = liveResizeCenter {
+            let size = MonitorPreferences.clampedSize(panel.frame.width)
+            let origin = FloatingPanelLayout.centerPreservingOrigin(
+                center: center,
+                size: CGSize(width: size, height: size),
+                screens: NSScreen.screens.map(\.visibleFrame)
+            )
+            panel.setFrame(NSRect(origin: origin, size: CGSize(width: size, height: size)), display: true)
+        }
+        liveResizeCenter = nil
+        persistFrame()
+    }
 
     private func createPanel(model: MonitorAppModel, preferences: MonitorPreferences) {
         let size = preferences.orbSize
@@ -89,9 +109,13 @@ final class FloatingStatusPanelController: NSObject, ObservableObject, NSWindowD
         let root = FloatingOrbRoot(model: model, preferences: preferences) { [weak self] in
             self?.toggleQuickView(model: model)
         }
-        panel.contentView = OrbHostingView(rootView: root, menuProvider: { [weak self] in
+        let hostingView = OrbHostingView(rootView: root, menuProvider: { [weak self] in
             self?.makeContextMenu() ?? NSMenu()
         })
+        hostingView.wantsLayer = true
+        hostingView.layer?.backgroundColor = NSColor.clear.cgColor
+        hostingView.layer?.isOpaque = false
+        panel.contentView = hostingView
         self.panel = panel
     }
 
@@ -99,10 +123,25 @@ final class FloatingStatusPanelController: NSObject, ObservableObject, NSWindowD
         guard let panel, let preferences else { return }
         let size = MonitorPreferences.clampedSize(preferences.orbSize)
         let screenFrames = NSScreen.screens.map(\.visibleFrame)
-        let origin = preferences.orbOrigin ?? CGPoint(
-            x: (NSScreen.main?.visibleFrame.maxX ?? 300) - size - 24,
-            y: (NSScreen.main?.visibleFrame.midY ?? 300) - size / 2
-        )
+        let origin: CGPoint
+        if hasPlacedPanel {
+            let current = panel.frame
+            if abs(current.width - size) > 0.5 {
+                // Live preference changes retain the screen-space center.
+                origin = FloatingPanelLayout.centerPreservingOrigin(
+                    center: CGPoint(x: current.midX, y: current.midY),
+                    size: CGSize(width: size, height: size),
+                    screens: screenFrames
+                )
+            } else {
+                origin = current.origin
+            }
+        } else {
+            origin = preferences.orbOrigin ?? CGPoint(
+                x: (NSScreen.main?.visibleFrame.maxX ?? 300) - size - 24,
+                y: (NSScreen.main?.visibleFrame.midY ?? 300) - size / 2
+            )
+        }
         panel.setFrame(
             NSRect(
                 origin: FloatingPanelLayout.clampedOrigin(origin, size: CGSize(width: size, height: size), screens: screenFrames),
@@ -110,6 +149,7 @@ final class FloatingStatusPanelController: NSObject, ObservableObject, NSWindowD
             ),
             display: true
         )
+        hasPlacedPanel = true
     }
 
     private func persistFrame() {
@@ -165,6 +205,15 @@ private final class OrbHostingView: NSHostingView<FloatingOrbRoot> {
     required init?(coder: NSCoder) {
         menuProvider = { NSMenu() }
         super.init(coder: coder)
+    }
+
+    override var isOpaque: Bool { false }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        wantsLayer = true
+        layer?.backgroundColor = NSColor.clear.cgColor
+        layer?.isOpaque = false
     }
 
     override func menu(for event: NSEvent) -> NSMenu? {
@@ -223,7 +272,7 @@ private struct QuickView: View {
                     .font(.system(size: 12))
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
-                Text(String(format: L10n.tr("session.tokenQuota"), MonitorDisplayValue.token(snapshot), MonitorDisplayValue.remainingQuota(snapshot)))
+                Text(String(format: L10n.tr("session.tokenQuota"), MonitorDisplayValue.token(snapshot), MonitorDisplayValue.orbQuota(snapshot)))
                     .font(.system(size: 12, weight: .medium))
                     .foregroundStyle(.secondary)
                     .lineLimit(1)

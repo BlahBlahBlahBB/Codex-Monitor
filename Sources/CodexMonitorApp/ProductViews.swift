@@ -70,7 +70,6 @@ struct PopoverActionRow: View {
         }
         .buttonStyle(PopoverActionRowStyle(isHovered: hovered, enabled: enabled))
         .disabled(!enabled)
-        .focusable(enabled)
         .onHover { inside in hovered = enabled && inside }
         .accessibilityLabel(title)
         .accessibilityAddTraits(enabled ? [] : .isStaticText)
@@ -113,7 +112,7 @@ struct UsageWindowView: View {
     var body: some View {
         let snapshot = model.snapshot
         ScrollView {
-            VStack(alignment: .leading, spacing: 20) {
+            VStack(alignment: .leading, spacing: 16) {
                 UsageFactSection(title: L10n.tr("label.account")) {
                     UsageFactRow(label: L10n.tr("label.account"), value: L10n.unknown)
                     UsageFactRow(label: L10n.tr("label.plan"), value: L10n.unknown)
@@ -132,10 +131,10 @@ struct UsageWindowView: View {
                     UsageHistoryUnavailableChart()
                 }
             }
-            .padding(20)
-            .frame(maxWidth: 640, alignment: .leading)
+            .padding(18)
+            .frame(maxWidth: 560, alignment: .leading)
         }
-        .frame(minWidth: 540, minHeight: 500)
+        .frame(minWidth: 500, minHeight: 460)
         .background(Color(nsColor: .windowBackgroundColor))
     }
 
@@ -165,7 +164,7 @@ private struct UsageFactRow: View {
         HStack(alignment: .firstTextBaseline) {
             Text(label).font(.system(size: 13)).foregroundStyle(.secondary)
             Spacer(minLength: 16)
-            Text(value).font(.system(size: 13, weight: .medium)).multilineTextAlignment(.trailing).lineLimit(2)
+            Text(value).font(.system(size: 13, weight: .medium)).multilineTextAlignment(.trailing).lineLimit(1)
         }
     }
 }
@@ -289,7 +288,9 @@ private struct FloatingSettingsDetail: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
             Text(L10n.tr("settings.floating")).font(.system(size: 15, weight: .semibold))
-            Form {
+            // Deliberately not a Form: its grouped style inserts an orphan
+            // separator beneath Slider in a system Settings scene.
+            VStack(alignment: .leading, spacing: 16) {
                 Toggle(L10n.tr("settings.showFloating"), isOn: $preferences.showOrb).toggleStyle(.switch)
                 VStack(alignment: .leading, spacing: 8) {
                     HStack {
@@ -302,7 +303,6 @@ private struct FloatingSettingsDetail: View {
                 Toggle(L10n.tr("settings.showUsageMenu"), isOn: $preferences.showUsageMenu).toggleStyle(.switch)
                 Toggle(L10n.tr("settings.showSettingsMenu"), isOn: $preferences.showSettingsMenu).toggleStyle(.switch)
             }
-            .formStyle(.grouped)
         }
         .padding(20)
     }

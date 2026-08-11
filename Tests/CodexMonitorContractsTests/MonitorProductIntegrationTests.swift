@@ -18,6 +18,7 @@ final class MonitorProductIntegrationTests: XCTestCase {
         preferences.showSettingsMenu = false
         preferences.orbSize = 240
         preferences.orbOrigin = CGPoint(x: 225, y: 340)
+        preferences.flushPersistence()
 
         let restored = MonitorPreferences(defaults: defaults)
         XCTAssertFalse(restored.showOrb)
@@ -98,5 +99,23 @@ final class MonitorProductIntegrationTests: XCTestCase {
         XCTAssertLessThanOrEqual(right.maxX, visible.maxX - 12)
         XCTAssertGreaterThanOrEqual(right.minY, 12)
         XCTAssertLessThanOrEqual(right.maxY, visible.maxY - 12)
+    }
+
+    func testOrbResizePreservesCentreBeforeApplyingEdgeClamp() {
+        let screens = [CGRect(x: 0, y: 0, width: 1_200, height: 900)]
+        let origin = FloatingPanelLayout.centerPreservingOrigin(
+            center: CGPoint(x: 600, y: 450),
+            size: CGSize(width: 180, height: 180),
+            screens: screens
+        )
+        XCTAssertEqual(origin, CGPoint(x: 510, y: 360))
+    }
+
+    func testUnsafeTaskTitleIsReplacedByGenericPresentationCopy() {
+        XCTAssertEqual(
+            MonitorDisplayValue.taskTitleForPresentation("The following is Codex agent history and hidden context"),
+            L10n.tr("activity.currentTask")
+        )
+        XCTAssertEqual(MonitorDisplayValue.taskTitleForPresentation("Implement the status view"), "Implement the status view")
     }
 }

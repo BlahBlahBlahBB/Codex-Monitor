@@ -18,6 +18,7 @@
 "activity.waitingConfirmation" = "Waiting for confirmation in Codex";
 "activity.noSnapshot" = "No runtime snapshot";
 "activity.noSession" = "No active session";
+"activity.currentTask" = "Current task";
 "update.updated" = "Updated %@";
 "runtime.unknown" = "Runtime Unknown";
 "quota.remaining" = "Remaining quota %@";

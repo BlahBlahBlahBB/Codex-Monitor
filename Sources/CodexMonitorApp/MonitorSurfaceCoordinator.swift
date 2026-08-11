@@ -72,7 +72,10 @@ final class MonitorSurfaceCoordinator: NSObject {
     func showSettings() {
         if settingsWindowController == nil {
             guard ownership.acquire(.settings) else { return }
-            settingsWindowController = SettingsWindowController(preferences: preferences, showDiagnostics: { [weak self] in self?.showDiagnostics() })
+            settingsWindowController = SettingsWindowController(
+                preferences: preferences,
+                showDiagnostics: { [weak self] in self?.showDiagnostics() }
+            )
         }
         settingsWindowController?.show()
     }
@@ -200,7 +203,7 @@ class ReusableNativeWindowController: NSWindowController {
 @MainActor
 final class UsageWindowController: ReusableNativeWindowController {
     init(model: MonitorAppModel) {
-        let window = Self.makeWindow(size: NSSize(width: 650, height: 690), minSize: NSSize(width: 560, height: 560))
+        let window = Self.makeWindow(size: NSSize(width: 600, height: 560), minSize: NSSize(width: 500, height: 460))
         window.contentView = NSHostingView(rootView: UsageWindowView(model: model))
         super.init(window: window)
     }
@@ -208,6 +211,8 @@ final class UsageWindowController: ReusableNativeWindowController {
     required init?(coder: NSCoder) { nil }
 }
 
+/// The one Settings surface owner. It is retained for the app lifetime and
+/// closes by ordering out, so every entry point reopens the exact same host.
 @MainActor
 final class SettingsWindowController: ReusableNativeWindowController {
     init(preferences: MonitorPreferences, showDiagnostics: @escaping () -> Void) {

@@ -322,7 +322,35 @@ enum MonitorDisplayValue {
     }
 
     static func taskTitle(_ snapshot: MonitorRuntimeSnapshot?) -> String {
-        snapshot?.currentThread?.taskTitle ?? L10n.tr("activity.noSession")
+        taskTitleForPresentation(snapshot?.currentThread?.taskTitle)
+    }
+
+    /// Desktop-provided titles are presentation data, not trusted source text.
+    /// Reject known transcript/prompt fragments rather than displaying internal
+    /// agent history in a user-facing surface.
+    static func taskTitleForPresentation(_ rawTitle: String?) -> String {
+        guard let rawTitle else { return L10n.tr("activity.noSession") }
+        let title = rawTitle
+            .split(whereSeparator: \.isNewline)
+            .first
+            .map(String.init)?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard !title.isEmpty else { return L10n.tr("activity.noSession") }
+
+        let lowered = title.lowercased()
+        let internalMarkers = [
+            "the following is codex agent history",
+            "codex agent history",
+            "system prompt",
+            "developer prompt",
+            "internal transcript",
+            "tool instruction",
+            "you are codex"
+        ]
+        guard !internalMarkers.contains(where: lowered.contains) else {
+            return L10n.tr("activity.currentTask")
+        }
+        return String(title.prefix(120))
     }
 
     static func modelRuntime(_ snapshot: MonitorRuntimeSnapshot?) -> String {

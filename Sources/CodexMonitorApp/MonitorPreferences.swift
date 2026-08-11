@@ -4,12 +4,13 @@ import CoreGraphics
 @MainActor
 public final class MonitorPreferences: ObservableObject {
     @Published public var showOrb: Bool { didSet { defaults.set(showOrb, forKey: Keys.showOrb) } }
-    @Published public var orbSize: CGFloat { didSet { let value = Self.clampedSize(orbSize); if value != orbSize { orbSize = value; return }; defaults.set(Double(value), forKey: Keys.orbSize) } }
+    @Published public var orbSize: CGFloat { didSet { let value = Self.clampedSize(orbSize); if value != orbSize { orbSize = value; return }; scheduleOrbSizePersistence(value) } }
     @Published public var showUsageMenu: Bool { didSet { defaults.set(showUsageMenu, forKey: Keys.showUsageMenu) } }
     @Published public var showSettingsMenu: Bool { didSet { defaults.set(showSettingsMenu, forKey: Keys.showSettingsMenu) } }
     @Published public var orbOrigin: CGPoint? { didSet { persistOrigin() } }
 
     private let defaults: UserDefaults
+    private var pendingSizePersistence: DispatchWorkItem?
     private enum Keys { static let showOrb = "monitor.showOrb"; static let orbSize = "monitor.orbSize"; static let showUsageMenu = "monitor.showUsageMenu"; static let showSettingsMenu = "monitor.showSettingsMenu"; static let orbX = "monitor.orbX"; static let orbY = "monitor.orbY" }
 
     public init(defaults: UserDefaults = .standard) {
@@ -26,6 +27,19 @@ public final class MonitorPreferences: ObservableObject {
     }
 
     public static func clampedSize(_ value: CGFloat) -> CGFloat { min(max(value, FloatingOrbSurfaceConfiguration.minimumSize), FloatingOrbSurfaceConfiguration.maximumSize) }
+    public func flushPersistence() {
+        pendingSizePersistence?.cancel()
+        pendingSizePersistence = nil
+        defaults.set(Double(orbSize), forKey: Keys.orbSize)
+    }
+
+    private func scheduleOrbSizePersistence(_ value: CGFloat) {
+        pendingSizePersistence?.cancel()
+        let defaults = defaults
+        let item = DispatchWorkItem { defaults.set(Double(value), forKey: Keys.orbSize) }
+        pendingSizePersistence = item
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.18, execute: item)
+    }
     private func persistOrigin() {
         guard let orbOrigin else { defaults.removeObject(forKey: Keys.orbX); defaults.removeObject(forKey: Keys.orbY); return }
         defaults.set(Double(orbOrigin.x), forKey: Keys.orbX); defaults.set(Double(orbOrigin.y), forKey: Keys.orbY)
@@ -36,6 +50,17 @@ public enum FloatingPanelLayout {
     public static func clampedOrigin(_ requested: CGPoint, size: CGSize, screens: [CGRect], margin: CGFloat = 12) -> CGPoint {
         guard let screen = screens.first(where: { $0.intersects(CGRect(origin: requested, size: size)) }) ?? screens.first else { return requested }
         return CGPoint(x: min(max(requested.x, screen.minX + margin), screen.maxX - size.width - margin), y: min(max(requested.y, screen.minY + margin), screen.maxY - size.height - margin))
+    }
+
+    /// Preserves the visual centre whenever the square orb changes size, then
+    /// applies the same multi-display safety constraint used for drag restore.
+    public static func centerPreservingOrigin(center: CGPoint, size: CGSize, screens: [CGRect], margin: CGFloat = 12) -> CGPoint {
+        clampedOrigin(
+            CGPoint(x: center.x - size.width / 2, y: center.y - size.height / 2),
+            size: size,
+            screens: screens,
+            margin: margin
+        )
     }
 
     public static func quickViewFrame(orbFrame: CGRect, desiredSize: CGSize, visibleFrame: CGRect, margin: CGFloat = 12) -> CGRect {
