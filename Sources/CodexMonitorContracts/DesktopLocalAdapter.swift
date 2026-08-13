@@ -100,7 +100,26 @@ public enum RolloutEventKind: String, Sendable, Equatable {
 public struct TokenSnapshot: Sendable, Equatable {
     public let totalTokens: Int64
     public let lastCallTokens: Int64?
-    public init(totalTokens: Int64, lastCallTokens: Int64?) { self.totalTokens = totalTokens; self.lastCallTokens = lastCallTokens }
+    /// The token categories from one advancing model call.  They stay nil
+    /// unless the local rollout exposed the complete structured value; callers
+    /// must never derive a cost from the cumulative total alone.
+    public let lastCallBreakdown: TokenUsageBreakdown?
+    public init(totalTokens: Int64, lastCallTokens: Int64?, lastCallBreakdown: TokenUsageBreakdown? = nil) {
+        self.totalTokens = totalTokens; self.lastCallTokens = lastCallTokens; self.lastCallBreakdown = lastCallBreakdown
+    }
+}
+
+public struct TokenUsageBreakdown: Sendable, Equatable {
+    public let inputTokens: Int64?
+    public let cachedInputTokens: Int64?
+    public let outputTokens: Int64?
+    public let reasoningOutputTokens: Int64?
+    public let totalTokens: Int64
+
+    public init(inputTokens: Int64?, cachedInputTokens: Int64?, outputTokens: Int64?, reasoningOutputTokens: Int64?, totalTokens: Int64) {
+        self.inputTokens = inputTokens; self.cachedInputTokens = cachedInputTokens
+        self.outputTokens = outputTokens; self.reasoningOutputTokens = reasoningOutputTokens; self.totalTokens = totalTokens
+    }
 }
 
 public struct RolloutRecordEnvelope: Sendable, Equatable {
@@ -112,6 +131,10 @@ public struct RolloutRecordEnvelope: Sendable, Equatable {
     public let tokenSnapshot: TokenSnapshot?
     public let model: String?
     public let reasoningEffort: String?
+    /// The validated rollout session identity. It is safe structured
+    /// provenance, never rollout content, and lets the usage lane reject
+    /// cross-session replay without joining by title or timestamp.
+    public let sessionID: String?
     /// Stable per-record identity when the rollout source exposes one.  It is
     /// used only in-memory/checkpoints for terminal replay admission.
     public let eventID: String?
@@ -121,10 +144,10 @@ public struct RolloutRecordEnvelope: Sendable, Equatable {
     public let observedAt: Date
     public let fileOffset: UInt64
 
-    public init(threadID: NamespacedID, turnID: NamespacedID?, itemID: NamespacedID?, kind: RolloutEventKind, activity: RolloutActivityCategory?, tokenSnapshot: TokenSnapshot?, model: String?, reasoningEffort: String?, eventID: String? = nil, authoritativeEventAt: Date? = nil, observedAt: Date, fileOffset: UInt64) {
+    public init(threadID: NamespacedID, turnID: NamespacedID?, itemID: NamespacedID?, kind: RolloutEventKind, activity: RolloutActivityCategory?, tokenSnapshot: TokenSnapshot?, model: String?, reasoningEffort: String?, sessionID: String? = nil, eventID: String? = nil, authoritativeEventAt: Date? = nil, observedAt: Date, fileOffset: UInt64) {
         self.threadID = threadID; self.turnID = turnID; self.itemID = itemID
         self.kind = kind; self.activity = activity; self.tokenSnapshot = tokenSnapshot
-        self.model = model; self.reasoningEffort = reasoningEffort
+        self.model = model; self.reasoningEffort = reasoningEffort; self.sessionID = sessionID
         self.eventID = eventID; self.authoritativeEventAt = authoritativeEventAt
         self.observedAt = observedAt; self.fileOffset = fileOffset
     }
@@ -138,7 +161,7 @@ public enum DesktopObservation: Sendable, Equatable {
 }
 
 public enum StateDBError: Error, Equatable {
-    case unavailable, busyExhausted, schemaMismatch, readOnlyOpenFailed, queryFailed
+    case unavailable, busyExhausted, transientWALUnavailable, schemaMismatch, readOnlyOpenFailed, queryFailed
 }
 
 public struct StateDBSchema: Sendable, Equatable {
@@ -169,6 +192,9 @@ public final class StateDBReader: @unchecked Sendable {
     private let sourceID: DesktopLocalSourceID
     private let schema: StateDBSchema
     private let retryPolicy: StateDBRetryPolicy
+    /// This is deliberately reader-local. A transient WAL absence is only
+    /// eligible after this exact primary database has completed a read.
+    private var hasCompletedSuccessfulRead = false
 
     public init(databaseURL: URL, sourceID: DesktopLocalSourceID, schema: StateDBSchema, retryPolicy: StateDBRetryPolicy = .init()) {
         self.databaseURL = databaseURL; self.sourceID = sourceID; self.schema = schema; self.retryPolicy = retryPolicy
@@ -177,7 +203,11 @@ public final class StateDBReader: @unchecked Sendable {
     public func thread(rawID: String) throws -> StateDBThreadRecord? {
         var lastError: StateDBError = .unavailable
         for attempt in 0..<retryPolicy.attempts {
-            do { return try readThreadOnce(rawID: rawID) }
+            do {
+                let value = try readThreadOnce(rawID: rawID)
+                hasCompletedSuccessfulRead = true
+                return value
+            }
             catch let error as StateDBError where error == .busyExhausted {
                 lastError = error
                 if attempt + 1 < retryPolicy.attempts { usleep(retryPolicy.retryDelayMilliseconds * 1_000) }
@@ -193,7 +223,11 @@ public final class StateDBReader: @unchecked Sendable {
     public func recentThreads(limit: Int = 12) throws -> [StateDBThreadRecord] {
         var lastError: StateDBError = .unavailable
         for attempt in 0..<retryPolicy.attempts {
-            do { return try readRecentThreadsOnce(limit: max(1, min(limit, 64))) }
+            do {
+                let value = try readRecentThreadsOnce(limit: max(1, min(limit, 64)))
+                hasCompletedSuccessfulRead = true
+                return value
+            }
             catch let error as StateDBError where error == .busyExhausted {
                 lastError = error
                 if attempt + 1 < retryPolicy.attempts { usleep(retryPolicy.retryDelayMilliseconds * 1_000) }
@@ -280,7 +314,26 @@ public final class StateDBReader: @unchecked Sendable {
 
     private func stateError(for database: OpaquePointer) -> StateDBError {
         let code = sqlite3_errcode(database)
-        return code == SQLITE_BUSY || code == SQLITE_LOCKED ? .busyExhausted : .queryFailed
+        if code == SQLITE_BUSY || code == SQLITE_LOCKED { return .busyExhausted }
+        if isTransientWALUnavailable(database: database, sqliteCode: code) {
+            return .transientWALUnavailable
+        }
+        return .queryFailed
+    }
+
+    /// SQLite reaches this branch only after the primary database opened and a
+    /// query attempted to read its journal state.  We preserve health only for
+    /// the narrow ENOENT/CANTOPEN combination where that already-validated
+    /// primary database remains present but its `-wal` sidecar vanished.
+    /// Every other open, permission, schema, corrupt, or query failure keeps
+    /// the existing fail-closed classification.
+    private func isTransientWALUnavailable(database: OpaquePointer, sqliteCode: Int32) -> Bool {
+        guard hasCompletedSuccessfulRead,
+              sqliteCode == SQLITE_CANTOPEN,
+              sqlite3_system_errno(database) == ENOENT else { return false }
+        let manager = FileManager.default
+        let walPath = databaseURL.path + "-wal"
+        return manager.fileExists(atPath: databaseURL.path) && !manager.fileExists(atPath: walPath)
     }
 }
 
@@ -333,6 +386,7 @@ public final class RolloutIncrementalReader: @unchecked Sendable {
     private var partialLine = Data()
     private var sessionValidated = false
     private var activeTurnID: NamespacedID?
+    private var modelByTurn: [NamespacedID: String] = [:]
     private var lastTokenTotal: Int64?
     private var activeTurnStartedAt: Date?
     private var activeItemID: NamespacedID?
@@ -442,6 +496,7 @@ public final class RolloutIncrementalReader: @unchecked Sendable {
 
     private func reconstructCheckpointState(from bytes: Data, offset: UInt64, skipFirstPartial: Bool) {
         activeTurnID = nil
+        modelByTurn.removeAll()
         lastTokenTotal = nil
         activeTurnStartedAt = nil; activeItemID = nil; activeItemCategory = nil
         latestActiveState = nil; latestActiveStateAt = nil; latestTerminal = nil
@@ -503,7 +558,7 @@ public final class RolloutIncrementalReader: @unchecked Sendable {
         let sourceAt = sourceDate(object["timestamp"])
         func envelope(_ kind: RolloutEventKind, turn: NamespacedID? = activeTurnID, itemRaw: String? = nil, activity: RolloutActivityCategory? = nil, token: TokenSnapshot? = nil, model: String? = nil, effort: String? = nil, eventID: String? = nil, authoritativeAt: Date? = sourceAt) -> DesktopObservation {
             let item = itemRaw.flatMap { NamespacedID(sourceID: binding.sourceID.value, entityKind: .item, rawID: $0) }
-            let record = RolloutRecordEnvelope(threadID: binding.threadID, turnID: turn, itemID: item, kind: kind, activity: activity, tokenSnapshot: token, model: model, reasoningEffort: effort, eventID: eventID, authoritativeEventAt: authoritativeAt, observedAt: observedAt, fileOffset: offset)
+            let record = RolloutRecordEnvelope(threadID: binding.threadID, turnID: turn, itemID: item, kind: kind, activity: activity, tokenSnapshot: token, model: model, reasoningEffort: effort, sessionID: binding.sessionID, eventID: eventID, authoritativeEventAt: authoritativeAt, observedAt: observedAt, fileOffset: offset)
             applyDecodedState(record)
             return .rollout(record)
         }
@@ -516,10 +571,11 @@ public final class RolloutIncrementalReader: @unchecked Sendable {
         case ("event_msg", "token_count"):
             guard let info = payload["info"] as? [String: Any], let total = info["total_token_usage"] as? [String: Any], let totalTokens = number(total["total_tokens"]) else { return [.capabilityUnavailable(threadID: binding.threadID, capability: .sessionToken)] }
             guard let turn = activeTurnID else { return [.capabilityUnavailable(threadID: binding.threadID, capability: .rolloutFormat)] }
-            let last = (info["last_token_usage"] as? [String: Any]).flatMap { number($0["total_tokens"]) }
+            let lastBody = info["last_token_usage"] as? [String: Any]
+            let last = lastBody.flatMap { number($0["total_tokens"]) }
             guard lastTokenTotal != totalTokens else { return [] }
             lastTokenTotal = totalTokens
-            return [envelope(.tokenCount, turn: turn, token: TokenSnapshot(totalTokens: totalTokens, lastCallTokens: last))]
+            return [envelope(.tokenCount, turn: turn, token: TokenSnapshot(totalTokens: totalTokens, lastCallTokens: last, lastCallBreakdown: lastBody.flatMap(tokenBreakdown)), model: modelByTurn[turn])]
         case ("event_msg", "task_complete"):
             guard let rawTurn = payload["turn_id"] as? String, let turn = NamespacedID(sourceID: binding.sourceID.value, entityKind: .turn, rawID: rawTurn) else { return [.capabilityUnavailable(threadID: binding.threadID, capability: .rolloutFormat)] }
             let error = payload["error"]
@@ -543,6 +599,7 @@ public final class RolloutIncrementalReader: @unchecked Sendable {
         case ("event_msg", "turn_context"):
             guard let rawTurn = payload["turn_id"] as? String, let model = payload["model"] as? String,
                   let turn = NamespacedID(sourceID: binding.sourceID.value, entityKind: .turn, rawID: rawTurn) else { return [.capabilityUnavailable(threadID: binding.threadID, capability: .rolloutFormat)] }
+            modelByTurn[turn] = model
             return [envelope(.turnContext, turn: turn, model: model, effort: payload["reasoning_effort"] as? String)]
         case ("response_item", "reasoning"):
             guard let turn = activeTurnID, let item = payload["id"] as? String else { return [.capabilityUnavailable(threadID: binding.threadID, capability: .rolloutFormat)] }
@@ -610,6 +667,22 @@ private func number(_ value: Any?) -> Int64? {
     let double = number.doubleValue
     guard double.rounded() == double, double >= Double(Int64.min), double <= Double(Int64.max) else { return nil }
     return Int64(double)
+}
+
+/// Accept both known snake_case rollout keys and the equivalent camelCase
+/// shape used by the validated monitor-owned token fixture.  A malformed or
+/// partial body is represented as absent categories, never coerced to zero.
+private func tokenBreakdown(_ value: [String: Any]) -> TokenUsageBreakdown? {
+    func field(_ snake: String, _ camel: String) -> Int64? {
+        number(value[snake]) ?? number(value[camel])
+    }
+    guard let total = field("total_tokens", "totalTokens"), total >= 0 else { return nil }
+    let input = field("input_tokens", "inputTokens")
+    let cached = field("cached_input_tokens", "cachedInputTokens")
+    let output = field("output_tokens", "outputTokens")
+    let reasoning = field("reasoning_output_tokens", "reasoningOutputTokens")
+    guard [input, cached, output, reasoning].allSatisfy({ $0.map { $0 >= 0 } ?? true }) else { return nil }
+    return TokenUsageBreakdown(inputTokens: input, cachedInputTokens: cached, outputTokens: output, reasoningOutputTokens: reasoning, totalTokens: total)
 }
 
 /// The installed rollout shape carries an ISO-8601 outer `timestamp` and a
@@ -705,12 +778,19 @@ public final class DesktopLocalAdapter: @unchecked Sendable {
         self.sourceID = sourceID; self.roots = validatedSessionRoots.map { $0.standardizedFileURL }; self.stateDB = stateDB; self.readerBeforeDescriptorOpen = readerBeforeDescriptorOpen
     }
 
-    public func open(threadRawID: String, checkpoint: RolloutCursor? = nil) throws -> DesktopThreadSnapshot {
+    public func open(threadRawID: String, checkpoint: RolloutCursor? = nil, historicalTailBytes: UInt64? = nil) throws -> DesktopThreadSnapshot {
         guard !stopped else { throw DesktopLocalAdapterError.shutdown }
         guard let record = try stateDB.thread(rawID: threadRawID) else { throw DesktopLocalAdapterError.threadNotFound }
         guard isUnderValidatedRoot(record.rolloutURL) else { throw DesktopLocalAdapterError.rolloutOutsideValidatedRoots }
         guard let binding = ThreadRolloutBinding(sourceID: sourceID, threadRawID: threadRawID, rolloutURL: record.rolloutURL, sessionID: threadRawID) else { throw DesktopLocalAdapterError.threadNotFound }
-        let reader = RolloutIncrementalReader(binding: binding, checkpoint: checkpoint, beforeDescriptorOpen: readerBeforeDescriptorOpen)
+        let reader: RolloutIncrementalReader
+        if let historicalTailBytes {
+            // Historical consumers opt in explicitly to this bounded read.
+            // Normal runtime polling preserves its small incremental tail.
+            reader = RolloutIncrementalReader(binding: binding, checkpoint: checkpoint, maxHeaderBytes: 65_536, maxTailBytes: max(1_048_576, historicalTailBytes), maxAppendBytes: 262_144, beforeDescriptorOpen: readerBeforeDescriptorOpen)
+        } else {
+            reader = RolloutIncrementalReader(binding: binding, checkpoint: checkpoint, beforeDescriptorOpen: readerBeforeDescriptorOpen)
+        }
         if checkpoint != nil {
             // Do not replace the installed reader or touch its epoch state.
             // `poll` atomically installs this reader only after exact first-poll
@@ -813,6 +893,17 @@ public final class DesktopLocalAdapter: @unchecked Sendable {
         pendingCheckpointEpochs.removeAll()
         processEpochs.removeAll()
         processEpochMismatchLatches.removeAll()
+    }
+
+    /// Forgetting an archived historical reader is local Monitor housekeeping;
+    /// it never touches Codex Desktop files or processes.
+    public func forget(threadID: NamespacedID) {
+        readers.removeValue(forKey: threadID)
+        pendingCheckpointReaders.removeValue(forKey: threadID)
+        rejectedCheckpointAdmissions.remove(threadID)
+        pendingCheckpointEpochs.removeValue(forKey: threadID)
+        processEpochs.removeValue(forKey: threadID)
+        processEpochMismatchLatches.remove(threadID)
     }
 
     private func pendingAdmissionUnavailable(threadID: NamespacedID) -> RolloutReadResult {

@@ -19,7 +19,7 @@ let package = Package(
         .target(name: "CodexMonitorContracts", dependencies: ["CSQLite"]),
         .executableTarget(
             name: "CodexMonitorApp",
-            dependencies: ["CodexMonitorContracts"],
+            dependencies: ["CodexMonitorContracts", "CSQLite"],
             resources: [.process("Resources")]
         ),
         .testTarget(

@@ -58,6 +58,7 @@ struct VisualEffectView: NSViewRepresentable {
     }
 
     func updateNSView(_ view: NSVisualEffectView, context: Context) {
+        guard view.material != material || view.blendingMode != blendingMode || view.state != state else { return }
         view.material = material
         view.blendingMode = blendingMode
         view.state = state
@@ -116,9 +117,17 @@ struct CircularVisualEffectView: NSViewRepresentable {
     let material: NSVisualEffectView.Material
     let blendingMode: NSVisualEffectView.BlendingMode
     let state: NSVisualEffectView.State
+    let shadowInset: CGFloat
+
+    init(material: NSVisualEffectView.Material, blendingMode: NSVisualEffectView.BlendingMode, state: NSVisualEffectView.State, shadowInset: CGFloat = 0) {
+        self.material = material
+        self.blendingMode = blendingMode
+        self.state = state
+        self.shadowInset = max(0, shadowInset)
+    }
 
     func makeNSView(context: Context) -> CircularVisualEffectHost {
-        CircularVisualEffectHost(material: material, blendingMode: blendingMode, state: state)
+        CircularVisualEffectHost(material: material, blendingMode: blendingMode, state: state, shadowInset: shadowInset)
     }
 
     func updateNSView(_ view: CircularVisualEffectHost, context: Context) {
@@ -128,12 +137,27 @@ struct CircularVisualEffectView: NSViewRepresentable {
 
 final class CircularVisualEffectHost: NSView {
     private let effectView = NSVisualEffectView()
+    private var lastMaskSize = NSSize.zero
+    private var lastBackingScale: CGFloat = 0
+    private var configuredMaterial: NSVisualEffectView.Material?
+    private var configuredBlendingMode: NSVisualEffectView.BlendingMode?
+    private var configuredState: NSVisualEffectView.State?
+    private let shadowInset: CGFloat
+    private(set) var maskGenerationCount = 0
 
-    init(material: NSVisualEffectView.Material, blendingMode: NSVisualEffectView.BlendingMode, state: NSVisualEffectView.State) {
+    init(material: NSVisualEffectView.Material, blendingMode: NSVisualEffectView.BlendingMode, state: NSVisualEffectView.State, shadowInset: CGFloat = 0) {
+        self.shadowInset = max(0, shadowInset)
         super.init(frame: .zero)
         wantsLayer = true
         layer?.backgroundColor = NSColor.clear.cgColor
         layer?.isOpaque = false
+        // The panel remains transparent and shadow-free. Depth belongs only
+        // to this explicitly circular host, never to its rectangular window.
+        layer?.shadowColor = NSColor.black.cgColor
+        layer?.shadowOpacity = 0.12
+        layer?.shadowRadius = 6
+        layer?.shadowOffset = CGSize(width: 0, height: -2)
+        layer?.masksToBounds = false
         effectView.wantsLayer = true
         effectView.layer?.backgroundColor = NSColor.clear.cgColor
         addSubview(effectView)
@@ -146,15 +170,34 @@ final class CircularVisualEffectHost: NSView {
 
     override func layout() {
         super.layout()
-        effectView.frame = bounds
-        effectView.maskImage = circleMaskImage(for: effectView.bounds.size)
+        let glassBounds = bounds.insetBy(dx: shadowInset, dy: shadowInset)
+        effectView.frame = glassBounds
+        layer?.shadowPath = CGPath(ellipseIn: glassBounds, transform: nil)
+        let size = effectView.bounds.size
+        let scale = window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 1
+        guard size != lastMaskSize || scale != lastBackingScale else { return }
+        lastMaskSize = size
+        lastBackingScale = scale
+        effectView.maskImage = circleMaskImage(for: size)
+        maskGenerationCount += 1
     }
 
     func configure(material: NSVisualEffectView.Material, blendingMode: NSVisualEffectView.BlendingMode, state: NSVisualEffectView.State) {
+        guard configuredMaterial != material || configuredBlendingMode != blendingMode || configuredState != state else { return }
         effectView.material = material
         effectView.blendingMode = blendingMode
         effectView.state = state
+        configuredMaterial = material
+        configuredBlendingMode = blendingMode
+        configuredState = state
     }
+
+    var maskGenerationCountForTesting: Int { maskGenerationCount }
+    var circularShadowPathForTesting: CGPath? { layer?.shadowPath }
+    var circularShadowOpacityForTesting: Float { layer?.shadowOpacity ?? 0 }
+    var circularShadowOffsetForTesting: CGSize { layer?.shadowOffset ?? .zero }
+    var circularShadowMasksToBoundsForTesting: Bool { layer?.masksToBounds ?? true }
+    var circularGlassBoundsForTesting: CGRect { effectView.frame }
 
     /// `NSVisualEffectView` owns a separate compositing path, so a regular
     /// CALayer mask does not reliably clip its material. Its documented
@@ -181,13 +224,52 @@ final class CircularVisualEffectHost: NSView {
 }
 
 private struct PersistentOrbMaterial: View {
+    let size: CGFloat
     @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
 
     @ViewBuilder var body: some View {
         if reduceTransparency {
-            Circle().fill(Color(nsColor: .windowBackgroundColor))
+            Circle()
+                .fill(Color(nsColor: .windowBackgroundColor))
+                .frame(width: size, height: size)
         } else {
-            CircularVisualEffectView(material: .hudWindow, blendingMode: .behindWindow, state: .active)
+            CircularVisualEffectView(
+                material: .hudWindow,
+                blendingMode: .behindWindow,
+                state: .active,
+                shadowInset: FloatingOrbSurfaceConfiguration.shadowInset
+            )
+            .frame(
+                width: size + FloatingOrbSurfaceConfiguration.shadowInset * 2,
+                height: size + FloatingOrbSurfaceConfiguration.shadowInset * 2
+            )
+        }
+    }
+}
+
+/// A single, low-contrast highlight gives the glass body a sense of ambient
+/// depth without adding a border, a second ring, or a rectangular shadow.
+/// The highlight is deliberately omitted when transparency is reduced.
+private struct OrbDepthHighlight: View {
+    let size: CGFloat
+    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
+
+    @ViewBuilder
+    var body: some View {
+        if reduceTransparency {
+            EmptyView()
+        } else {
+            Circle()
+                .fill(
+                    RadialGradient(
+                        colors: [Color.white.opacity(0.10), .clear],
+                        center: .topLeading,
+                        startRadius: 0,
+                        endRadius: max(1, size * 0.82)
+                    )
+                )
+                .frame(width: size, height: size)
+                .allowsHitTesting(false)
         }
     }
 }
@@ -216,27 +298,23 @@ struct MonitorOrbView: View {
         let valueSize = max(13, min(30, size * (24 / 90)))
 
         ZStack {
-            PersistentOrbMaterial()
-                .frame(width: size, height: size)
-                .overlay {
-                    Circle().strokeBorder(Color.white.opacity(0.40), lineWidth: 0.8)
-                }
+            PersistentOrbMaterial(size: size)
+            OrbDepthHighlight(size: size)
             Circle()
                 .stroke(presentation.orbTone.color, style: StrokeStyle(lineWidth: ringWidth, lineCap: .round))
                 .frame(width: ringDiameter, height: ringDiameter)
                 .presentationBreathing(presentation.breathes, steadyOpacity: 0.88)
-                .overlay {
-                    Circle()
-                        .strokeBorder(Color.white.opacity(0.20), lineWidth: 0.7)
-                        .frame(width: ringDiameter, height: ringDiameter)
-                }
             Text(MonitorDisplayValue.orbQuota(snapshot))
-                .font(.system(size: valueSize, weight: .bold))
+                .font(.system(size: valueSize, weight: .semibold))
                 .monospacedDigit()
                 .foregroundStyle(.primary)
+                .tracking(-0.15)
                 .minimumScaleFactor(0.72)
         }
-        .frame(width: size, height: size)
+        .frame(
+            width: size + FloatingOrbSurfaceConfiguration.shadowInset * 2,
+            height: size + FloatingOrbSurfaceConfiguration.shadowInset * 2
+        )
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(String(format: L10n.tr("accessibility.orb"), MonitorDisplayValue.state(presentation), MonitorDisplayValue.orbQuota(snapshot)))
         .accessibilityHint(L10n.tr("accessibility.orbHint"))
@@ -245,18 +323,19 @@ struct MonitorOrbView: View {
 
 struct MenuStatusCapsuleView: View {
     @ObservedObject var model: MonitorAppModel
+    @ObservedObject var preferences: MonitorPreferences
 
     var body: some View {
-        let presentation = model.presentation
+        let presentation = model.presentation(using: preferences)
         let dots = presentation.dots
-        HStack(spacing: 5) {
+        HStack(spacing: 6) {
             ForEach(Array(dots.enumerated()), id: \.offset) { _, dot in
                 dotView(dot)
             }
         }
         .frame(width: 48, height: 22)
         .background(PersistentGlassCapsule())
-        .overlay(Capsule().strokeBorder(Color.white.opacity(0.74), lineWidth: 0.7))
+        .overlay(Capsule().strokeBorder(Color.primary.opacity(0.18), lineWidth: 0.6))
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(String(format: L10n.tr("accessibility.menuStatus"), MonitorDisplayValue.state(presentation)))
     }
@@ -290,13 +369,11 @@ struct MonitorValueRow: View {
 
 struct MonitorSectionTitle: View {
     let title: String
-    var body: some View {
-        Text(title).font(.system(size: 15, weight: .semibold)).foregroundStyle(.primary)
-    }
+    var body: some View { Text(title).font(.system(size: 15, weight: .semibold)).foregroundStyle(.primary) }
 }
 
 struct MonitorDivider: View {
-    var body: some View { Rectangle().fill(Color.primary.opacity(0.12)).frame(height: 1) }
+    var body: some View { Rectangle().fill(Color(nsColor: .separatorColor).opacity(0.72)).frame(height: 0.5) }
 }
 
 enum MonitorDisplayValue {
@@ -327,32 +404,40 @@ enum MonitorDisplayValue {
         snapshot?.account.plan?.capitalized ?? availability(snapshot?.account.availability)
     }
 
-    static func todayUsage(_ snapshot: MonitorRuntimeSnapshot?) -> String {
-        guard snapshot?.usage.availability == .available,
-              let value = snapshot?.usage.usage?.dailyBuckets?.last?.tokens else {
-            return availability(snapshot?.usage.availability)
-        }
-        return summaryTokenFormat(Int64(value))
-    }
-
-    static func last30DaysUsage(_ snapshot: MonitorRuntimeSnapshot?) -> String {
+    /// "Today" is a local calendar day and is read from the exact same
+    /// normalized daily bucket collection rendered by the 30-day chart.
+    /// Do not substitute a rolling-session or lifetime summary here.
+    static func todayUsage(
+        _ snapshot: MonitorRuntimeSnapshot?,
+        now: Date = Date(),
+        calendar: Calendar = .autoupdatingCurrent,
+        languageCode: String? = nil
+    ) -> String {
         guard snapshot?.usage.availability == .available,
               let buckets = snapshot?.usage.usage?.dailyBuckets else {
             return availability(snapshot?.usage.availability)
         }
-        return summaryTokenFormat(Int64(buckets.reduce(0) { $0 + $1.tokens }))
+        let localToday = LocalUsageDateKey.value(for: now, calendar: calendar)
+        guard let bucket = buckets.first(where: { $0.startDate == localToday }),
+              let tokens = bucket.authoritativeTokens else {
+            return "--"
+        }
+        return summaryTokenFormat(Int64(tokens), languageCode: languageCode)
+    }
+
+    static func last30DaysUsage(_ snapshot: MonitorRuntimeSnapshot?, languageCode: String? = nil) -> String {
+        guard snapshot?.usage.availability == .available,
+              let buckets = snapshot?.usage.usage?.dailyBuckets else {
+            return availability(snapshot?.usage.availability)
+        }
+        return summaryTokenFormat(Int64(buckets.compactMap(\.authoritativeTokens).reduce(0, +)), languageCode: languageCode)
     }
 
     static func remainingQuota(_ snapshot: MonitorRuntimeSnapshot?) -> String {
-        let windows: [(RateLimitWindow?, MonitorDataAvailability)] = [
-            (snapshot?.quota.primary, snapshot?.quota.primaryAvailability ?? .unavailable),
-            (snapshot?.quota.secondary, snapshot?.quota.secondaryAvailability ?? .unavailable)
-        ]
-        let remaining = windows.compactMap { window, availability -> Double? in
-            guard availability == .available, let used = window?.usedPercent else { return nil }
-            return min(max(100 - used, 0), 100)
-        }.min()
-        return remaining.map { String(format: "%.0f%%", $0) } ?? availability(snapshot?.quota.primaryAvailability)
+        guard let selected = selectedQuotaWindow(snapshot) else {
+            return availability(snapshot?.quota.primaryAvailability)
+        }
+        return String(format: "%.0f%%", selected.remaining)
     }
 
     static func orbQuota(_ snapshot: MonitorRuntimeSnapshot?) -> String {
@@ -362,6 +447,29 @@ enum MonitorDisplayValue {
 
     static func reset(_ snapshot: MonitorRuntimeSnapshot?) -> String {
         snapshot?.resetInformation.count.map(String.init) ?? availability(snapshot?.resetInformation.countAvailability)
+    }
+
+    /// Presentation-only counterpart to the Orb's existing "most restricted"
+    /// quota rule. Keeping the actual selected window here makes every quota
+    /// surface (including its reset time) refer to one authoritative window.
+    static func selectedQuotaWindow(_ snapshot: MonitorRuntimeSnapshot?) -> (window: RateLimitWindow, remaining: Double)? {
+        let candidates: [(window: RateLimitWindow, remaining: Double, order: Int)] = [
+            (snapshot?.quota.primary, snapshot?.quota.primaryAvailability ?? .unavailable),
+            (snapshot?.quota.secondary, snapshot?.quota.secondaryAvailability ?? .unavailable)
+        ].enumerated().compactMap { index, candidate in
+            guard candidate.1 == .available,
+                  let window = candidate.0,
+                  let used = window.usedPercent else { return nil }
+            return (window, min(max(100 - used, 0), 100), index)
+        }
+        guard let selected = candidates.min(by: {
+            $0.remaining == $1.remaining ? $0.order < $1.order : $0.remaining < $1.remaining
+        }) else { return nil }
+        return (selected.window, selected.remaining)
+    }
+
+    static func quotaResetDate(_ snapshot: MonitorRuntimeSnapshot?, now: Date = Date(), languageCode: String? = nil) -> String {
+        QuotaResetPresentation.text(for: selectedQuotaWindow(snapshot)?.window, now: now, languageCode: languageCode)
     }
 
     static func state(_ snapshot: MonitorRuntimeSnapshot?) -> String {
@@ -391,6 +499,17 @@ enum MonitorDisplayValue {
 
     static func taskTitle(_ snapshot: MonitorRuntimeSnapshot?) -> String {
         taskTitleForPresentation(snapshot?.currentThread?.taskTitle)
+    }
+
+    /// Idle has no active task attribution. Keep the brief completed
+    /// retention useful, but never present a historical title as an idle task.
+    static func quickViewTaskTitle(_ snapshot: MonitorRuntimeSnapshot?) -> String {
+        guard let snapshot else { return L10n.tr("activity.noSession") }
+        if snapshot.currentState != .completed,
+           (snapshot.currentState == .idle || snapshot.currentThread?.activeTurnID == nil) {
+            return L10n.tr("activity.currentTask")
+        }
+        return taskTitle(snapshot)
     }
 
     /// Desktop-provided titles are presentation data, not trusted source text.
@@ -424,7 +543,7 @@ enum MonitorDisplayValue {
     static func modelRuntime(_ snapshot: MonitorRuntimeSnapshot?) -> String {
         let model = snapshot?.currentThread?.model ?? String(format: L10n.tr("model.unknown"), L10n.unknown)
         guard let since = snapshot?.currentStateSince else { return "\(model) · \(L10n.tr("runtime.unknown"))" }
-        let seconds = max(0, Int(Date().timeIntervalSince(since)))
+        let seconds = snapshot?.currentState == .idle ? 0 : max(0, Int(Date().timeIntervalSince(since)))
         return "\(model) · \(L10n.tr("runtime.label")) \(duration(seconds))"
     }
 
@@ -439,6 +558,7 @@ enum MonitorDisplayValue {
         switch source {
         case .desktopLocal: return "Desktop Local"
         case .approvalLocal: return "Approval Local"
+        case .approvalAccessibility: return "Approval Accessibility"
         case .account: return "Account"
         }
     }
@@ -492,5 +612,50 @@ enum MonitorDisplayValue {
 
     private static func duration(_ seconds: Int) -> String {
         String(format: "%d:%02d", seconds / 60, seconds % 60)
+    }
+}
+
+enum QuotaResetPresentation {
+    /// An epoch/default value is not an authoritative reset date.
+    private static let earliestValidReset = Date(timeIntervalSince1970: 1_577_836_800) // 2020-01-01 UTC
+
+    static func text(for window: RateLimitWindow?, now: Date = Date(), languageCode: String? = nil) -> String {
+        guard let window, let resetAt = window.resetsAt, resetAt >= earliestValidReset else { return "--" }
+        let language = languageCode ?? L10n.resolvedLanguage
+        let label = windowLabel(minutes: window.windowDurationMinutes, languageCode: language)
+        let date = resetDate(resetAt, now: now, languageCode: language)
+        guard let label else { return date }
+        return "\(label) · \(date)"
+    }
+
+    private static func windowLabel(minutes: Int?, languageCode: String) -> String? {
+        guard let minutes, minutes > 0 else { return nil }
+        switch minutes {
+        case 1_380...1_500:
+            return L10n.tr("quota.window.daily", languageCode: languageCode)
+        case 9_900...10_260:
+            return L10n.tr("quota.window.weekly", languageCode: languageCode)
+        case 40_000...46_000:
+            return L10n.tr("quota.window.monthly", languageCode: languageCode)
+        case 1..<1_440 where minutes % 60 == 0:
+            return String(format: L10n.tr("quota.window.hours", languageCode: languageCode), minutes / 60)
+        default:
+            return nil
+        }
+    }
+
+    private static func resetDate(_ date: Date, now: Date, languageCode: String) -> String {
+        let locale = Locale(identifier: languageCode)
+        let formatter = DateFormatter()
+        formatter.locale = locale
+        formatter.timeZone = .current
+        if Calendar.current.isDate(date, inSameDayAs: now) {
+            formatter.setLocalizedDateFormatFromTemplate("Hm")
+        } else if languageCode.hasPrefix("zh") {
+            formatter.dateFormat = "MM.dd"
+        } else {
+            formatter.setLocalizedDateFormatFromTemplate("MMMd")
+        }
+        return formatter.string(from: date)
     }
 }

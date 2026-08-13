@@ -11,10 +11,13 @@ final class FloatingStatusPanelController: NSObject, ObservableObject, NSWindowD
     private let actions: MonitorSurfaceActions
     private var hasPlacedPanel = false
     private var liveResizeCenter: CGPoint?
+    private let quickViewAutoDismissDelay: Duration
+    private var quickViewDismissTask: Task<Void, Never>?
 
-    init(localization: LocalizationController, actions: MonitorSurfaceActions) {
+    init(localization: LocalizationController, actions: MonitorSurfaceActions, quickViewAutoDismissDelay: Duration = QuickViewInteractionContract.automaticDismissDelay) {
         self.localization = localization
         self.actions = actions
+        self.quickViewAutoDismissDelay = quickViewAutoDismissDelay
         super.init()
     }
 
@@ -27,11 +30,12 @@ final class FloatingStatusPanelController: NSObject, ObservableObject, NSWindowD
     }
 
     func hide() {
-        quickView?.orderOut(nil)
+        hideQuickView()
         panel?.orderOut(nil)
     }
 
     func closeAll() {
+        cancelQuickViewAutoDismiss()
         quickView?.close()
         panel?.close()
         quickView = nil
@@ -40,39 +44,45 @@ final class FloatingStatusPanelController: NSObject, ObservableObject, NSWindowD
     }
 
     func toggleQuickView(model: MonitorAppModel) {
-        guard let panel else { return }
-        if quickView?.isVisible == true {
-            quickView?.orderOut(nil)
-            return
-        }
+        guard let panel, let preferences else { return }
 
         let screen = panel.screen?.visibleFrame ?? NSScreen.main?.visibleFrame ?? .zero
         let frame = FloatingPanelLayout.quickViewFrame(
-            orbFrame: panel.frame,
+            orbFrame: visibleOrbFrame(for: panel),
             desiredSize: FloatingOrbSurfaceConfiguration.quickViewSize,
             visibleFrame: screen
         )
+        if let quickView {
+            quickView.level = preferences.alwaysOnTop ? .floating : .normal
+            quickView.setFrame(frame, display: true)
+            quickView.orderFrontRegardless()
+            scheduleQuickViewAutoDismiss()
+            return
+        }
         let quick = NSPanel(
             contentRect: frame,
             styleMask: [.borderless, .nonactivatingPanel],
             backing: .buffered,
             defer: false
         )
-        quick.level = preferences?.alwaysOnTop == true ? .floating : .normal
+        quick.level = preferences.alwaysOnTop ? .floating : .normal
         quick.isOpaque = false
         quick.backgroundColor = .clear
         quick.hasShadow = false
         quick.isReleasedWhenClosed = false
         quick.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
-        quick.contentView = NSHostingView(rootView: LocalizedRoot(localization: localization) { QuickView(model: model) })
+        quick.contentView = NSHostingView(rootView: LocalizedRoot(localization: localization) { QuickView(model: model, preferences: preferences) })
         DiagnosticEvent.record(.localization, ["event": "quickViewFirstCreation", "resolvedLocale": L10n.resolvedLanguage])
         quick.orderFrontRegardless()
         quickView = quick
+        scheduleQuickViewAutoDismiss()
     }
 
-    func windowWillMove(_ notification: Notification) {
-        quickView?.orderOut(nil)
-    }
+    /// Narrow lifecycle seam for the product regression test. The panel stays
+    /// owned by this controller and is never exposed to SwiftUI.
+    var quickViewForTesting: NSPanel? { quickView }
+
+    func windowWillMove(_ notification: Notification) { hideQuickView() }
 
     func windowDidMove(_ notification: Notification) { persistFrame() }
     func windowWillStartLiveResize(_ notification: Notification) {
@@ -82,13 +92,13 @@ final class FloatingStatusPanelController: NSObject, ObservableObject, NSWindowD
     func windowDidEndLiveResize(_ notification: Notification) {
         guard let panel else { return }
         if let center = liveResizeCenter {
-            let size = MonitorPreferences.clampedSize(panel.frame.width)
+            let size = MonitorPreferences.clampedSize(panel.frame.width - FloatingOrbSurfaceConfiguration.shadowInset * 2)
             let origin = FloatingPanelLayout.centerPreservingOrigin(
                 center: center,
-                size: CGSize(width: size, height: size),
+                size: FloatingOrbSurfaceConfiguration.hostSize(forOrbSize: size),
                 screens: NSScreen.screens.map(\.visibleFrame)
             )
-            panel.setFrame(NSRect(origin: origin, size: CGSize(width: size, height: size)), display: true)
+            panel.setFrame(NSRect(origin: origin, size: FloatingOrbSurfaceConfiguration.hostSize(forOrbSize: size)), display: true)
         }
         liveResizeCenter = nil
         persistFrame()
@@ -97,7 +107,7 @@ final class FloatingStatusPanelController: NSObject, ObservableObject, NSWindowD
     private func createPanel(model: MonitorAppModel, preferences: MonitorPreferences) {
         let size = preferences.orbSize
         let panel = NSPanel(
-            contentRect: NSRect(origin: .zero, size: CGSize(width: size, height: size)),
+            contentRect: NSRect(origin: .zero, size: FloatingOrbSurfaceConfiguration.hostSize(forOrbSize: size)),
             styleMask: [.borderless, .nonactivatingPanel, .resizable],
             backing: .buffered,
             defer: false
@@ -141,30 +151,32 @@ final class FloatingStatusPanelController: NSObject, ObservableObject, NSWindowD
         panel.level = preferences.alwaysOnTop ? .floating : .normal
         panel.isMovableByWindowBackground = !preferences.lockPosition
         let size = MonitorPreferences.clampedSize(preferences.orbSize)
+        let hostSize = FloatingOrbSurfaceConfiguration.hostSize(forOrbSize: size)
         let screenFrames = NSScreen.screens.map(\.visibleFrame)
-        let origin: CGPoint
+        let orbOrigin: CGPoint
         if hasPlacedPanel {
-            let current = panel.frame
+            let current = visibleOrbFrame(for: panel)
             if abs(current.width - size) > 0.5 {
                 // Live preference changes retain the screen-space center.
-                origin = FloatingPanelLayout.centerPreservingOrigin(
+                orbOrigin = FloatingPanelLayout.centerPreservingOrigin(
                     center: CGPoint(x: current.midX, y: current.midY),
                     size: CGSize(width: size, height: size),
                     screens: screenFrames
                 )
             } else {
-                origin = current.origin
+                orbOrigin = current.origin
             }
         } else {
-            origin = preferences.orbOrigin ?? CGPoint(
+            orbOrigin = preferences.orbOrigin ?? CGPoint(
                 x: (NSScreen.main?.visibleFrame.maxX ?? 300) - size - 24,
                 y: (NSScreen.main?.visibleFrame.midY ?? 300) - size / 2
             )
         }
+        let clampedOrbOrigin = FloatingPanelLayout.clampedOrigin(orbOrigin, size: CGSize(width: size, height: size), screens: screenFrames)
         panel.setFrame(
             NSRect(
-                origin: FloatingPanelLayout.clampedOrigin(origin, size: CGSize(width: size, height: size), screens: screenFrames),
-                size: CGSize(width: size, height: size)
+                origin: CGPoint(x: clampedOrbOrigin.x - FloatingOrbSurfaceConfiguration.shadowInset, y: clampedOrbOrigin.y - FloatingOrbSurfaceConfiguration.shadowInset),
+                size: hostSize
             ),
             display: true
         )
@@ -173,14 +185,42 @@ final class FloatingStatusPanelController: NSObject, ObservableObject, NSWindowD
 
     private func persistFrame() {
         guard let panel, let preferences else { return }
-        let size = MonitorPreferences.clampedSize(panel.frame.width)
+        let size = MonitorPreferences.clampedSize(panel.frame.width - FloatingOrbSurfaceConfiguration.shadowInset * 2)
         preferences.orbSize = size
         let origin = FloatingPanelLayout.clampedOrigin(
-            panel.frame.origin,
+            visibleOrbFrame(for: panel).origin,
             size: CGSize(width: size, height: size),
             screens: NSScreen.screens.map(\.visibleFrame)
         )
         preferences.orbOrigin = origin
+    }
+
+    private func visibleOrbFrame(for panel: NSPanel) -> CGRect {
+        panel.frame.insetBy(dx: FloatingOrbSurfaceConfiguration.shadowInset, dy: FloatingOrbSurfaceConfiguration.shadowInset)
+    }
+
+    private func scheduleQuickViewAutoDismiss() {
+        cancelQuickViewAutoDismiss()
+        let delay = quickViewAutoDismissDelay
+        quickViewDismissTask = Task { [weak self, delay] in
+            do {
+                try await Task.sleep(for: delay)
+            } catch {
+                return
+            }
+            guard !Task.isCancelled else { return }
+            self?.hideQuickView()
+        }
+    }
+
+    private func cancelQuickViewAutoDismiss() {
+        quickViewDismissTask?.cancel()
+        quickViewDismissTask = nil
+    }
+
+    private func hideQuickView() {
+        cancelQuickViewAutoDismiss()
+        quickView?.orderOut(nil)
     }
 
     private func makeContextMenu() -> NSMenu {
@@ -255,7 +295,7 @@ struct FloatingOrbRoot: View {
     let action: () -> Void
 
     var body: some View {
-        MonitorOrbView(snapshot: model.snapshot, presentation: model.presentation, size: preferences.orbSize)
+        MonitorOrbView(snapshot: model.snapshot, presentation: model.presentation(using: preferences), size: preferences.orbSize)
             .contentShape(Circle())
             .onTapGesture(perform: action)
     }
@@ -263,52 +303,60 @@ struct FloatingOrbRoot: View {
 
 private struct QuickView: View {
     @ObservedObject var model: MonitorAppModel
+    @ObservedObject var preferences: MonitorPreferences
     @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
 
     var body: some View {
         let snapshot = model.snapshot
-        let presentation = model.presentation
+        let presentation = model.presentation(using: preferences)
         GlassSurface(cornerRadius: 22, shadow: false) {
             VStack(alignment: .leading, spacing: 0) {
                 HStack(alignment: .firstTextBaseline, spacing: 8) {
                     Text("Codex")
                         .font(.system(size: 17, weight: .semibold))
+                        .tracking(-0.15)
                     Spacer(minLength: 8)
                     Text(MonitorDisplayValue.update(snapshot))
-                        .font(.system(size: 12))
+                        .font(.system(size: 11, weight: .medium))
                         .foregroundStyle(.secondary)
                 }
                 HStack(spacing: 6) {
                     Circle().fill(presentation.orbTone.color).frame(width: 7, height: 7)
                     Text(MonitorDisplayValue.state(presentation))
-                        .font(.system(size: 15, weight: .semibold))
+                        .font(.system(size: 14, weight: .semibold))
                 }
                 .padding(.top, 5)
 
-                Text(MonitorDisplayValue.taskTitle(snapshot))
+                Text(MonitorDisplayValue.quickViewTaskTitle(snapshot))
                     .font(.system(size: 14, weight: .medium))
                     .lineLimit(1)
-                    .padding(.top, 14)
+                    .padding(.top, 12)
                 Text(MonitorDisplayValue.activity(snapshot))
                     .font(.system(size: 12))
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
                     .padding(.top, 3)
-
-                MonitorDivider().padding(.vertical, 14)
+                MonitorDivider().padding(.vertical, 12)
 
                 Text(MonitorDisplayValue.modelRuntime(snapshot))
-                    .font(.system(size: 12))
+                    .font(.system(size: 11, weight: .medium))
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
                 Text(String(format: L10n.tr("session.tokenQuota"), MonitorDisplayValue.token(snapshot), MonitorDisplayValue.orbQuota(snapshot)))
-                    .font(.system(size: 12, weight: .medium))
+                    .font(.system(size: 11, weight: .semibold))
                     .foregroundStyle(.secondary)
+                    .monospacedDigit()
                     .lineLimit(1)
-                    .padding(.top, 7)
+                    .padding(.top, 6)
+                Text("\(L10n.tr("label.quotaReset"))  \(MonitorDisplayValue.quotaResetDate(snapshot))")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .monospacedDigit()
+                    .lineLimit(1)
+                    .padding(.top, 6)
             }
             .padding(.horizontal, 16)
-            .padding(.vertical, 15)
+            .padding(.vertical, 16)
         }
         .frame(width: 350, height: 214)
         .accessibilityElement(children: .combine)

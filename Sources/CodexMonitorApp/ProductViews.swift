@@ -1,4 +1,5 @@
 import Charts
+import AppKit
 import SwiftUI
 import CodexMonitorContracts
 
@@ -13,7 +14,7 @@ struct MenuBarPopoverView: View {
 
     var body: some View {
         let snapshot = model.snapshot
-        let presentation = model.presentation
+        let presentation = model.presentation(using: preferences)
         Group {
             if let maximumContentHeight {
                 ScrollView {
@@ -38,33 +39,58 @@ struct MenuBarPopoverView: View {
                 HStack(alignment: .top, spacing: 10) {
                     Circle().fill(presentation.orbTone.color).frame(width: 8, height: 8).padding(.top, 5)
                     VStack(alignment: .leading, spacing: 3) {
-                        Text(MonitorDisplayValue.state(presentation)).font(.system(size: 17, weight: .semibold))
-                        Text(MonitorDisplayValue.activity(snapshot)).font(.system(size: 12)).foregroundStyle(.secondary).lineLimit(1)
+                        Text(MonitorDisplayValue.state(presentation))
+                            .font(.system(size: 16, weight: .semibold))
+                            .tracking(-0.1)
+                        Text(MonitorDisplayValue.activity(snapshot))
+                            .font(.system(size: 12))
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
                     }
                     Spacer(minLength: 6)
-                    Text(MonitorDisplayValue.update(snapshot)).font(.system(size: 11)).foregroundStyle(.tertiary).multilineTextAlignment(.trailing)
+                    Text(MonitorDisplayValue.update(snapshot))
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(.tertiary)
+                        .multilineTextAlignment(.trailing)
                 }
 
-                MonitorDivider().padding(.vertical, 14)
+                MonitorDivider().padding(.vertical, 12)
 
                 // Block 2 — information only.
-                VStack(alignment: .leading, spacing: 8) {
+                VStack(alignment: .leading, spacing: 9) {
                     MonitorPopoverRow(label: L10n.tr("label.account"), value: MonitorDisplayValue.account(snapshot, hidden: preferences.hideAccountInfo))
                     MonitorPopoverRow(label: L10n.tr("label.plan"), value: MonitorDisplayValue.plan(snapshot))
                     MonitorPopoverRow(label: L10n.tr("label.quota"), value: MonitorDisplayValue.remainingQuota(snapshot))
+                    MonitorPopoverRow(label: L10n.tr("label.resetDate"), value: MonitorDisplayValue.quotaResetDate(snapshot))
                     MonitorPopoverRow(label: L10n.tr("label.resetCredit"), value: MonitorDisplayValue.reset(snapshot))
+                    if let quotaNotice = quotaNotice(snapshot) {
+                        Text(quotaNotice)
+                            .font(.system(size: 12, weight: .medium))
+                            .foregroundStyle(QuotaCapsuleHealth.resolve(snapshot: snapshot, warningEnabled: preferences.quotaWarningEnabled, threshold: preferences.quotaWarningThreshold) == .exhausted ? VisualStateTone.red.color : VisualStateTone.yellow.color)
+                    }
                 }
 
-                MonitorDivider().padding(.vertical, 14)
+                MonitorDivider().padding(.vertical, 12)
 
                 // Block 3 — every row is one full-width native Button target.
-                VStack(spacing: 4) {
+                VStack(spacing: 2) {
                     if preferences.showUsageMenu { PopoverActionRow(title: L10n.tr("menu.usage"), symbol: "chart.bar", action: actions.showUsage) }
                     if preferences.showSettingsMenu { PopoverActionRow(title: L10n.tr("menu.settings"), symbol: "gearshape", action: actions.showSettings) }
                     PopoverActionRow(title: L10n.tr(preferences.showOrb ? "menu.hideFloating" : "menu.showFloating"), symbol: preferences.showOrb ? "eye.slash" : "eye", action: actions.toggleOrb)
                     PopoverActionRow(title: L10n.tr("menu.openCodex"), symbol: "arrow.up.right.square", action: actions.openCodex)
                     PopoverActionRow(title: L10n.tr("menu.quitMonitor"), symbol: "power", action: actions.quit)
                 }
+        }
+    }
+
+    private func quotaNotice(_ snapshot: MonitorRuntimeSnapshot?) -> String? {
+        switch QuotaCapsuleHealth.resolve(snapshot: snapshot, warningEnabled: preferences.quotaWarningEnabled, threshold: preferences.quotaWarningThreshold) {
+        case .warning:
+            return String(format: L10n.tr("quota.warningActive"), MonitorDisplayValue.remainingQuota(snapshot))
+        case .exhausted:
+            return L10n.tr("quota.exhausted")
+        case .sufficient, .unknown:
+            return nil
         }
     }
 }
@@ -81,8 +107,11 @@ struct PopoverActionRow: View {
     var body: some View {
         Button(action: action) {
             HStack(spacing: 10) {
-                Image(systemName: symbol).frame(width: 16).imageScale(.small)
-                Text(title).font(.system(size: 13))
+                Image(systemName: symbol)
+                    .frame(width: 18)
+                    .imageScale(.small)
+                    .foregroundStyle(.secondary)
+                Text(title).font(.system(size: 13, weight: .medium))
                 Spacer(minLength: 0)
             }
             .frame(maxWidth: .infinity, minHeight: UIInteractionContract.minimumActionRowHeight, alignment: .leading)
@@ -119,9 +148,15 @@ private struct MonitorPopoverRow: View {
     let value: String
     var body: some View {
         HStack(alignment: .firstTextBaseline) {
-            Text(label).font(.system(size: 13)).foregroundStyle(.secondary)
+            Text(label)
+                .font(.system(size: 13))
+                .foregroundStyle(.secondary)
             Spacer()
-            Text(value).font(.system(size: 13, weight: .medium)).lineLimit(1)
+            Text(value)
+                .font(.system(size: 13, weight: .medium))
+                .monospacedDigit()
+                .frame(minWidth: 104, alignment: .trailing)
+                .lineLimit(1)
         }
         .accessibilityElement(children: .combine)
     }
@@ -134,7 +169,7 @@ struct UsageWindowView: View {
     var body: some View {
         let snapshot = model.snapshot
         ScrollView {
-            VStack(alignment: .leading, spacing: 16) {
+            VStack(alignment: .leading, spacing: 20) {
                 UsageFactSection(title: L10n.tr("label.account")) {
                     UsageFactRow(label: L10n.tr("label.account"), value: MonitorDisplayValue.account(snapshot, hidden: preferences.hideAccountInfo))
                     UsageFactRow(label: L10n.tr("label.plan"), value: MonitorDisplayValue.plan(snapshot))
@@ -149,11 +184,11 @@ struct UsageWindowView: View {
                 }
                 VStack(alignment: .leading, spacing: 12) {
                     MonitorSectionTitle(title: L10n.tr("label.tokenUsage"))
-                    UsageMetricGrid(snapshot: snapshot)
-                    UsageHistoryChart(snapshot: snapshot)
+                    UsageMetricGrid(snapshot: snapshot, localUsage: model.localUsage)
+                    UsageHistoryChart(snapshot: snapshot, localUsage: model.localUsage)
                 }
             }
-            .padding(18)
+            .padding(20)
             .frame(maxWidth: 560, alignment: .leading)
         }
         .frame(minWidth: 500, minHeight: 460)
@@ -170,10 +205,9 @@ private struct UsageFactSection<Content: View>: View {
     let title: String
     @ViewBuilder let content: Content
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: 12) {
             MonitorSectionTitle(title: title)
             VStack(alignment: .leading, spacing: 8) { content }
-                .padding(.vertical, 2)
         }
     }
 }
@@ -192,14 +226,22 @@ private struct UsageFactRow: View {
 
 private struct UsageMetricGrid: View {
     let snapshot: MonitorRuntimeSnapshot?
+    let localUsage: LocalUsageLedgerSnapshot?
     var body: some View {
+        let hybrid = HybridUsageComposer.compose(
+            accountDailyBuckets: snapshot?.usage.usage?.dailyBuckets,
+            accountAvailability: snapshot?.usage.availability ?? .unknown,
+            localLedger: localUsage
+        )
         LazyVGrid(columns: [GridItem(.flexible(), spacing: 0), GridItem(.flexible(), spacing: 0)], spacing: 0) {
-            UsageMetric(title: L10n.tr("label.todayCost"), value: "$--")
-            UsageMetric(title: L10n.tr("label.last30DaysCost"), value: "$--")
-            UsageMetric(title: L10n.tr("label.todayToken"), value: MonitorDisplayValue.todayUsage(snapshot))
-            UsageMetric(title: L10n.tr("label.last30DaysToken"), value: MonitorDisplayValue.last30DaysUsage(snapshot))
+            UsageMetric(title: L10n.tr("label.todayCost"), value: LocalUsagePresentation.estimatedCost(localUsage?.today?.estimatedCostUSD))
+            // A partial local 30-day cost cannot truthfully occupy the
+            // account-scoped 30-day cost slot.
+            UsageMetric(title: L10n.tr("label.last30DaysCost"), value: LocalUsagePresentation.estimatedCost(hybrid?.headlineEstimatedCostUSD))
+            UsageMetric(title: L10n.tr("label.todayToken"), value: localUsage?.today.map { MonitorDisplayValue.summaryTokenFormat($0.totalTokens) } ?? "--")
+            UsageMetric(title: L10n.tr("label.last30DaysToken"), value: hybrid?.headlineTokens.map { MonitorDisplayValue.summaryTokenFormat($0) } ?? "--")
         }
-        .background(Color(nsColor: .controlBackgroundColor).opacity(0.42), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .background(Color(nsColor: .controlBackgroundColor).opacity(0.28), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
     }
 }
 
@@ -208,25 +250,38 @@ private struct UsageMetric: View {
     let value: String
     var body: some View {
         VStack(alignment: .leading, spacing: 5) {
-            Text(title).font(.system(size: 12)).foregroundStyle(.secondary)
-            Text(value).font(.system(size: 20, weight: .semibold)).monospacedDigit().lineLimit(1).minimumScaleFactor(0.7)
+            Text(title)
+                .font(.system(size: 11, weight: .medium))
+                .foregroundStyle(.secondary)
+            Text(value)
+                .font(.system(size: 19, weight: .semibold))
+                .monospacedDigit()
+                .lineLimit(1)
+                .minimumScaleFactor(0.7)
         }
         .frame(maxWidth: .infinity, minHeight: 72, alignment: .leading)
-        .padding(.horizontal, 15)
-        .overlay(alignment: .trailing) { Rectangle().fill(Color.primary.opacity(0.08)).frame(width: 1) }
+        .padding(.horizontal, 16)
+        .overlay(alignment: .trailing) { Rectangle().fill(Color(nsColor: .separatorColor).opacity(0.42)).frame(width: 0.5) }
     }
 }
 
 private struct UsageHistoryChart: View {
     let snapshot: MonitorRuntimeSnapshot?
-    @State private var selectedBucket: AccountUsageDailyBucket?
+    let localUsage: LocalUsageLedgerSnapshot?
+    @State private var selectedBucket: HybridUsageDay?
 
     var body: some View {
-        let buckets = snapshot?.usage.availability == .available ? snapshot?.usage.usage?.dailyBuckets : nil
+        let buckets = HybridUsageComposer.compose(
+            accountDailyBuckets: snapshot?.usage.usage?.dailyBuckets,
+            accountAvailability: snapshot?.usage.availability ?? .unknown,
+            localLedger: localUsage
+        )?.days
         VStack(alignment: .leading, spacing: 8) {
-            Text(L10n.tr("label.last30CalendarDays")).font(.system(size: 13, weight: .medium))
+            Text(L10n.tr("label.last30CalendarDays"))
+                .font(.system(size: 13, weight: .medium))
             if let buckets {
                 interactiveChart(buckets)
+                UsageModelBreakdown(day: localDay(for: selectedBucket ?? buckets.last))
             } else {
                 HStack(alignment: .bottom, spacing: 3) {
                     ForEach(0..<30, id: \.self) { _ in Capsule().fill(Color.secondary.opacity(0.16)).frame(maxWidth: .infinity).frame(height: 3) }
@@ -240,14 +295,22 @@ private struct UsageHistoryChart: View {
         .accessibilityLabel(buckets == nil ? L10n.tr("usage.historyUnavailable") : L10n.tr("label.last30CalendarDays"))
     }
 
+    private func localDay(for selected: HybridUsageDay?) -> LocalUsageDay? {
+        guard let selected,
+              localUsage?.availability == .available,
+              let local = localUsage?.day(named: selected.dateKey),
+              !local.models.isEmpty else { return nil }
+        return local
+    }
+
     @ViewBuilder
-    private func interactiveChart(_ buckets: [AccountUsageDailyBucket]) -> some View {
+    private func interactiveChart(_ buckets: [HybridUsageDay]) -> some View {
         Chart(buckets) { bucket in
             BarMark(
-                x: .value("Date", bucket.startDate),
-                y: .value("Token", bucket.tokens)
+                x: .value("Date", bucket.dateKey),
+                y: .value("Token", bucket.chartTokens)
             )
-            .foregroundStyle(Color.accentColor.opacity(selectedBucket?.id == bucket.id ? 0.92 : 0.58))
+            .foregroundStyle(chartColor(for: bucket))
             .clipShape(RoundedRectangle(cornerRadius: 2, style: .continuous))
         }
         .chartXAxis(.hidden)
@@ -259,15 +322,15 @@ private struct UsageHistoryChart: View {
                         switch phase {
                         case .active(let location):
                             let plotX = location.x
-                            let selected: AccountUsageDailyBucket?
+                            let selected: HybridUsageDay?
                             if let date: String = proxy.value(atX: plotX, as: String.self),
-                               let exact = buckets.first(where: { $0.startDate == date }) {
+                               let exact = buckets.first(where: { $0.dateKey == date }) {
                                 selected = exact
                             } else {
                                 selected = UsagePresentation.bucket(closestTo: plotX, plotWidth: geometry.size.width, buckets: buckets)
                             }
                             if selectedBucket?.id != selected?.id, let selected {
-                                DiagnosticEvent.record(.usageChart, ["event": "bucketSelected", "bucket": selected.startDate, "tokens": String(selected.tokens)])
+                                DiagnosticEvent.record(.usageChart, ["event": "bucketSelected", "bucket": selected.dateKey, "tokens": String(selected.chartTokens), "provenance": selected.provenance.rawValue])
                             }
                             selectedBucket = selected
                         case .ended:
@@ -292,9 +355,9 @@ private struct UsageHistoryChart: View {
         }
         .frame(height: 164)
         HStack {
-            Text(UsagePresentation.axisDate(buckets.first?.startDate))
+            Text(UsagePresentation.axisDate(buckets.first?.dateKey))
             Spacer()
-            Text(UsagePresentation.axisDate(buckets.last?.startDate))
+            Text(UsagePresentation.axisDate(buckets.last?.dateKey))
         }
         .font(.system(size: 11))
         .foregroundStyle(.secondary)
@@ -302,19 +365,87 @@ private struct UsageHistoryChart: View {
             .font(.system(size: 12))
             .foregroundStyle(.secondary)
     }
+
+    private func chartColor(for bucket: HybridUsageDay) -> Color {
+        switch bucket.provenance {
+        case .authoritativeAccount:
+            return Color.accentColor.opacity(selectedBucket?.id == bucket.id ? 0.92 : 0.58)
+        case .localRealtimeProvisional:
+            return Color.accentColor.opacity(selectedBucket?.id == bucket.id ? 0.74 : 0.42)
+        case .sourceAbsent:
+            return Color.secondary.opacity(0.16)
+        }
+    }
 }
 
 private struct UsageChartTooltip: View {
-    let bucket: AccountUsageDailyBucket
+    let bucket: HybridUsageDay
     var body: some View {
-        Text(UsagePresentation.tooltip(for: bucket))
+        Text(HybridUsagePresentation.tooltip(for: bucket))
             .font(.system(size: 11, weight: .medium))
             .multilineTextAlignment(.leading)
             .padding(.horizontal, 8)
             .padding(.vertical, 6)
-            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 7, style: .continuous))
-            .overlay(RoundedRectangle(cornerRadius: 7, style: .continuous).strokeBorder(Color.primary.opacity(0.12), lineWidth: 0.5))
-            .lineLimit(2)
+            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).strokeBorder(Color(nsColor: .separatorColor).opacity(0.58), lineWidth: 0.5))
+            .lineLimit(3)
+    }
+}
+
+private struct UsageModelBreakdown: View {
+    let day: LocalUsageDay?
+    var body: some View {
+        guard let day else {
+            return AnyView(Text(L10n.tr("usage.noLocalModelAttribution"))
+                .font(.system(size: 12)).foregroundStyle(.secondary))
+        }
+        return AnyView(VStack(alignment: .leading, spacing: 7) {
+            Text(L10n.tr("usage.modelBreakdown"))
+                .font(.system(size: 13, weight: .medium))
+            Text(L10n.tr("usage.localAttribution"))
+                .font(.system(size: 11)).foregroundStyle(.secondary)
+            if day.models.isEmpty {
+                Text(L10n.tr("usage.historyUnavailable")).font(.system(size: 12)).foregroundStyle(.secondary)
+            } else {
+                ForEach(day.models) { model in
+                    HStack(alignment: .firstTextBaseline, spacing: 12) {
+                        Text(model.displayName).font(.system(size: 12, weight: .medium)).lineLimit(1)
+                        Spacer(minLength: 8)
+                        Text(MonitorDisplayValue.summaryTokenFormat(model.totalTokens)).font(.system(size: 12)).monospacedDigit()
+                        Text(LocalUsagePresentation.estimatedCost(model.estimatedCostUSD)).font(.system(size: 12)).foregroundStyle(.secondary).monospacedDigit()
+                    }
+                }
+            }
+            Text(L10n.tr("usage.estimateNote"))
+                .font(.system(size: 11)).foregroundStyle(.secondary)
+        })
+    }
+}
+
+enum LocalUsagePresentation {
+    static func estimatedCost(_ value: Double?) -> String {
+        guard let value, value.isFinite else { return "--" }
+        return String(format: "≈$%.2f", value)
+    }
+
+    static func tooltip(for day: LocalUsageDay, languageCode: String? = nil) -> String {
+        let date = UsagePresentation.axisDate(day.dateKey, languageCode: languageCode)
+        let token = MonitorDisplayValue.preciseTokenFormat(day.totalTokens)
+        let costLabel = L10n.tr("label.todayCost", languageCode: languageCode)
+        return "\(date)\nToken: \(token)\n\(costLabel): \(estimatedCost(day.estimatedCostUSD))"
+    }
+}
+
+enum HybridUsagePresentation {
+    static func tooltip(for day: HybridUsageDay, languageCode: String? = nil) -> String {
+        let date = UsagePresentation.axisDate(day.dateKey, languageCode: languageCode)
+        let token = day.tokens.map(MonitorDisplayValue.preciseTokenFormat) ?? "--"
+        let source = switch day.provenance {
+        case .authoritativeAccount: L10n.tr("usage.accountUsage", languageCode: languageCode)
+        case .localRealtimeProvisional: L10n.tr("usage.localRealtime", languageCode: languageCode)
+        case .sourceAbsent: L10n.tr("usage.accountSourceAbsent", languageCode: languageCode)
+        }
+        return "\(date)\nToken: \(token)\n\(source)"
     }
 }
 
@@ -324,7 +455,7 @@ enum UsagePresentation {
     private static let earliestValidReset = Date(timeIntervalSince1970: 1_577_836_800) // 2020-01-01 UTC
     /// This is the tooltip's rendered frame, not a guessed clamp width. Long
     /// token totals wrap within the same compact native-material surface.
-    static let tooltipSize = CGSize(width: 188, height: 62)
+    static let tooltipSize = CGSize(width: 206, height: 76)
 
     static func resetTime(_ date: Date?, languageCode: String? = nil) -> String {
         guard let date, date >= earliestValidReset else {
@@ -340,7 +471,7 @@ enum UsagePresentation {
         String(
             format: L10n.tr("usage.tooltip", languageCode: languageCode),
             displayDate(bucket.startDate, languageCode: languageCode),
-            MonitorDisplayValue.preciseTokenFormat(Int64(bucket.tokens))
+            bucket.authoritativeTokens.map { MonitorDisplayValue.preciseTokenFormat(Int64($0)) } ?? "--"
         )
     }
 
@@ -350,7 +481,31 @@ enum UsagePresentation {
         return buckets[min(Int(progress * CGFloat(buckets.count)), buckets.count - 1)]
     }
 
+    static func bucket(closestTo x: CGFloat, plotWidth: CGFloat, buckets: [LocalUsageDay]) -> LocalUsageDay? {
+        guard !buckets.isEmpty, plotWidth > 0 else { return nil }
+        let progress = min(max(x / plotWidth, 0), 0.999_999)
+        return buckets[min(Int(progress * CGFloat(buckets.count)), buckets.count - 1)]
+    }
+
+    static func bucket(closestTo x: CGFloat, plotWidth: CGFloat, buckets: [HybridUsageDay]) -> HybridUsageDay? {
+        guard !buckets.isEmpty, plotWidth > 0 else { return nil }
+        let progress = min(max(x / plotWidth, 0), 0.999_999)
+        return buckets[min(Int(progress * CGFloat(buckets.count)), buckets.count - 1)]
+    }
+
     static func tooltipOffset(for bucket: AccountUsageDailyBucket, buckets: [AccountUsageDailyBucket], width: CGFloat) -> CGFloat {
+        guard let index = buckets.firstIndex(where: { $0.id == bucket.id }) else { return 0 }
+        let point = (CGFloat(index) + 0.5) / CGFloat(max(1, buckets.count)) * width
+        return point - tooltipSize.width / 2
+    }
+
+    static func tooltipOffset(for bucket: LocalUsageDay, buckets: [LocalUsageDay], width: CGFloat) -> CGFloat {
+        guard let index = buckets.firstIndex(where: { $0.id == bucket.id }) else { return 0 }
+        let point = (CGFloat(index) + 0.5) / CGFloat(max(1, buckets.count)) * width
+        return point - tooltipSize.width / 2
+    }
+
+    static func tooltipOffset(for bucket: HybridUsageDay, buckets: [HybridUsageDay], width: CGFloat) -> CGFloat {
         guard let index = buckets.firstIndex(where: { $0.id == bucket.id }) else { return 0 }
         let point = (CGFloat(index) + 0.5) / CGFloat(max(1, buckets.count)) * width
         return point - tooltipSize.width / 2
@@ -452,7 +607,7 @@ struct NativeSettingsWindowView: View {
                 }
             }
             .listStyle(.sidebar)
-            .frame(minWidth: 180, idealWidth: 200, maxWidth: 220)
+            .frame(minWidth: 192, idealWidth: 204, maxWidth: 224)
 
             Divider()
 
@@ -476,7 +631,7 @@ struct NativeSettingsWindowView: View {
         case .privacy:
             PrivacySettingsDetail(preferences: preferences)
         case .advanced:
-            AdvancedSettingsDetail(actions: actions)
+            AdvancedSettingsDetail(preferences: preferences, actions: actions)
         case .about:
             AboutSettingsDetail()
         }
@@ -488,10 +643,12 @@ private struct SettingsDetail<Content: View>: View {
     @ViewBuilder let content: Content
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 20) {
-                Text(title).font(.system(size: 15, weight: .semibold))
+            VStack(alignment: .leading, spacing: 16) {
+                Text(title)
+                    .font(.system(size: 16, weight: .semibold))
+                    .tracking(-0.1)
                 VStack(spacing: 0) { content }
-                    .background(Color(nsColor: .controlBackgroundColor).opacity(0.35), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                    .background(Color(nsColor: .controlBackgroundColor).opacity(0.22), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
             }
             .padding(20)
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -511,10 +668,10 @@ private struct SettingsRow<Control: View>: View {
                 .layoutPriority(1)
             Spacer(minLength: 16)
             control
-                .frame(width: 220, alignment: .trailing)
+                .frame(width: 204, alignment: .trailing)
         }
         .padding(.horizontal, 16)
-        .frame(minHeight: 58)
+        .frame(minHeight: 52)
     }
 }
 
@@ -560,9 +717,13 @@ private struct FloatingSettingsDetail: View {
             SettingsRow(title: L10n.tr("settings.alwaysOnTop")) { Toggle("", isOn: $preferences.alwaysOnTop).labelsHidden().toggleStyle(.switch) }
             SettingsRow(title: L10n.tr("settings.lockPosition")) { Toggle("", isOn: $preferences.lockPosition).labelsHidden().toggleStyle(.switch) }
             SettingsRow(title: L10n.tr("settings.floatingSize")) {
-                HStack(spacing: 10) {
+                HStack(spacing: 8) {
                     Slider(value: $preferences.orbSize, in: 72...180)
-                    Text("\(Int(preferences.orbSize.rounded())) pt").foregroundStyle(.secondary).monospacedDigit().frame(width: 48, alignment: .trailing)
+                    Text("\(Int(preferences.orbSize.rounded())) pt")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(.secondary)
+                        .monospacedDigit()
+                        .frame(width: 52, alignment: .trailing)
                 }
             }
             SettingsRow(title: L10n.tr("settings.showUsageMenu")) { Toggle("", isOn: $preferences.showUsageMenu).labelsHidden().toggleStyle(.switch) }
@@ -577,6 +738,7 @@ private struct NotificationSettingsDetail: View {
     let actions: SettingsSystemActions
     var body: some View {
         SettingsDetail(title: L10n.tr("settings.notifications")) {
+            QuotaWarningSettingsRow(preferences: preferences)
             SettingsRow(title: L10n.tr("settings.pauseMonitoring")) {
                 Toggle("", isOn: Binding(get: { preferences.pauseMonitoring }, set: { preferences.pauseMonitoring = $0; actions.setMonitoringPaused($0) }))
                     .labelsHidden().toggleStyle(.switch)
@@ -607,6 +769,54 @@ private struct NotificationSettingsDetail: View {
     }
 }
 
+private struct QuotaWarningSettingsRow: View {
+    @ObservedObject var preferences: MonitorPreferences
+    @State private var dragValue: Double = QuotaWarningThreshold.defaultValue
+    @State private var isEditing = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            SettingsRow(title: L10n.tr("settings.quotaWarning")) {
+                Toggle("", isOn: $preferences.quotaWarningEnabled)
+                    .labelsHidden()
+                    .toggleStyle(.switch)
+            }
+            Text(String(format: L10n.tr("settings.quotaWarningDescription"), Int(preferences.quotaWarningThreshold)))
+                .font(.system(size: 12))
+                .foregroundStyle(.secondary)
+                .padding(.horizontal, 16)
+            HStack(spacing: 8) {
+                Slider(
+                    value: Binding(
+                        get: { isEditing ? dragValue : preferences.quotaWarningThreshold },
+                        set: { value in
+                            dragValue = value
+                            preferences.quotaWarningThreshold = QuotaWarningThreshold.snap(value)
+                        }
+                    ),
+                    in: QuotaWarningThreshold.allowedValues.first!...QuotaWarningThreshold.allowedValues.last!,
+                    onEditingChanged: { editing in
+                        isEditing = editing
+                        if !editing {
+                            let snapped = QuotaWarningThreshold.snap(dragValue)
+                            preferences.quotaWarningThreshold = snapped
+                            dragValue = snapped
+                        }
+                    }
+                )
+                Text("\(Int(preferences.quotaWarningThreshold))%")
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(.secondary)
+                    .monospacedDigit()
+                    .frame(width: 36, alignment: .trailing)
+            }
+            .padding(.horizontal, 16)
+            .padding(.bottom, 14)
+        }
+        .onAppear { dragValue = preferences.quotaWarningThreshold }
+    }
+}
+
 private struct PrivacySettingsDetail: View {
     @ObservedObject var preferences: MonitorPreferences
     var body: some View {
@@ -617,16 +827,31 @@ private struct PrivacySettingsDetail: View {
 }
 
 private struct AdvancedSettingsDetail: View {
+    @ObservedObject var preferences: MonitorPreferences
     let actions: SettingsSystemActions
     var body: some View {
         SettingsDetail(title: L10n.tr("settings.advanced")) {
+            VStack(alignment: .leading, spacing: 6) {
+                SettingsRow(title: L10n.tr("settings.experimentalApprovalYellow")) {
+                    HStack(spacing: 8) {
+                        Text(L10n.tr("settings.beta"))
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundStyle(.secondary)
+                        Toggle("", isOn: $preferences.experimentalApprovalYellowEnabled)
+                            .labelsHidden()
+                            .toggleStyle(.switch)
+                    }
+                }
+                Text(L10n.tr("settings.experimentalApprovalYellowDescription"))
+                    .font(.system(size: 12))
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 16)
+                    .padding(.bottom, 10)
+            }
             SettingsRow(title: L10n.tr("settings.refresh")) { Button(L10n.tr("settings.refresh"), action: actions.refresh).buttonStyle(.bordered) }
             SettingsRow(title: L10n.tr("settings.openCodex")) { Button(L10n.tr("settings.openCodex"), action: actions.openCodex).buttonStyle(.bordered) }
             SettingsRow(title: L10n.tr("settings.openLogsFolder")) { Button(L10n.tr("settings.openLogsFolder"), action: actions.openLogsFolder).buttonStyle(.bordered) }
             SettingsRow(title: L10n.tr("settings.openDiagnostics")) { Button(L10n.tr("settings.openDiagnostics"), action: actions.showDiagnostics).buttonStyle(.bordered) }
-#if DEBUG
-            SettingsRow(title: L10n.tr("settings.exportDiagnostics")) { Button(L10n.tr("settings.exportDiagnostics"), action: actions.exportDiagnostics).buttonStyle(.bordered) }
-#endif
         }
     }
 }

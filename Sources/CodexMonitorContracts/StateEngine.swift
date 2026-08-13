@@ -23,6 +23,21 @@ public enum ApprovalCapabilityHealth: String, Sendable, Equatable {
     case stale = "STALE"
 }
 
+/// Privacy-bounded live Accessibility evidence. Structured logs correlate a
+/// request; only this value can prove that approval controls are on screen.
+public enum ApprovalUIPresence: String, Sendable, Equatable {
+    case unknown = "UNKNOWN", notWaiting = "NOT_WAITING", waiting = "WAITING"
+    case permissionRequired = "PERMISSION_REQUIRED", unavailable = "UNAVAILABLE"
+}
+
+public struct ApprovalUIObservation: Sendable, Equatable {
+    public let presence: ApprovalUIPresence
+    public let observedAt: Date
+    public init(presence: ApprovalUIPresence, observedAt: Date) {
+        self.presence = presence; self.observedAt = observedAt
+    }
+}
+
 public enum SessionTokenProvenance: String, Sendable, Equatable {
     case rolloutCumulativeAuthoritative = "ROLLOUT_CUMULATIVE"
     case stateDBSeedOrCrosscheck = "STATE_DB_SEED_CROSSCHECK"
@@ -48,6 +63,9 @@ public struct ThreadRuntimeSnapshot: Sendable, Equatable {
     public let sourceFreshness: Freshness
     public let approvalHealth: ApprovalCapabilityHealth
     public let approvalFreshness: Freshness
+    /// A bounded request-only signal. It never asserts an ongoing wait or a
+    /// resolved approval lifecycle.
+    public let approvalRequestObserved: Bool
     public let currentActivityCategory: RuntimeActivityCategory
 }
 
@@ -60,6 +78,8 @@ public struct GlobalRuntimeSnapshot: Sendable, Equatable {
     public let sourceFreshness: Freshness
     public let activeThreadCount: Int
     public let waitingApprovalCount: Int
+    /// Secondary information for the representative thread; never main state.
+    public let approvalRequestObserved: Bool
     public let representativeThread: ThreadRuntimeSnapshot?
     public let threads: [ThreadRuntimeSnapshot]
 }
@@ -99,14 +119,18 @@ public struct RuntimeReconciliationThread: Sendable, Equatable {
     public let runtimeSourceAvailable: Bool
     public let runtimeObservedAt: Date
     public let approvalObservedAt: Date
+    /// Authoritative thread/task activity, deliberately separate from source
+    /// freshness so an idle representative cannot be reordered by heartbeats.
+    public let lastMeaningfulActivityAt: Date?
 
-    public init(threadID: NamespacedID, title: String? = nil, model: String? = nil, activeTurnID: NamespacedID?, turnStartedAt: Date?, latestActiveState: MonitorRuntimeState?, latestActiveStateAt: Date?, activeItemID: NamespacedID? = nil, activeItemCategory: RuntimeActivityCategory? = nil, terminal: ReconciledTerminal? = nil, sessionTokenCumulative: Int64? = nil, sessionTokenProvenance: SessionTokenProvenance? = nil, approvalHealth: ApprovalCapabilityHealth, unresolvedApprovals: [ApprovalRequested], runtimeSourceAvailable: Bool, runtimeObservedAt: Date, approvalObservedAt: Date) {
+    public init(threadID: NamespacedID, title: String? = nil, model: String? = nil, activeTurnID: NamespacedID?, turnStartedAt: Date?, latestActiveState: MonitorRuntimeState?, latestActiveStateAt: Date?, activeItemID: NamespacedID? = nil, activeItemCategory: RuntimeActivityCategory? = nil, terminal: ReconciledTerminal? = nil, sessionTokenCumulative: Int64? = nil, sessionTokenProvenance: SessionTokenProvenance? = nil, approvalHealth: ApprovalCapabilityHealth, unresolvedApprovals: [ApprovalRequested], runtimeSourceAvailable: Bool, runtimeObservedAt: Date, approvalObservedAt: Date, lastMeaningfulActivityAt: Date? = nil) {
         self.threadID = threadID; self.title = title; self.model = model; self.activeTurnID = activeTurnID
         self.turnStartedAt = turnStartedAt; self.latestActiveState = latestActiveState; self.latestActiveStateAt = latestActiveStateAt
         self.activeItemID = activeItemID; self.activeItemCategory = activeItemCategory; self.terminal = terminal
         self.sessionTokenCumulative = sessionTokenCumulative; self.sessionTokenProvenance = sessionTokenProvenance
         self.approvalHealth = approvalHealth; self.unresolvedApprovals = unresolvedApprovals
         self.runtimeSourceAvailable = runtimeSourceAvailable; self.runtimeObservedAt = runtimeObservedAt; self.approvalObservedAt = approvalObservedAt
+        self.lastMeaningfulActivityAt = lastMeaningfulActivityAt
     }
 }
 
@@ -118,6 +142,8 @@ public final class RuntimeStateEngine: @unchecked Sendable {
     /// Source-wide log health also applies to a thread first discovered after
     /// loss; otherwise that thread could be incorrectly born "known healthy".
     private var defaultApprovalHealth: ApprovalCapabilityHealth = .availableKnownNotWaiting
+    private var approvalUIPresence: ApprovalUIPresence = .unknown
+    private var approvalUIObservedAt: Date?
 
     /// A fresh Monitor has no authoritative runtime projection until local
     /// sources have been reconciled.  Production therefore starts paused;
@@ -134,6 +160,9 @@ public final class RuntimeStateEngine: @unchecked Sendable {
         let now = observedAt ?? clock.now()
         var record = record(for: snapshot.threadID, at: now)
         record.title = safeTitle(snapshot.title); record.model = snapshot.model
+        if let updatedAt = Self.desktopUpdatedAt(snapshot.updatedAtMilliseconds) {
+            record.lastMeaningfulActivityAt = latest(record.lastMeaningfulActivityAt, updatedAt)
+        }
         if let tokens = snapshot.tokensUsed, record.tokenProvenance != .rolloutCumulativeAuthoritative {
             record.tokens = max(record.tokens ?? tokens, tokens)
             record.tokenProvenance = .stateDBSeedOrCrosscheck
@@ -172,14 +201,17 @@ public final class RuntimeStateEngine: @unchecked Sendable {
         switch rollout.kind {
         case .taskStarted:
             guard let turnID = rollout.turnID else { records[rollout.threadID] = record; return }
-            record.activeTurnID = turnID; record.turnStartedAt = rollout.authoritativeEventAt ?? rollout.observedAt
-            record.lastActiveState = .thinking; record.lastActiveStateAt = rollout.authoritativeEventAt ?? rollout.observedAt
+            let at = rollout.authoritativeEventAt ?? rollout.observedAt
+            record.activeTurnID = turnID; record.turnStartedAt = at
+            record.lastActiveState = .thinking; record.lastActiveStateAt = at
+            record.lastMeaningfulActivityAt = latest(record.lastMeaningfulActivityAt, at)
             record.lastActivity = .thinking; record.activeItemID = nil; record.activeItemCategory = nil
-            record.terminal = nil; record.pendingApprovals.removeAll()
+            record.terminal = nil; record.pendingApprovals.removeAll(); record.approvalRequestObservedAt = nil
             if record.approvalHealth != .unavailable { record.approvalHealth = .availableKnownNotWaiting }
         case .activity:
             guard rollout.turnID == record.activeTurnID else { records[rollout.threadID] = record; return }
             let at = rollout.authoritativeEventAt ?? rollout.observedAt
+            record.lastMeaningfulActivityAt = latest(record.lastMeaningfulActivityAt, at)
             switch rollout.activity {
             case .tool?, .fileChange?:
                 record.activeItemID = rollout.itemID
@@ -227,23 +259,48 @@ public final class RuntimeStateEngine: @unchecked Sendable {
         case .requested(let request):
             var record = record(for: request.threadID, at: request.observedAt)
             guard record.activeTurnID == request.turnID else { return }
-            record.pendingApprovals[request.requestID] = PendingApproval(request: request)
-            record.approvalHealth = .availableWaiting; record.approvalObservedAt = request.observedAt
+            // V1 records only the verified request event. Backend evidence
+            // cannot safely prove ongoing waiting or request resolution.
+            record.approvalRequestObservedAt = request.observedAt
+            record.approvalHealth = .availableKnownNotWaiting; record.approvalObservedAt = request.observedAt
             records[request.threadID] = record
         case .resolved(let resolution):
-            var record = record(for: resolution.threadID, at: resolution.observedAt)
-            guard record.pendingApprovals[resolution.requestID]?.request.turnID == resolution.turnID else { return }
-            record.pendingApprovals.removeValue(forKey: resolution.requestID)
-            record.approvalHealth = record.pendingApprovals.isEmpty ? .availableKnownNotWaiting : .availableWaiting
-            record.approvalObservedAt = resolution.observedAt; records[resolution.threadID] = record
+            // Do not synthesize Approved/Declined/Cancelled in V1.
+            _ = resolution
         case .sourceHealth(let health): updateApprovalHealth(health)
         case .sourceUnavailable(let health): updateApprovalHealth(health)
         }
     }
 
+    /// AX never reads a thread identifier. Attribute the visible sheet only
+    /// when exactly one current runtime owner exists; otherwise keep it global.
+    public func ingest(_ observation: ApprovalUIObservation) {
+        guard pausePhase == .live else { return }
+        approvalUIPresence = observation.presence
+        approvalUIObservedAt = observation.observedAt
+        for id in records.keys {
+            var record = records[id]!
+            record.uiApprovalWaitingAt = nil
+            records[id] = record
+        }
+        guard observation.presence == .waiting else { return }
+        let active = records.values.filter { $0.activeTurnID != nil && $0.terminal == nil }
+        guard active.count == 1, let threadID = active.first?.threadID else { return }
+        var record = records[threadID]!
+        record.uiApprovalWaitingAt = observation.observedAt
+        records[threadID] = record
+    }
+
     public func ingestApprovalPoll(_ result: ApprovalPollResult) {
         for observation in result.observations { ingest(observation) }
         ingest(.sourceHealth(result.health))
+    }
+
+    /// A removed/archive-only historical reader must not survive as a global
+    /// unavailable candidate. Current active failures are handled by the
+    /// cycle-level runtime health before this removal is applied.
+    public func remove(threadID: NamespacedID) {
+        records.removeValue(forKey: threadID)
     }
 
     public func recordSystemError(threadID: NamespacedID, observedAt: Date? = nil) {
@@ -275,6 +332,7 @@ public final class RuntimeStateEngine: @unchecked Sendable {
             record.activeItemID = value.activeItemID; record.activeItemCategory = value.activeItemCategory; record.lastActivity = value.activeItemCategory ?? activity(for: value.latestActiveState ?? .idle)
             record.tokens = value.sessionTokenCumulative; record.tokenProvenance = value.sessionTokenProvenance
             record.runtimeSourceAvailable = value.runtimeSourceAvailable; record.runtimeObservedAt = value.runtimeObservedAt
+            record.lastMeaningfulActivityAt = value.lastMeaningfulActivityAt
             record.approvalObservedAt = value.approvalObservedAt
             record.pendingApprovals = Dictionary(uniqueKeysWithValues: value.unresolvedApprovals.filter { $0.threadID == value.threadID && $0.turnID == value.activeTurnID }.map { ($0.requestID, PendingApproval(request: $0)) })
             record.approvalHealth = record.pendingApprovals.isEmpty ? value.approvalHealth : (value.approvalHealth == .unavailable || value.approvalHealth == .stale ? value.approvalHealth : .availableWaiting)
@@ -293,8 +351,8 @@ public final class RuntimeStateEngine: @unchecked Sendable {
         let threadSnapshots = records.values.map { snapshot(for: $0, now: now) }.sorted { stableID($0.threadID) < stableID($1.threadID) }
         if pausePhase != .live {
             let since = pauseSince ?? now
-            let pausedThreads = threadSnapshots.map { value in ThreadRuntimeSnapshot(threadID: value.threadID, activeTurnID: value.activeTurnID, taskTitle: value.taskTitle, model: value.model, state: .paused, stateSince: since, turnRuntimeStartedAt: value.turnRuntimeStartedAt, sessionTokenCumulative: value.sessionTokenCumulative, sessionTokenProvenance: value.sessionTokenProvenance, sessionTokenAvailable: value.sessionTokenAvailable, sourceFreshness: stale(value.sourceFreshness, at: now), approvalHealth: .stale, approvalFreshness: stale(value.approvalFreshness, at: now), currentActivityCategory: value.currentActivityCategory) }
-            return GlobalRuntimeSnapshot(state: .paused, stateSince: since, representativeThreadID: nil, currentActivityCategory: .idle, currentActivityShortSafeLabel: RuntimeActivityCategory.idle.shortSafeLabel, sourceFreshness: Freshness(state: .stale, assessedAt: now, observedAt: since, reason: "monitorPausedOrRevalidating"), activeThreadCount: 0, waitingApprovalCount: 0, representativeThread: nil, threads: pausedThreads)
+            let pausedThreads = threadSnapshots.map { value in ThreadRuntimeSnapshot(threadID: value.threadID, activeTurnID: value.activeTurnID, taskTitle: value.taskTitle, model: value.model, state: .paused, stateSince: since, turnRuntimeStartedAt: value.turnRuntimeStartedAt, sessionTokenCumulative: value.sessionTokenCumulative, sessionTokenProvenance: value.sessionTokenProvenance, sessionTokenAvailable: value.sessionTokenAvailable, sourceFreshness: stale(value.sourceFreshness, at: now), approvalHealth: .stale, approvalFreshness: stale(value.approvalFreshness, at: now), approvalRequestObserved: false, currentActivityCategory: value.currentActivityCategory) }
+            return GlobalRuntimeSnapshot(state: .paused, stateSince: since, representativeThreadID: nil, currentActivityCategory: .idle, currentActivityShortSafeLabel: RuntimeActivityCategory.idle.shortSafeLabel, sourceFreshness: Freshness(state: .stale, assessedAt: now, observedAt: since, reason: "monitorPausedOrRevalidating"), activeThreadCount: 0, waitingApprovalCount: 0, approvalRequestObserved: false, representativeThread: nil, threads: pausedThreads)
         }
         let ranked = threadSnapshots.sorted { lhs, rhs in
             let l = priority(lhs.state), r = priority(rhs.state)
@@ -302,7 +360,7 @@ public final class RuntimeStateEngine: @unchecked Sendable {
             return stableID(lhs.threadID) < stableID(rhs.threadID)
         }
         let representative = ranked.first
-        return GlobalRuntimeSnapshot(state: representative?.state ?? .disconnected, stateSince: representative?.stateSince ?? now, representativeThreadID: representative?.threadID, currentActivityCategory: representative?.currentActivityCategory ?? .disconnected, currentActivityShortSafeLabel: (representative?.currentActivityCategory ?? .disconnected).shortSafeLabel, sourceFreshness: aggregateFreshness(threadSnapshots, now: now), activeThreadCount: threadSnapshots.filter { [.thinking, .working, .waitingApproval].contains($0.state) }.count, waitingApprovalCount: threadSnapshots.filter { $0.state == .waitingApproval }.count, representativeThread: representative, threads: threadSnapshots)
+        return GlobalRuntimeSnapshot(state: representative?.state ?? .disconnected, stateSince: representative?.stateSince ?? now, representativeThreadID: representative?.threadID, currentActivityCategory: representative?.currentActivityCategory ?? .disconnected, currentActivityShortSafeLabel: (representative?.currentActivityCategory ?? .disconnected).shortSafeLabel, sourceFreshness: aggregateFreshness(threadSnapshots, now: now), activeThreadCount: threadSnapshots.filter { [.thinking, .working].contains($0.state) }.count, waitingApprovalCount: 0, approvalRequestObserved: representative?.approvalRequestObserved ?? false, representativeThread: representative, threads: threadSnapshots)
     }
 
     /// Terminal states are deliberately retained for a brief, user-visible
@@ -357,8 +415,9 @@ public final class RuntimeStateEngine: @unchecked Sendable {
 
     private func installTerminal(_ terminal: ReconciledTerminal, into record: inout ThreadRecord) {
         guard record.terminal?.eventID != terminal.eventID else { return }
-        record.activeTurnID = nil; record.activeItemID = nil; record.activeItemCategory = nil; record.pendingApprovals.removeAll()
+        record.activeTurnID = nil; record.activeItemID = nil; record.activeItemCategory = nil; record.pendingApprovals.removeAll(); record.approvalRequestObservedAt = nil
         record.terminal = Terminal(turnID: terminal.turnID, eventID: terminal.eventID, state: terminal.state, authoritativeEventAt: terminal.authoritativeEventAt)
+        record.lastMeaningfulActivityAt = latest(record.lastMeaningfulActivityAt, terminal.authoritativeEventAt)
         record.lastActivity = activity(for: terminal.state)
         if record.approvalHealth != .unavailable { record.approvalHealth = .availableKnownNotWaiting }
     }
@@ -369,18 +428,35 @@ public final class RuntimeStateEngine: @unchecked Sendable {
         created.approvalHealth = defaultApprovalHealth
         return created
     }
+
+    /// State DB deployments have emitted Unix seconds and milliseconds. This
+    /// preserves source ordering without inventing local bootstrap activity.
+    public static func desktopUpdatedAt(_ rawValue: Int64?) -> Date? {
+        guard let rawValue, rawValue > 0 else { return nil }
+        let seconds = rawValue >= 100_000_000_000 ? Double(rawValue) / 1_000 : Double(rawValue)
+        return Date(timeIntervalSince1970: seconds)
+    }
+
+    private func latest(_ existing: Date?, _ candidate: Date) -> Date {
+        guard let existing else { return candidate }
+        return max(existing, candidate)
+    }
+
     private func snapshot(for record: ThreadRecord, now: Date) -> ThreadRuntimeSnapshot {
         let state = state(for: record, now: now)
-        let since: Date = switch state { case .completed, .failed, .interrupted, .systemError: record.terminal?.authoritativeEventAt ?? record.createdAt; case .thinking, .working: record.lastActiveStateAt ?? record.turnStartedAt ?? record.createdAt; case .waitingApproval: record.pendingApprovals.values.map { $0.request.observedAt }.max() ?? record.turnStartedAt ?? record.createdAt; case .idle, .disconnected, .paused: record.runtimeObservedAt }
+        let since: Date = switch state { case .completed, .failed, .interrupted, .systemError: record.terminal?.authoritativeEventAt ?? record.createdAt; case .thinking, .working: record.lastActiveStateAt ?? record.turnStartedAt ?? record.createdAt; case .waitingApproval: record.uiApprovalWaitingAt ?? record.pendingApprovals.values.map { $0.request.observedAt }.max() ?? record.turnStartedAt ?? record.createdAt; case .idle: record.lastMeaningfulActivityAt ?? .distantPast; case .disconnected, .paused: record.runtimeObservedAt }
         let runtimeFreshness = Freshness(state: record.runtimeSourceAvailable ? .fresh : .unknown, assessedAt: now, observedAt: record.runtimeObservedAt, reason: record.runtimeSourceAvailable ? nil : "runtimeSourceUnavailable")
         let approvalFreshness = Freshness(state: record.approvalHealth == .unavailable ? .unknown : (record.approvalHealth == .stale ? .stale : .fresh), assessedAt: now, observedAt: record.approvalObservedAt, reason: record.approvalHealth == .unavailable ? "approvalSourceUnavailable" : nil)
-        let category = state == .waitingApproval ? .waitingApproval : ([.thinking, .working].contains(state) ? record.lastActivity : activity(for: state))
-        return ThreadRuntimeSnapshot(threadID: record.threadID, activeTurnID: record.activeTurnID, taskTitle: record.title, model: record.model, state: state, stateSince: since, turnRuntimeStartedAt: record.turnStartedAt, sessionTokenCumulative: record.tokens, sessionTokenProvenance: record.tokenProvenance, sessionTokenAvailable: record.sessionTokenAvailable, sourceFreshness: runtimeFreshness, approvalHealth: record.approvalHealth, approvalFreshness: approvalFreshness, currentActivityCategory: category)
+        let category = [.thinking, .working].contains(state) ? record.lastActivity : activity(for: state)
+        return ThreadRuntimeSnapshot(threadID: record.threadID, activeTurnID: record.activeTurnID, taskTitle: record.title, model: record.model, state: state, stateSince: since, turnRuntimeStartedAt: record.turnStartedAt, sessionTokenCumulative: record.tokens, sessionTokenProvenance: record.tokenProvenance, sessionTokenAvailable: record.sessionTokenAvailable, sourceFreshness: runtimeFreshness, approvalHealth: record.approvalHealth, approvalFreshness: approvalFreshness, approvalRequestObserved: record.approvalRequestObservedAt != nil, currentActivityCategory: category)
     }
 
     private func state(for record: ThreadRecord, now: Date) -> MonitorRuntimeState {
         if let terminal = record.terminal, now.timeIntervalSince(terminal.authoritativeEventAt) < retention(for: terminal.state) { return terminal.state }
-        if record.activeTurnID != nil { guard record.runtimeSourceAvailable else { return .disconnected }; if !record.pendingApprovals.isEmpty { return .waitingApproval }; return record.lastActiveState ?? .thinking }
+        if record.activeTurnID != nil {
+            guard record.runtimeSourceAvailable else { return .disconnected }
+            return record.lastActiveState ?? .thinking
+        }
         return record.runtimeSourceAvailable ? .idle : .disconnected
     }
     private func retention(for state: MonitorRuntimeState) -> TimeInterval { switch state { case .completed: 5; case .failed, .interrupted, .systemError: 15; default: 0 } }
@@ -398,8 +474,11 @@ private struct ThreadRecord {
     var lastActiveState: MonitorRuntimeState? = nil; var lastActiveStateAt: Date? = nil; var lastActivity: RuntimeActivityCategory = .thinking
     var activeItemID: NamespacedID? = nil; var activeItemCategory: RuntimeActivityCategory? = nil
     var pendingApprovals: [NamespacedID: PendingApproval] = [:]; var approvalHealth: ApprovalCapabilityHealth = .availableKnownNotWaiting; var approvalObservedAt: Date
+    var uiApprovalWaitingAt: Date? = nil
+    var approvalRequestObservedAt: Date? = nil
     var terminal: Terminal? = nil; var tokens: Int64? = nil; var tokenProvenance: SessionTokenProvenance? = nil; var sessionTokenAvailable = true
     var runtimeSourceAvailable = true; var runtimeObservedAt: Date
+    var lastMeaningfulActivityAt: Date? = nil
     init(threadID: NamespacedID, at: Date) { self.threadID = threadID; createdAt = at; runtimeObservedAt = at; approvalObservedAt = at }
 }
 

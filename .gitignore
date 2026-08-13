@@ -1,2 +1,6 @@
 .build/
 .DS_Store
+QA Artifacts/
+QA Builds/
+Release/
+approval_real_test.txt

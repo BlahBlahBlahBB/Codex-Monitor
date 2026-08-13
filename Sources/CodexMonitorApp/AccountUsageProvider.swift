@@ -61,9 +61,10 @@ public actor AccountUsageProvider {
                 throw error
             }
         } catch {
-            // A failed short-lived account session cannot leave a previous
-            // quota/usage value looking current.
-            await runtime.markSourceUnavailable(.account)
+            // A transient account refresh failure must not erase the last
+            // authoritative Account/Plan/Usage/Quota snapshot. The runtime
+            // keeps it visible and records refresh degradation internally.
+            await runtime.markAccountRefreshDegraded()
         }
     }
 
@@ -181,21 +182,24 @@ public actor AccountUsageProvider {
     private static func dailyBuckets(from value: JSONValue?, observedAt: Date, calendar: Calendar) -> [AccountUsageDailyBucket]? {
         guard let value else { return nil }
         guard case let .array(raw) = value else { return nil }
-        let supplied = Dictionary(uniqueKeysWithValues: raw.compactMap { item -> (String, Int)? in
+        var supplied: [String: Int] = [:]
+        for item in raw {
             guard let object = item.objectValue,
                   let date = object["startDate"]?.stringValue,
-                  let tokens = integer(object["tokens"]) else { return nil }
-            return (date, max(0, tokens))
-        })
-        let formatter = DateFormatter()
-        formatter.calendar = calendar
-        formatter.locale = Locale(identifier: "en_US_POSIX")
-        formatter.dateFormat = "yyyy-MM-dd"
+                  let tokens = integer(object["tokens"]) else { continue }
+            let (sum, overflow) = (supplied[date] ?? 0).addingReportingOverflow(max(0, tokens))
+            supplied[date] = overflow ? Int.max : sum
+        }
         let today = calendar.startOfDay(for: observedAt)
         return (0..<30).reversed().compactMap { offset in
             guard let day = calendar.date(byAdding: .day, value: -offset, to: today) else { return nil }
-            let key = formatter.string(from: day)
-            return AccountUsageDailyBucket(startDate: key, tokens: supplied[key] ?? 0)
+            let key = LocalUsageDateKey.value(for: day, calendar: calendar)
+            if let tokens = supplied[key] {
+                return AccountUsageDailyBucket(startDate: key, tokens: tokens, isSourcePresent: true)
+            }
+            // Keep a zero-height chart coordinate without claiming that zero
+            // was returned by the source for this calendar day.
+            return AccountUsageDailyBucket(startDate: key, tokens: 0, isSourcePresent: false)
         }
     }
 

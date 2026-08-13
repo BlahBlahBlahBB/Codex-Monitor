@@ -270,7 +270,8 @@ final class DesktopLocalAdapterTests: XCTestCase {
         let turn = try XCTUnwrap(records.first { $0.kind == .taskStarted }?.turnID)
         let call = try XCTUnwrap(records.first { $0.activity == .tool }?.itemID)
         engine.ingest(.requested(ApprovalRequested(threadID: thread.threadID, turnID: turn, requestID: call, observedAt: Date())))
-        XCTAssertEqual(engine.snapshot().threads.first?.state, .waitingApproval)
+        XCTAssertEqual(engine.snapshot().threads.first?.state, .working)
+        XCTAssertEqual(engine.snapshot().threads.first?.approvalRequestObserved, true)
         engine.ingest(try XCTUnwrap(records.first { $0.activity == .agentResponse }))
         XCTAssertEqual(engine.snapshot().threads.first?.state, .thinking)
     }
@@ -425,6 +426,63 @@ final class DesktopLocalAdapterTests: XCTestCase {
         try fixture.addThread("thread-a", rollout: file)
         let reader = StateDBReader(databaseURL: fixture.database, sourceID: fixture.sourceID, schema: .init(acceptedUserVersions: [2]))
         XCTAssertThrowsError(try reader.thread(rawID: "thread-a")) { XCTAssertEqual($0 as? StateDBError, .schemaMismatch) }
+    }
+
+    func testRecentThreadsClassifiesMissingWALAfterSuccessfulReadAsTransient() throws {
+        let rollout = try fixture.rollout("thread-a", lines: [fixture.session("thread-a")])
+        try fixture.addThread("thread-a", rollout: rollout)
+
+        var writer: OpaquePointer?
+        XCTAssertEqual(sqlite3_open_v2(fixture.database.path, &writer, SQLITE_OPEN_READWRITE | SQLITE_OPEN_FULLMUTEX, nil), SQLITE_OK)
+        guard let activeWriter = writer else { return XCTFail("Could not open WAL fixture writer") }
+        defer { if let writer { sqlite3_close(writer) } }
+        try execute(activeWriter, "PRAGMA journal_mode = WAL")
+        try execute(activeWriter, "INSERT INTO threads VALUES ('wal-owner', '\(fixture.root.path)/wal-owner.jsonl', 'wal', 'gpt-test', 'high', 2, 0)")
+
+        let reader = StateDBReader(databaseURL: fixture.database, sourceID: fixture.sourceID, schema: .init(acceptedUserVersions: [1]))
+        XCTAssertFalse(try reader.recentThreads().isEmpty)
+        let walURL = URL(fileURLWithPath: fixture.database.path + "-wal")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: walURL.path))
+        try FileManager.default.removeItem(at: walURL)
+
+        XCTAssertThrowsError(try reader.recentThreads()) {
+            XCTAssertEqual($0 as? StateDBError, .transientWALUnavailable)
+        }
+
+        // The next production call opens a new read-only SQLite connection.
+        // Recreate the writer sidecar as Codex would, then verify the same
+        // reader returns to ordinary reads without a synthetic failure state.
+        sqlite3_close(activeWriter)
+        writer = nil
+        var recoveryWriter: OpaquePointer?
+        XCTAssertEqual(sqlite3_open_v2(fixture.database.path, &recoveryWriter, SQLITE_OPEN_READWRITE | SQLITE_OPEN_FULLMUTEX, nil), SQLITE_OK)
+        guard let recoveryWriter else { return XCTFail("Could not reopen WAL fixture writer") }
+        defer { sqlite3_close(recoveryWriter) }
+        try execute(recoveryWriter, "PRAGMA journal_mode = WAL")
+        try execute(recoveryWriter, "UPDATE threads SET updated_at = 3 WHERE id = 'wal-owner'")
+        XCTAssertFalse(try reader.recentThreads().isEmpty)
+    }
+
+    func testMainDatabaseMissingAndNonWALFailuresRemainFatal() throws {
+        let reader = StateDBReader(databaseURL: fixture.database, sourceID: fixture.sourceID, schema: .init(acceptedUserVersions: [1]))
+        _ = try reader.recentThreads()
+        try FileManager.default.removeItem(at: fixture.database)
+        XCTAssertThrowsError(try reader.recentThreads()) { XCTAssertEqual($0 as? StateDBError, .readOnlyOpenFailed) }
+    }
+
+    func testPermissionDeniedAndNonWALQueryFailuresRemainFatal() throws {
+        let permissionReader = StateDBReader(databaseURL: fixture.database, sourceID: fixture.sourceID, schema: .init(acceptedUserVersions: [1]))
+        _ = try permissionReader.recentThreads()
+        try FileManager.default.setAttributes([.posixPermissions: 0], ofItemAtPath: fixture.database.path)
+        defer { try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: fixture.database.path) }
+        XCTAssertThrowsError(try permissionReader.recentThreads()) { XCTAssertEqual($0 as? StateDBError, .readOnlyOpenFailed) }
+
+        let malformed = try LocalFixture()
+        defer { malformed.cleanup() }
+        let malformedReader = StateDBReader(databaseURL: malformed.database, sourceID: malformed.sourceID, schema: .init(acceptedUserVersions: [1]))
+        _ = try malformedReader.recentThreads()
+        try Data("not a SQLite database".utf8).write(to: malformed.database, options: .atomic)
+        XCTAssertThrowsError(try malformedReader.recentThreads()) { XCTAssertEqual($0 as? StateDBError, .queryFailed) }
     }
 
     func testObservationsAndPersistableBoundariesRetainNoRawContentOrPrivatePath() throws {

@@ -6,7 +6,9 @@ set -euo pipefail
 # It deliberately does not notarize, distribute, or modify Codex Desktop.
 
 project_root="$(cd "$(dirname "$0")/.." && pwd)"
-app_name="${1:-Codex Monitor Visual Host Fix v3 QA}"
+app_name="${1:-Codex Monitor QA}"
+bundle_identifier="${QA_BUNDLE_IDENTIFIER:-com.codexmonitor.visualhostfixv3qa}"
+signing_identity="${QA_SIGNING_IDENTITY:--}"
 qa_root="$project_root/QA Builds"
 app_path="$qa_root/$app_name.app"
 
@@ -32,7 +34,7 @@ timestamp="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 /usr/libexec/PlistBuddy -c "Add :CFBundleDevelopmentRegion string en" "$info_plist"
 /usr/libexec/PlistBuddy -c "Add :CFBundleDisplayName string $app_name" "$info_plist"
 /usr/libexec/PlistBuddy -c "Add :CFBundleExecutable string CodexMonitorApp" "$info_plist"
-/usr/libexec/PlistBuddy -c "Add :CFBundleIdentifier string com.codexmonitor.visualhostfixv3qa" "$info_plist"
+/usr/libexec/PlistBuddy -c "Add :CFBundleIdentifier string $bundle_identifier" "$info_plist"
 /usr/libexec/PlistBuddy -c "Add :CFBundleInfoDictionaryVersion string 6.0" "$info_plist"
 /usr/libexec/PlistBuddy -c "Add :CFBundleName string $app_name" "$info_plist"
 /usr/libexec/PlistBuddy -c "Add :CFBundlePackageType string APPL" "$info_plist"
@@ -43,6 +45,6 @@ timestamp="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 /usr/libexec/PlistBuddy -c "Add :UIBuildRevision string $revision" "$info_plist"
 /usr/libexec/PlistBuddy -c "Add :UIBuildTimestamp string $timestamp" "$info_plist"
 
-codesign --force --deep --sign - "$app_path"
+codesign --force --deep --sign "$signing_identity" "$app_path"
 codesign --verify --deep --strict "$app_path"
 print "$app_path"

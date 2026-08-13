@@ -314,6 +314,21 @@ private struct ApprovalLogRow { let id: Int64; let threadRawID: String; let obse
 private let installedLoggerTarget = "codex_core::stream_events_utils"
 private let SQLITE_TRANSIENT = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
 
+/// Some installed Desktop approval wait events contain no call/item identity.
+/// Their only authoritative correlation is the exact active turn.  This is an
+/// opaque lifecycle key, not an approval decision or a user-visible item ID.
+enum ApprovalRequestCorrelation {
+    private static let turnScopedPrefix = "desktop-approval-turn:"
+
+    static func turnScopedRequestID(for turnID: String) -> String {
+        turnScopedPrefix + turnID
+    }
+
+    static func isTurnScoped(_ requestID: NamespacedID, for turnID: NamespacedID) -> Bool {
+        requestID.rawID == turnScopedRequestID(for: turnID.rawID)
+    }
+}
+
 private struct ApprovalLifecycleKey: Hashable {
     let threadID: NamespacedID
     let turnID: NamespacedID
@@ -351,9 +366,16 @@ private struct StructuredApprovalBody {
         // diagnostic envelopes retain their request context.  They must still
         // carry one unambiguous turn and call identity, and are correlated to
         // an already-admitted exact lifecycle key before exposure.
-        guard let turns = fields("turn_id", in: body), let calls = fields("call_id", in: body) else { return nil }
-        let turn = turns[0], request = calls[0]
-        let requestMarkers = containsMarker("requestApproval", in: body) && containsMarker("waitingOnApproval", in: body)
+        guard let turns = fields("turn_id", in: body) else { return nil }
+        // The generic observed request wrapper covers command/file/approval
+        // prompts. Permissions also have a schema-pinned desktop route whose
+        // active flag is `waitingOnUserInput`; admit that form only when the
+        // route itself and the same exact correlation fields are present.
+        // A bare user-input marker is never permission evidence.
+        let genericApprovalRequest = containsMarker("requestApproval", in: body) && containsMarker("waitingOnApproval", in: body)
+        let permissionAuthorizationRequest = containsMarker("item/permissions/requestApproval", in: body)
+            && containsMarker("waitingOnUserInput", in: body)
+        let requestMarkers = genericApprovalRequest || permissionAuthorizationRequest
         let resolutionMarkers: [(String, ApprovalResolutionStatus)] = [
             ("approvalApproved", .approved), ("approvalDeclined", .declined),
             ("approvalCancelled", .cancelled), ("itemCompleted", .itemCompleted),
@@ -362,14 +384,38 @@ private struct StructuredApprovalBody {
         let matches = resolutionMarkers.filter { containsMarker($0.0, in: body) }
         // The request wrapper has four event-context turns and two equal call
         // IDs.  Keep that observed request admission contract unchanged.
-        if requestMarkers, matches.isEmpty, turns.count == 4, calls.count == 2, calls[0] == calls[1] {
-            return StructuredApprovalBody(variant: .request, turnID: turn, requestID: request)
+        if let calls = fields("call_id", in: body), requestMarkers, matches.isEmpty,
+           turns.count == 4, calls.count == 2, calls[0] == calls[1] {
+            return StructuredApprovalBody(variant: .request, turnID: turns[0], requestID: calls[0])
+        }
+        // Real Desktop approval history (Codex 0.147) also emits a stream
+        // event wrapper without a call/item field.  It is intentionally
+        // admitted only as this exact observed shape: ToolCall, all three
+        // waiting markers, two or three equal turn IDs, and no call_id. The
+        // two-turn wrapper was observed live in Desktop 0.147; the three-turn
+        // wrapper remains an earlier validated production shape. The next
+        // authoritative activity for that same turn closes the pending state;
+        // no Approved/Declined outcome is synthesized.
+        let realDesktopTurnScopedRequest = containsMarker("ToolCall", in: body)
+            && containsMarker("requestApproval", in: body)
+            && containsMarker("waitingOnUserInput", in: body)
+            && containsMarker("waitingOnApproval", in: body)
+            && fields("call_id", in: body) == nil
+            && (turns.count == 2 || turns.count == 3)
+            && Set(turns).count == 1
+        if realDesktopTurnScopedRequest, matches.isEmpty, let turn = turns.first {
+            return StructuredApprovalBody(
+                variant: .request,
+                turnID: turn,
+                requestID: ApprovalRequestCorrelation.turnScopedRequestID(for: turn)
+            )
         }
         // Resolution identity is deliberately value- rather than
         // wrapper-cardinality-based.  A repeated field is allowed only when it
         // repeats the same opaque identity; a second distinct turn or call is
         // malformed evidence.  The adapter's lifecycle map subsequently
         // requires the exact source-thread + turn + request triple.
+        guard let calls = fields("call_id", in: body) else { return nil }
         let uniqueTurns = Set(turns), uniqueCalls = Set(calls)
         if matches.count == 1, uniqueTurns.count == 1, uniqueCalls.count == 1,
            let exactTurn = uniqueTurns.first, let exactCall = uniqueCalls.first {
@@ -400,7 +446,7 @@ private struct StructuredApprovalBody {
     }
 
     private static func approvalLookingMarker(in body: String) -> Bool {
-        let pattern = "(?i)(?<![A-Za-z0-9_])(?:requestApproval|waitingOnApproval|approval[A-Za-z0-9_]*|itemCompleted)(?![A-Za-z0-9_])"
+        let pattern = "(?i)(?<![A-Za-z0-9_])(?:requestApproval|waitingOnApproval|waitingOnUserInput|approval[A-Za-z0-9_]*|itemCompleted)(?![A-Za-z0-9_])"
         guard let regex = try? NSRegularExpression(pattern: pattern) else { return false }
         return regex.firstMatch(in: body, range: NSRange(body.startIndex..., in: body)) != nil
     }

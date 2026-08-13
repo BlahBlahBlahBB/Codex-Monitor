@@ -135,7 +135,11 @@ public enum LocalRuntimeReconciliationOwner {
         case .fileChange?: .fileChange
         case .thinking?, .agentResponse?, nil: nil
         }
-        return RuntimeReconciliationThread(threadID: snapshot.threadID, title: snapshot.title, model: snapshot.model, activeTurnID: hydration.activeTurnID, turnStartedAt: hydration.turnStartedAt, latestActiveState: hydration.latestActiveState, latestActiveStateAt: hydration.latestActiveStateAt, activeItemID: hydration.activeItemID, activeItemCategory: activity, terminal: hydration.terminal, sessionTokenCumulative: hydration.authoritativeTokenTotal ?? snapshot.tokensUsed, sessionTokenProvenance: hydration.authoritativeTokenTotal == nil ? (snapshot.tokensUsed == nil ? nil : .stateDBSeedOrCrosscheck) : .rolloutCumulativeAuthoritative, approvalHealth: approvalHealth, unresolvedApprovals: pending, runtimeSourceAvailable: runtimeSourceAvailable, runtimeObservedAt: observedAt, approvalObservedAt: observedAt)
+        let meaningfulAt = RuntimeStateEngine.desktopUpdatedAt(snapshot.updatedAtMilliseconds)
+            ?? hydration.terminal?.authoritativeEventAt
+            ?? hydration.latestActiveStateAt
+            ?? hydration.turnStartedAt
+        return RuntimeReconciliationThread(threadID: snapshot.threadID, title: snapshot.title, model: snapshot.model, activeTurnID: hydration.activeTurnID, turnStartedAt: hydration.turnStartedAt, latestActiveState: hydration.latestActiveState, latestActiveStateAt: hydration.latestActiveStateAt, activeItemID: hydration.activeItemID, activeItemCategory: activity, terminal: hydration.terminal, sessionTokenCumulative: hydration.authoritativeTokenTotal ?? snapshot.tokensUsed, sessionTokenProvenance: hydration.authoritativeTokenTotal == nil ? (snapshot.tokensUsed == nil ? nil : .stateDBSeedOrCrosscheck) : .rolloutCumulativeAuthoritative, approvalHealth: approvalHealth, unresolvedApprovals: pending, runtimeSourceAvailable: runtimeSourceAvailable, runtimeObservedAt: observedAt, approvalObservedAt: observedAt, lastMeaningfulActivityAt: meaningfulAt)
     }
 
     /// Startup/pause owners call this exactly once after all selected local

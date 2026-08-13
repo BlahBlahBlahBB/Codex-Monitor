@@ -188,9 +188,36 @@ public struct UsagePresence: Codable, Sendable, Equatable {
 
 public struct AccountUsageDailyBucket: Codable, Sendable, Equatable, Identifiable {
     public let startDate: String
+    /// Chart coordinates retain a zero-height placeholder for a missing day.
+    /// It must never be interpreted as an authoritative source value unless
+    /// `isSourcePresent` is true.
     public let tokens: Int
+    public let isSourcePresent: Bool
+    public var authoritativeTokens: Int? { isSourcePresent ? tokens : nil }
     public var id: String { startDate }
-    public init(startDate: String, tokens: Int) { self.startDate = startDate; self.tokens = max(0, tokens) }
+    public init(startDate: String, tokens: Int, isSourcePresent: Bool = true) {
+        self.startDate = startDate; self.tokens = max(0, tokens); self.isSourcePresent = isSourcePresent
+    }
+
+    private enum CodingKeys: String, CodingKey { case startDate, tokens, isSourcePresent }
+
+    public init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            startDate: try values.decode(String.self, forKey: .startDate),
+            tokens: try values.decode(Int.self, forKey: .tokens),
+            // Existing persisted buckets predate missing-day semantics and
+            // therefore represent values that were previously admitted.
+            isSourcePresent: try values.decodeIfPresent(Bool.self, forKey: .isSourcePresent) ?? true
+        )
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var values = encoder.container(keyedBy: CodingKeys.self)
+        try values.encode(startDate, forKey: .startDate)
+        try values.encode(tokens, forKey: .tokens)
+        try values.encode(isSourcePresent, forKey: .isSourcePresent)
+    }
 }
 
 public struct AccountSnapshot: Codable, Sendable, Equatable {

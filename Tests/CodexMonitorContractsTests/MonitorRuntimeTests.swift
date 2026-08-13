@@ -1,5 +1,6 @@
 import XCTest
 @testable import CodexMonitorContracts
+@testable import CodexMonitorApp
 
 final class MonitorRuntimeTests: XCTestCase {
     private let source = SourceID("desktop-local")!
@@ -70,7 +71,7 @@ final class MonitorRuntimeTests: XCTestCase {
         XCTAssertEqual(snapshot.currentSessionThread?.activeTurnID, turn)
     }
 
-    func testApprovalResolutionIsNotConsumedAndExactCompletionFallbackRemains() async {
+    func testApprovalRequestCreatesSecondaryObservedEvent() async {
         let clock = RuntimeSnapshotTestClock()
         let store = makeStore(clock: clock)
         let thread = id(.thread, "thread-a")
@@ -82,29 +83,65 @@ final class MonitorRuntimeTests: XCTestCase {
         await store.ingest(ApprovalObservation.resolved(ApprovalResolved(threadID: thread, turnID: turn, requestID: request, status: .approved, observedAt: clock.now())))
 
         var snapshot = await store.snapshot()
-        XCTAssertEqual(snapshot.currentState, .waitingApproval)
+        XCTAssertEqual(snapshot.currentState, .thinking)
+        XCTAssertTrue(snapshot.approvalRequestObserved)
         XCTAssertEqual(snapshot.capabilities[.approvalResolution]?.availability, .unavailable)
 
         await store.ingest(event(thread, turn, .activity, activity: .agentResponse, item: request, clock: clock))
         snapshot = await store.snapshot()
         XCTAssertEqual(snapshot.currentState, .thinking)
         XCTAssertEqual(snapshot.waitingApprovalCount, 0)
+        XCTAssertTrue(snapshot.approvalRequestObserved)
     }
 
-    func testStaleAccountSnapshotIsWithheldInsteadOfDisplayedAsCurrent() async throws {
+    func testOrdinaryTaskHasNoApprovalObservedEvent() async {
+        let clock = RuntimeSnapshotTestClock()
+        let store = makeStore(clock: clock)
+        let thread = id(.thread, "ordinary-thread")
+        let turn = id(.turn, "ordinary-turn")
+        await store.registerDesktopThread(DesktopThreadSnapshot(threadID: thread, title: nil, model: nil, reasoningEffort: nil, updatedAtMilliseconds: nil, tokensUsed: nil))
+        await store.ingest(event(thread, turn, .taskStarted, clock: clock))
+        await store.ingest(event(thread, turn, .activity, activity: .tool, item: id(.item, "ordinary-tool"), clock: clock))
+
+        let snapshot = await store.snapshot()
+        XCTAssertEqual(snapshot.currentState, .working)
+        XCTAssertFalse(snapshot.approvalRequestObserved)
+    }
+
+    func testStaleAccountSnapshotRemainsLastKnownGoodWhileFreshnessIsTracked() async throws {
         let clock = RuntimeSnapshotTestClock()
         let store = makeStore(clock: clock, freshness: MonitorRuntimeFreshnessPolicy(maximumAccountAge: 5))
         await store.ingest(account: accountSnapshot(clock: clock, usage: UsagePresence(totalTokens: 100), primary: RateLimitWindow(usedPercent: 50), resetCount: 1))
         clock.advance(6)
 
         let snapshot = await store.snapshot()
-        XCTAssertEqual(snapshot.sourceHealth[.account]?.availability, .stale)
-        XCTAssertEqual(snapshot.usage.availability, .stale)
-        XCTAssertNil(snapshot.usage.usage)
-        XCTAssertEqual(snapshot.quota.primaryAvailability, .stale)
-        XCTAssertNil(snapshot.quota.primary)
-        XCTAssertEqual(snapshot.resetInformation.countAvailability, .stale)
-        XCTAssertNil(snapshot.resetInformation.count)
+        XCTAssertEqual(snapshot.sourceHealth[.account]?.availability, .available)
+        XCTAssertEqual(snapshot.sourceHealth[.account]?.freshness.state, .stale)
+        XCTAssertEqual(snapshot.usage.availability, .available)
+        XCTAssertEqual(snapshot.usage.usage?.totalTokens, 100)
+        XCTAssertEqual(snapshot.quota.primaryAvailability, .available)
+        XCTAssertEqual(snapshot.quota.primary?.usedPercent, 50)
+        XCTAssertEqual(snapshot.resetInformation.countAvailability, .available)
+        XCTAssertEqual(snapshot.resetInformation.count, 1)
+    }
+
+    func testQuotaLastKnownGoodSurvivesTransientRefreshFailure() async {
+        let clock = RuntimeSnapshotTestClock()
+        let store = makeStore(clock: clock)
+        await store.ingest(account: accountSnapshot(clock: clock, usage: UsagePresence(totalTokens: 100), primary: RateLimitWindow(usedPercent: 25), resetCount: 1))
+        let before = await store.snapshot()
+
+        clock.advance(60)
+        await store.markAccountRefreshDegraded()
+        let after = await store.snapshot()
+
+        XCTAssertEqual(after.account.availability, .available)
+        XCTAssertEqual(after.account.plan, before.account.plan)
+        XCTAssertEqual(after.usage.usage?.totalTokens, 100)
+        XCTAssertEqual(after.quota.primary?.usedPercent, 25)
+        XCTAssertEqual(after.resetInformation.count, 1)
+        XCTAssertEqual(after.sourceHealth[.account]?.availability, .available)
+        XCTAssertEqual(after.sourceHealth[.account]?.freshness.state, .stale)
     }
 
     func testRepresentativeThreadSwitchesWithoutMixingAttribution() async {
@@ -144,6 +181,213 @@ final class MonitorRuntimeTests: XCTestCase {
         let updated = await iterator.next()
         XCTAssertEqual(updated?.currentState, .idle)
         XCTAssertEqual(updated?.sourceHealth[.desktopLocal]?.availability, .available)
+    }
+
+    func testDesktopCyclePublishesOneSemanticSnapshot() async throws {
+        let clock = RuntimeSnapshotTestClock()
+        let store = makeStore(clock: clock)
+        let model = await MainActor.run { MonitorAppModel() }
+        await MainActor.run { model.startObserving(store) }
+        try await Task.sleep(for: .milliseconds(25))
+        let baseline = await MainActor.run { model.acceptedSnapshotCount }
+
+        let first = id(.thread, "batch-a")
+        let second = id(.thread, "batch-b")
+        let firstTurn = id(.turn, "batch-turn-a")
+        let secondTurn = id(.turn, "batch-turn-b")
+        let firstStart = event(first, firstTurn, .taskStarted, clock: clock)
+        clock.advance(1)
+        let secondStart = event(second, secondTurn, .taskStarted, clock: clock)
+        await store.applyDesktopCycle(
+            registrations: [
+                DesktopThreadSnapshot(threadID: first, title: "First", model: nil, reasoningEffort: nil, updatedAtMilliseconds: 1_700_000_000, tokensUsed: 10),
+                DesktopThreadSnapshot(threadID: second, title: "Second", model: nil, reasoningEffort: nil, updatedAtMilliseconds: 1_700_000_100, tokensUsed: 20)
+            ],
+            observations: [
+                firstStart,
+                secondStart
+            ]
+        )
+        try await Task.sleep(for: .milliseconds(25))
+
+        let accepted = await MainActor.run { model.acceptedSnapshotCount }
+        let snapshot = await store.snapshot()
+        XCTAssertEqual(accepted, baseline + 1)
+        XCTAssertEqual(snapshot.currentThread?.threadID, second)
+        await MainActor.run { model.stopObserving() }
+    }
+
+    func testApprovalPollBatchPublishesOneCoherentSnapshot() async throws {
+        let clock = RuntimeSnapshotTestClock()
+        let store = makeStore(clock: clock)
+        let thread = id(.thread, "approval-batch")
+        let turn = id(.turn, "approval-turn")
+        let request = id(.item, "approval-request")
+        await store.registerDesktopThread(DesktopThreadSnapshot(threadID: thread, title: "Approval", model: nil, reasoningEffort: nil, updatedAtMilliseconds: 1_700_000_000, tokensUsed: nil))
+        await store.ingest(event(thread, turn, .taskStarted, clock: clock))
+
+        let model = await MainActor.run { MonitorAppModel() }
+        await MainActor.run { model.startObserving(store) }
+        try await Task.sleep(for: .milliseconds(25))
+        let baseline = await MainActor.run { model.acceptedSnapshotCount }
+        let health = ApprovalSourceHealth(state: .available, observedAt: clock.now())
+        await store.ingestApprovalPoll(ApprovalPollResult(
+            observations: [
+                .requested(ApprovalRequested(threadID: thread, turnID: turn, requestID: request, observedAt: clock.now())),
+                .sourceUnavailable(ApprovalSourceHealth(state: .unavailable, observedAt: clock.now(), reason: .sourceMissing))
+            ],
+            cursor: nil,
+            health: health
+        ))
+        try await Task.sleep(for: .milliseconds(25))
+
+        let accepted = await MainActor.run { model.acceptedSnapshotCount }
+        let snapshot = await store.snapshot()
+        XCTAssertEqual(accepted, baseline + 1)
+        XCTAssertEqual(snapshot.currentState, .thinking)
+        XCTAssertTrue(snapshot.approvalRequestObserved)
+        XCTAssertEqual(snapshot.capabilities[.approvalResolution]?.availability, .unavailable)
+        await MainActor.run { model.stopObserving() }
+    }
+
+    func testAccountHeartbeatDoesNotChangePresentation() async throws {
+        let clock = RuntimeSnapshotTestClock()
+        let store = makeStore(clock: clock)
+        let model = await MainActor.run { MonitorAppModel() }
+        let first = accountSnapshot(clock: clock, usage: UsagePresence(totalTokens: 100), primary: RateLimitWindow(usedPercent: 50), resetCount: 1)
+        await store.ingest(account: first)
+        let initial = await store.snapshot()
+        await MainActor.run { model.apply(initial) }
+        let baseline = await MainActor.run { model.acceptedSnapshotCount }
+
+        for _ in 0..<100 {
+            clock.advance(60)
+            await store.ingest(account: accountSnapshot(clock: clock, usage: UsagePresence(totalTokens: 100), primary: RateLimitWindow(usedPercent: 50), resetCount: 1))
+            let heartbeat = await store.snapshot()
+            await MainActor.run { model.apply(heartbeat) }
+        }
+        let accepted = await MainActor.run { model.acceptedSnapshotCount }
+        XCTAssertEqual(accepted, baseline)
+    }
+
+    func testIdleCodexProcessRunningRemainsAvailable() async {
+        let clock = RuntimeSnapshotTestClock()
+        let store = makeStore(clock: clock)
+        await store.applyDesktopCycle(registrations: [], observations: [], health: DesktopCycleHealth(processRunning: true, stateDBReadable: true))
+        let snapshot = await store.snapshot()
+        XCTAssertEqual(snapshot.currentState, .idle)
+        XCTAssertEqual(snapshot.sourceHealth[.desktopLocal]?.availability, .available)
+    }
+
+    func testIdleThirtyMinutesAndEightHoursDoNotBecomeUnavailable() async {
+        let clock = RuntimeSnapshotTestClock()
+        let store = makeStore(clock: clock)
+        await store.applyDesktopCycle(registrations: [], observations: [], health: DesktopCycleHealth(processRunning: true, stateDBReadable: true))
+
+        let checkpoints: [TimeInterval] = [1_800, 7_200, 28_800]
+        var previousCheckpoint: TimeInterval = 0
+        for checkpoint in checkpoints {
+            clock.advance(checkpoint - previousCheckpoint)
+            previousCheckpoint = checkpoint
+            let snapshot = await store.snapshot()
+            XCTAssertEqual(snapshot.currentState, .idle)
+            XCTAssertEqual(snapshot.sourceHealth[.desktopLocal]?.availability, .available)
+            XCTAssertNotEqual(snapshot.sourceHealth[.desktopLocal]?.reason, .codexProcessNotRunning)
+        }
+    }
+
+    func testIdleThirtyMinutesRemainsAvailable() async {
+        let snapshot = await idleSnapshot(after: 1_800)
+        XCTAssertEqual(snapshot.currentState, .idle)
+        XCTAssertEqual(snapshot.sourceHealth[.desktopLocal]?.availability, .available)
+    }
+
+    func testIdleTwoHoursRemainsAvailable() async {
+        let snapshot = await idleSnapshot(after: 7_200)
+        XCTAssertEqual(snapshot.currentState, .idle)
+        XCTAssertEqual(snapshot.sourceHealth[.desktopLocal]?.availability, .available)
+    }
+
+    func testIdleEightHoursRemainsAvailable() async {
+        let snapshot = await idleSnapshot(after: 28_800)
+        XCTAssertEqual(snapshot.currentState, .idle)
+        XCTAssertEqual(snapshot.sourceHealth[.desktopLocal]?.availability, .available)
+    }
+
+    func testIdleTwentyFourHoursRemainsAvailable() async {
+        let snapshot = await idleSnapshot(after: 86_400)
+        XCTAssertEqual(snapshot.currentState, .idle)
+        XCTAssertEqual(snapshot.sourceHealth[.desktopLocal]?.availability, .available)
+    }
+
+    func testDesktopAvailabilityReducerHasNoAgeInput() {
+        XCTAssertEqual(
+            DesktopAvailabilityDecision(processRunning: true, stateDBReadable: true, monitorPaused: false, activeTurnPresent: false, fatalSourceError: false),
+            .availableIdle
+        )
+        XCTAssertEqual(
+            DesktopAvailabilityDecision(processRunning: true, stateDBReadable: true, monitorPaused: false, activeTurnPresent: true, fatalSourceError: false),
+            .availableActive
+        )
+        XCTAssertEqual(
+            DesktopAvailabilityDecision(processRunning: true, stateDBReadable: false, monitorPaused: false, activeTurnPresent: false, fatalSourceError: false),
+            .sourceFailure
+        )
+        XCTAssertEqual(
+            DesktopAvailabilityDecision(processRunning: false, stateDBReadable: false, monitorPaused: false, activeTurnPresent: false, fatalSourceError: false),
+            .disconnected
+        )
+    }
+
+    func testHistoricalThreadFailureDoesNotPoisonDesktopLane() async {
+        let clock = RuntimeSnapshotTestClock()
+        let store = makeStore(clock: clock)
+        let old = id(.thread, "archived"), current = id(.thread, "current")
+        await store.applyDesktopCycle(
+            registrations: [
+                DesktopThreadSnapshot(threadID: old, title: "Old", model: nil, reasoningEffort: nil, updatedAtMilliseconds: 1_700_000_000, tokensUsed: 10),
+                DesktopThreadSnapshot(threadID: current, title: "Current", model: nil, reasoningEffort: nil, updatedAtMilliseconds: 1_700_000_100, tokensUsed: 20)
+            ],
+            observations: [],
+            health: DesktopCycleHealth(processRunning: true, stateDBReadable: true)
+        )
+        await store.applyDesktopCycle(registrations: [], observations: [], health: DesktopCycleHealth(processRunning: true, stateDBReadable: true, failedThreadIDs: [old]))
+        let snapshot = await store.snapshot()
+        XCTAssertEqual(snapshot.currentState, .idle)
+        XCTAssertEqual(snapshot.sourceHealth[.desktopLocal]?.availability, .available)
+        XCTAssertEqual(snapshot.currentThread?.threadID, current)
+        XCTAssertFalse(snapshot.threads.contains { $0.threadID == old })
+    }
+
+    func testArchivedIdleThreadDoesNotMeanCodexUnavailable() async {
+        let clock = RuntimeSnapshotTestClock()
+        let store = makeStore(clock: clock)
+        let archived = id(.thread, "archived")
+        await store.applyDesktopCycle(registrations: [DesktopThreadSnapshot(threadID: archived, title: "Old", model: nil, reasoningEffort: nil, updatedAtMilliseconds: 1_700_000_000, tokensUsed: nil)], observations: [], health: DesktopCycleHealth(processRunning: true, stateDBReadable: true))
+        await store.applyDesktopCycle(registrations: [], observations: [], health: DesktopCycleHealth(processRunning: true, stateDBReadable: true, removedThreadIDs: [archived]))
+        let snapshot = await store.snapshot()
+        XCTAssertEqual(snapshot.currentState, .idle)
+        XCTAssertEqual(snapshot.sourceHealth[.desktopLocal]?.availability, .available)
+    }
+
+    func testCodexProcessQuitIsDisconnected() async {
+        let clock = RuntimeSnapshotTestClock()
+        let store = makeStore(clock: clock)
+        await store.applyDesktopCycle(registrations: [], observations: [], health: DesktopCycleHealth(processRunning: false, stateDBReadable: false))
+        let snapshot = await store.snapshot()
+        XCTAssertEqual(snapshot.currentState, .disconnected)
+        XCTAssertEqual(snapshot.sourceHealth[.desktopLocal]?.reason, .codexProcessNotRunning)
+    }
+
+    func testCodexProcessRelaunchRestoresIdle() async {
+        let clock = RuntimeSnapshotTestClock()
+        let store = makeStore(clock: clock)
+        await store.applyDesktopCycle(registrations: [], observations: [], health: DesktopCycleHealth(processRunning: false, stateDBReadable: false))
+        clock.advance(1)
+        await store.applyDesktopCycle(registrations: [], observations: [], health: DesktopCycleHealth(processRunning: true, stateDBReadable: true))
+        let snapshot = await store.snapshot()
+        XCTAssertEqual(snapshot.currentState, .idle)
+        XCTAssertEqual(snapshot.sourceHealth[.desktopLocal]?.availability, .available)
     }
 
     func testTerminalRetentionPublishesIdleWithoutAnotherExternalMutation() async throws {
@@ -191,8 +435,36 @@ final class MonitorRuntimeTests: XCTestCase {
         XCTAssertEqual(snapshot.sourceHealth[.desktopLocal]?.availability, .available)
     }
 
+    func testHistoricalThreadFailureCannotChangeGlobalAvailability() async {
+        let clock = RuntimeSnapshotTestClock()
+        let store = makeStore(clock: clock)
+        let current = id(.thread, "current")
+        let historical = (0..<5).map { id(.thread, "historical-\($0)") }
+        await store.applyDesktopCycle(
+            registrations: historical.map { DesktopThreadSnapshot(threadID: $0, title: nil, model: nil, reasoningEffort: nil, updatedAtMilliseconds: 1_700_000_000, tokensUsed: nil) } + [DesktopThreadSnapshot(threadID: current, title: nil, model: nil, reasoningEffort: nil, updatedAtMilliseconds: 1_700_000_100, tokensUsed: nil)],
+            observations: [],
+            health: DesktopCycleHealth(processRunning: true, stateDBReadable: true)
+        )
+        await store.applyDesktopCycle(
+            registrations: [],
+            observations: [],
+            health: DesktopCycleHealth(processRunning: true, stateDBReadable: true, failedThreadIDs: historical, removedThreadIDs: historical)
+        )
+        let snapshot = await store.snapshot()
+        XCTAssertEqual(snapshot.currentState, .idle)
+        XCTAssertEqual(snapshot.sourceHealth[.desktopLocal]?.availability, .available)
+    }
+
     private func makeStore(clock: RuntimeSnapshotTestClock, freshness: MonitorRuntimeFreshnessPolicy = .init()) -> MonitorRuntimeStore {
         MonitorRuntimeStore(engine: RuntimeStateEngine(clock: clock, initialPhase: .live), clock: clock, freshnessPolicy: freshness, initialPhase: .live)
+    }
+
+    private func idleSnapshot(after seconds: TimeInterval) async -> MonitorRuntimeSnapshot {
+        let clock = RuntimeSnapshotTestClock()
+        let store = makeStore(clock: clock)
+        await store.applyDesktopCycle(registrations: [], observations: [], health: DesktopCycleHealth(processRunning: true, stateDBReadable: true))
+        clock.advance(seconds)
+        return await store.snapshot()
     }
 
     private func id(_ kind: EntityKind, _ raw: String) -> NamespacedID {

@@ -19,6 +19,7 @@ public enum MonitorUnavailabilityReason: String, Sendable, Equatable {
     case capabilityUnsupported
     case externalCodexDesktopCapability
     case monitorPausedOrRevalidating
+    case codexProcessNotRunning
 }
 
 public struct MonitorCapabilityAvailability: Sendable, Equatable {
@@ -48,6 +49,7 @@ public enum MonitorRuntimeCapability: String, CaseIterable, Sendable, Equatable 
 public enum MonitorRuntimeSource: String, CaseIterable, Sendable, Equatable {
     case desktopLocal
     case approvalLocal
+    case approvalAccessibility
     case account
 }
 
@@ -74,6 +76,7 @@ public struct MonitorThreadViewModel: Sendable, Equatable {
     public let stateSince: Date
     public let activity: RuntimeActivityCategory
     public let waitingApproval: MonitorCapabilityAvailability
+    public let approvalRequestObserved: Bool
     public let sessionToken: Int64?
     public let sessionTokenAvailability: MonitorDataAvailability
     public let sessionTokenProvenance: SessionTokenProvenance?
@@ -88,6 +91,7 @@ public struct MonitorThreadViewModel: Sendable, Equatable {
         stateSince = value.stateSince
         activity = value.currentActivityCategory
         waitingApproval = MonitorRuntimeSnapshotBuilder.waitingApprovalAvailability(for: value)
+        approvalRequestObserved = value.approvalRequestObserved
         let tokenAvailability = MonitorRuntimeSnapshotBuilder.sessionTokenAvailability(for: value)
         sessionToken = tokenAvailability == .available ? value.sessionTokenCumulative : nil
         sessionTokenAvailability = tokenAvailability
@@ -147,6 +151,7 @@ public struct MonitorRuntimeSnapshot: Sendable, Equatable {
     public let currentSessionThread: MonitorSessionThreadAttribution?
     public let activeThreadCount: Int
     public let waitingApprovalCount: Int
+    public let approvalRequestObserved: Bool
     public let threads: [MonitorThreadViewModel]
     public let sessionToken: Int64?
     public let account: MonitorAccountViewModel
@@ -162,12 +167,13 @@ public struct MonitorRuntimeSnapshot: Sendable, Equatable {
     public func isPresentationEquivalent(to other: MonitorRuntimeSnapshot) -> Bool {
         monitoringPhase == other.monitoringPhase &&
         currentState == other.currentState &&
-        currentStateSince == other.currentStateSince &&
+        equivalentStateSince(to: other) &&
         currentActivity == other.currentActivity &&
         equivalent(currentThread, other.currentThread) &&
         currentSessionThread == other.currentSessionThread &&
         activeThreadCount == other.activeThreadCount &&
         waitingApprovalCount == other.waitingApprovalCount &&
+        approvalRequestObserved == other.approvalRequestObserved &&
         threads.count == other.threads.count && zip(threads, other.threads).allSatisfy { equivalent($0, $1) } &&
         sessionToken == other.sessionToken &&
         account == other.account &&
@@ -188,16 +194,93 @@ public struct MonitorRuntimeSnapshot: Sendable, Equatable {
         }
     }
 
+    private func equivalentStateSince(to other: MonitorRuntimeSnapshot) -> Bool {
+        guard currentState == other.currentState else { return false }
+        switch currentState {
+        case .thinking, .working, .waitingApproval, .completed, .failed, .interrupted, .systemError:
+            return currentStateSince == other.currentStateSince
+        case .idle, .disconnected, .paused:
+            // IDLE shows 0:00 and unavailable/paused states have no elapsed
+            // product-time display, so a regenerated timestamp is heartbeat
+            // metadata rather than a presentation change.
+            return true
+        }
+    }
+
     private func equivalent(_ lhs: MonitorThreadViewModel, _ rhs: MonitorThreadViewModel) -> Bool {
-        lhs.threadID == rhs.threadID && lhs.activeTurnID == rhs.activeTurnID && lhs.taskTitle == rhs.taskTitle && lhs.model == rhs.model && lhs.state == rhs.state && lhs.stateSince == rhs.stateSince && lhs.activity == rhs.activity && lhs.waitingApproval == rhs.waitingApproval && lhs.sessionToken == rhs.sessionToken && lhs.sessionTokenAvailability == rhs.sessionTokenAvailability && lhs.sessionTokenProvenance == rhs.sessionTokenProvenance && equivalent(lhs.freshness, rhs.freshness)
+        lhs.threadID == rhs.threadID && lhs.activeTurnID == rhs.activeTurnID && lhs.taskTitle == rhs.taskTitle && lhs.model == rhs.model && lhs.state == rhs.state && lhs.stateSince == rhs.stateSince && lhs.activity == rhs.activity && lhs.waitingApproval == rhs.waitingApproval && lhs.approvalRequestObserved == rhs.approvalRequestObserved && lhs.sessionToken == rhs.sessionToken && lhs.sessionTokenAvailability == rhs.sessionTokenAvailability && lhs.sessionTokenProvenance == rhs.sessionTokenProvenance && equivalent(lhs.freshness, rhs.freshness)
     }
 
     private func equivalent(_ lhs: MonitorSourceHealth, _ rhs: MonitorSourceHealth) -> Bool {
-        lhs.source == rhs.source && lhs.availability == rhs.availability && lhs.reason == rhs.reason && equivalent(lhs.freshness, rhs.freshness)
+        // Source/data freshness is internal telemetry. Only semantic
+        // availability and the user-visible reason can invalidate the UI.
+        lhs.source == rhs.source && lhs.availability == rhs.availability && lhs.reason == rhs.reason
     }
 
     private func equivalent(_ lhs: Freshness, _ rhs: Freshness) -> Bool {
-        lhs.state == rhs.state && lhs.observedAt == rhs.observedAt && lhs.reason == rhs.reason
+        // Freshness timestamps are sampling metadata. Their heartbeat must
+        // never become a SwiftUI presentation mutation on its own.
+        lhs.state == rhs.state && lhs.reason == rhs.reason
+    }
+}
+
+/// One desktop refresh describes application liveness separately from the
+/// health of individual historical rollout readers. This prevents normal
+/// archive/ownership churn from impersonating a closed Codex Desktop app.
+public struct DesktopCycleHealth: Sendable, Equatable {
+    public let processRunning: Bool
+    public let stateDBReadable: Bool
+    public let failedThreadIDs: [NamespacedID]
+    public let removedThreadIDs: [NamespacedID]
+
+    public init(processRunning: Bool, stateDBReadable: Bool, failedThreadIDs: [NamespacedID] = [], removedThreadIDs: [NamespacedID] = []) {
+        self.processRunning = processRunning
+        self.stateDBReadable = stateDBReadable
+        self.failedThreadIDs = failedThreadIDs.sorted { $0.rawID < $1.rawID }
+        self.removedThreadIDs = removedThreadIDs.sorted { $0.rawID < $1.rawID }
+    }
+}
+
+/// The single desktop availability reducer. Data age and heartbeat timestamps
+/// are deliberately absent: long idle is a valid product state, not a source
+/// failure. Historical thread failures are supplied separately by the cycle
+/// and only become fatal when they affect the active authoritative turn.
+public enum DesktopAvailabilityDecision: String, Sendable, Equatable {
+    case availableIdle
+    case availableActive
+    case paused
+    case disconnected
+    case sourceFailure
+
+    public init(processRunning: Bool, stateDBReadable: Bool, monitorPaused: Bool, activeTurnPresent: Bool, fatalSourceError: Bool) {
+        if !processRunning {
+            self = .disconnected
+        } else if monitorPaused {
+            self = .paused
+        } else if !stateDBReadable || fatalSourceError {
+            self = .sourceFailure
+        } else if activeTurnPresent {
+            self = .availableActive
+        } else {
+            self = .availableIdle
+        }
+    }
+
+    public var dataAvailability: MonitorDataAvailability {
+        switch self {
+        case .availableIdle, .availableActive: .available
+        case .paused: .stale
+        case .disconnected, .sourceFailure: .unavailable
+        }
+    }
+
+    public var reason: MonitorUnavailabilityReason? {
+        switch self {
+        case .availableIdle, .availableActive: nil
+        case .paused: .monitorPausedOrRevalidating
+        case .disconnected: .codexProcessNotRunning
+        case .sourceFailure: .sourceUnavailable
+        }
     }
 }
 
@@ -244,8 +327,15 @@ public actor MonitorRuntimeStore {
     private let accountCapabilities: MonitorAccountCapabilityConfiguration
     private var accountSnapshot: AccountSnapshot?
     private var accountSource: SourceState
+    private var accountRefreshDegraded = false
     private var desktopSource: SourceState
     private var approvalSource: SourceState
+    private var approvalAccessibilitySource: SourceState
+    private var desktopCycleHealth: DesktopCycleHealth?
+    private var desktopCycleHasActiveThreadFailure = false
+    private var semanticIdleSince: Date?
+    private var semanticUnavailableSince: Date?
+    private var semanticDisconnectedSince: Date?
     private var monitoringPhase: MonitoringPausePhase
     private var snapshotContinuations: [UUID: AsyncStream<MonitorRuntimeSnapshot>.Continuation] = [:]
     private var terminalTransitionTask: Task<Void, Never>?
@@ -267,27 +357,28 @@ public actor MonitorRuntimeStore {
         accountSource = SourceState(availability: .unknown, observedAt: now, reason: nil)
         desktopSource = SourceState(availability: initialPhase == .live ? .unknown : .stale, observedAt: now, reason: initialPhase == .live ? nil : .monitorPausedOrRevalidating)
         approvalSource = SourceState(availability: .unknown, observedAt: now, reason: nil)
+        approvalAccessibilitySource = SourceState(availability: .unknown, observedAt: now, reason: nil)
         monitoringPhase = initialPhase
     }
 
     public func registerDesktopThread(_ snapshot: DesktopThreadSnapshot, sourceHealthAvailable: Bool = true, observedAt: Date? = nil) {
-        let at = observedAt ?? clock.now()
-        engine.register(snapshot, sourceHealthAvailable: sourceHealthAvailable, observedAt: at)
-        desktopSource = SourceState(availability: sourceHealthAvailable ? .available : .unavailable, observedAt: at, reason: sourceHealthAvailable ? nil : .sourceUnavailable)
+        applyDesktopRegistration(snapshot, sourceHealthAvailable: sourceHealthAvailable, observedAt: observedAt ?? clock.now())
         publishSnapshot()
     }
 
     public func ingest(_ observation: DesktopObservation) {
-        engine.ingest(observation)
-        let at = clock.now()
-        switch observation {
-        case .rollout:
-            desktopSource = SourceState(availability: .available, observedAt: at, reason: nil)
-        case .sourceHealth(let health):
-            desktopSource = SourceState(availability: health.state == .available ? .available : .unavailable, observedAt: at, reason: health.state == .available ? nil : .sourceUnavailable)
-        case .capabilityUnavailable:
-            desktopSource = SourceState(availability: .unavailable, observedAt: at, reason: .capabilityUnsupported)
+        applyDesktopObservation(observation)
+        publishSnapshot()
+    }
+
+    /// A source refresh becomes visible only after every registration and
+    /// observation has been reduced, so UI state never reflects poll order.
+    public func applyDesktopCycle(registrations: [DesktopThreadSnapshot], observations: [DesktopObservation], health: DesktopCycleHealth? = nil) {
+        for registration in registrations {
+            applyDesktopRegistration(registration, sourceHealthAvailable: true, observedAt: clock.now())
         }
+        for observation in observations { applyDesktopObservation(observation) }
+        if let health { applyDesktopCycleHealth(health) }
         publishSnapshot()
     }
 
@@ -309,18 +400,79 @@ public actor MonitorRuntimeStore {
     }
 
     public func ingestApprovalPoll(_ result: ApprovalPollResult) {
-        for observation in result.observations { ingest(observation) }
+        for observation in result.observations {
+            // The frozen V3-2 resolution contract remains fail-closed.
+            guard case .resolved = observation else {
+                applyApprovalObservation(observation)
+                continue
+            }
+        }
         let health = result.health
         approvalSource = SourceState(availability: health.state == .available ? .available : .unavailable, observedAt: health.observedAt, reason: health.state == .available ? nil : .sourceUnavailable)
         engine.ingest(.sourceHealth(health))
         publishSnapshot()
     }
 
+    /// Accessibility health is independent of Desktop Local and the approval
+    /// log lane. A missing permission never degrades runtime health.
+    public func ingest(_ observation: ApprovalUIObservation) {
+        let availability: MonitorDataAvailability
+        let reason: MonitorUnavailabilityReason?
+        switch observation.presence {
+        case .waiting, .notWaiting: availability = .available; reason = nil
+        case .permissionRequired: availability = .unavailable; reason = .capabilityUnvalidated
+        case .unavailable: availability = .unavailable; reason = .sourceUnavailable
+        case .unknown: availability = .unknown; reason = nil
+        }
+        approvalAccessibilitySource = SourceState(availability: availability, observedAt: observation.observedAt, reason: reason)
+        engine.ingest(observation)
+        publishSnapshot()
+    }
+
+    private func applyDesktopRegistration(_ snapshot: DesktopThreadSnapshot, sourceHealthAvailable: Bool, observedAt: Date) {
+        engine.register(snapshot, sourceHealthAvailable: sourceHealthAvailable, observedAt: observedAt)
+        desktopSource = SourceState(availability: sourceHealthAvailable ? .available : .unavailable, observedAt: observedAt, reason: sourceHealthAvailable ? nil : .sourceUnavailable)
+    }
+
+    private func applyDesktopObservation(_ observation: DesktopObservation) {
+        engine.ingest(observation)
+        let at = clock.now()
+        switch observation {
+        case .rollout:
+            desktopSource = SourceState(availability: .available, observedAt: at, reason: nil)
+        case .sourceHealth(let health):
+            desktopSource = SourceState(availability: health.state == .available ? .available : .unavailable, observedAt: at, reason: health.state == .available ? nil : .sourceUnavailable)
+        case .capabilityUnavailable:
+            desktopSource = SourceState(availability: .unavailable, observedAt: at, reason: .capabilityUnsupported)
+        }
+    }
+
+    private func applyApprovalObservation(_ observation: ApprovalObservation) {
+        switch observation {
+        case .resolved:
+            return
+        case .requested:
+            approvalSource = SourceState(availability: .available, observedAt: clock.now(), reason: nil)
+        case .sourceHealth(let health), .sourceUnavailable(let health):
+            approvalSource = SourceState(availability: health.state == .available ? .available : .unavailable, observedAt: health.observedAt, reason: health.state == .available ? nil : .sourceUnavailable)
+        }
+        engine.ingest(observation)
+    }
+
     public func ingest(account snapshot: AccountSnapshot) {
         accountSnapshot = snapshot
+        accountRefreshDegraded = false
         let freshness = snapshot.provenance.freshness
         accountSource = SourceState(availability: freshness.state == .fresh ? .available : monitorAvailability(for: freshness.state), observedAt: freshness.observedAt, reason: freshness.state == .fresh ? nil : monitorReason(for: freshness.state))
         publishSnapshot()
+    }
+
+    /// A failed account refresh is not equivalent to removal of the account
+    /// capability. Keep the last authoritative snapshot and record the
+    /// degraded refresh internally so a transient socket/read error cannot
+    /// blank Account, Plan, Usage, or Quota in the UI.
+    public func markAccountRefreshDegraded() {
+        accountRefreshDegraded = true
     }
 
     public func markSourceUnavailable(_ source: MonitorRuntimeSource, observedAt: Date? = nil) {
@@ -328,6 +480,7 @@ public actor MonitorRuntimeStore {
         switch source {
         case .desktopLocal: desktopSource = state
         case .approvalLocal: approvalSource = state
+        case .approvalAccessibility: approvalAccessibilitySource = state
         case .account: accountSource = state; accountSnapshot = nil
         }
         publishSnapshot()
@@ -347,21 +500,22 @@ public actor MonitorRuntimeStore {
         publishSnapshot()
     }
 
-    public func beginReconciliation() {
+    public func beginReconciliation(publish: Bool = true) {
         engine.beginReconciliation()
         monitoringPhase = .reconciling
         let now = clock.now()
         desktopSource = SourceState(availability: .stale, observedAt: now, reason: .monitorPausedOrRevalidating)
         approvalSource = SourceState(availability: .stale, observedAt: now, reason: .monitorPausedOrRevalidating)
-        publishSnapshot()
+        if publish { publishSnapshot() }
     }
 
-    public func installReconciliation(_ values: [RuntimeReconciliationThread]) {
+    public func installReconciliation(_ values: [RuntimeReconciliationThread], desktopHealth: DesktopCycleHealth? = nil) {
         engine.installReconciliation(values)
         monitoringPhase = .live
         let now = clock.now()
         desktopSource = SourceState(availability: values.isEmpty ? .unknown : .available, observedAt: now, reason: nil)
         approvalSource = SourceState(availability: values.isEmpty ? .unknown : .available, observedAt: now, reason: nil)
+        if let desktopHealth { applyDesktopCycleHealth(desktopHealth) }
         publishSnapshot()
     }
 
@@ -387,9 +541,10 @@ public actor MonitorRuntimeStore {
         let current = runtime.representativeThread.flatMap { candidate in threads.first { $0.threadID == candidate.threadID } }
         let account = freshAccount(at: now)
         let effectiveAccountSource = accountSourceForSnapshot(at: now)
-        let accountHealth = sourceHealth(for: .account, state: effectiveAccountSource, now: now)
+        let accountHealth = sourceHealth(for: .account, state: effectiveAccountSource, now: now, freshnessOverride: accountFreshness(at: now))
         let desktopHealth = desktopHealth(for: current, lane: desktopSource, now: now)
         let approvalHealth = sourceHealth(for: .approvalLocal, state: approvalSource, now: now)
+        let approvalAccessibilityHealth = sourceHealth(for: .approvalAccessibility, state: approvalAccessibilitySource, now: now)
         let capabilities = MonitorRuntimeSnapshotBuilder.capabilities(
             runtime: runtime,
             current: current,
@@ -403,25 +558,36 @@ public actor MonitorRuntimeStore {
         let usage = MonitorRuntimeSnapshotBuilder.usage(account, source: accountHealth, capability: accountCapabilities.usage)
         let quota = MonitorRuntimeSnapshotBuilder.quota(account, source: accountHealth, primaryCapability: accountCapabilities.primaryQuota, secondaryCapability: accountCapabilities.secondaryQuota)
         let reset = MonitorRuntimeSnapshotBuilder.reset(account, source: accountHealth, countCapability: accountCapabilities.resetCount, detailsCapability: accountCapabilities.resetDetails)
-        return MonitorRuntimeSnapshot(capturedAt: now, monitoringPhase: monitoringPhase, currentState: runtime.state, currentStateSince: runtime.stateSince, currentActivity: runtime.currentActivityCategory, currentThread: current, currentSessionThread: MonitorSessionThreadAttribution(thread: current), activeThreadCount: runtime.activeThreadCount, waitingApprovalCount: runtime.waitingApprovalCount, threads: threads, sessionToken: current?.sessionToken, account: accountView, usage: usage, quota: quota, resetInformation: reset, sourceHealth: [.desktopLocal: desktopHealth, .approvalLocal: approvalHealth, .account: accountHealth], capabilities: capabilities)
+        let semantic = desktopSemanticState(runtime, now: now)
+        return MonitorRuntimeSnapshot(capturedAt: now, monitoringPhase: monitoringPhase, currentState: semantic.state, currentStateSince: semantic.since, currentActivity: semantic.activity, currentThread: current, currentSessionThread: MonitorSessionThreadAttribution(thread: current), activeThreadCount: runtime.activeThreadCount, waitingApprovalCount: runtime.waitingApprovalCount, approvalRequestObserved: runtime.approvalRequestObserved, threads: threads, sessionToken: current?.sessionToken, account: accountView, usage: usage, quota: quota, resetInformation: reset, sourceHealth: [.desktopLocal: desktopHealth, .approvalLocal: approvalHealth, .approvalAccessibility: approvalAccessibilityHealth, .account: accountHealth], capabilities: capabilities)
     }
 
     private func freshAccount(at now: Date) -> AccountSnapshot? {
         guard let accountSnapshot, accountSource.availability == .available else { return nil }
-        guard now.timeIntervalSince(accountSnapshot.provenance.observedAt) <= freshnessPolicy.maximumAccountAge else { return nil }
+        // Age belongs to data freshness, not source availability. A
+        // last-known-good account snapshot remains displayable while the
+        // short-lived refresh route retries.
         return accountSnapshot
     }
 
-    private func accountSourceForSnapshot(at now: Date) -> SourceState {
-        guard let accountSnapshot,
-              accountSource.availability == .available,
-              now.timeIntervalSince(accountSnapshot.provenance.observedAt) > freshnessPolicy.maximumAccountAge else {
-            return accountSource
+    private func accountFreshness(at now: Date) -> Freshness? {
+        guard let accountSnapshot else { return nil }
+        let observedAt = accountSnapshot.provenance.observedAt
+        let age = max(0, now.timeIntervalSince(observedAt))
+        if accountRefreshDegraded || age > freshnessPolicy.maximumAccountAge {
+            return Freshness(state: .stale, assessedAt: now, observedAt: observedAt, reason: "accountRefreshDegraded")
         }
-        return SourceState(availability: .stale, observedAt: accountSnapshot.provenance.observedAt, reason: .sourceStale)
+        return accountSnapshot.provenance.freshness
     }
 
-    private func sourceHealth(for source: MonitorRuntimeSource, state: SourceState, fallback: Freshness? = nil, now: Date) -> MonitorSourceHealth {
+    private func accountSourceForSnapshot(at now: Date) -> SourceState {
+        // Source health is determined by the account route, not by the age of
+        // its last successful payload. Age is carried by accountFreshness and
+        // must not turn an otherwise readable source into UI-unavailable.
+        return accountSource
+    }
+
+    private func sourceHealth(for source: MonitorRuntimeSource, state: SourceState, fallback: Freshness? = nil, now: Date, freshnessOverride: Freshness? = nil) -> MonitorSourceHealth {
         let fallbackAvailability = fallback.map { monitorAvailability(for: $0.state) }
         // The reducer aggregates exact per-thread source health. A single
         // most-recent desktop observation cannot conceal an older thread that
@@ -434,8 +600,15 @@ public actor MonitorRuntimeStore {
             ? (runtimeAggregateRequiresDowngrade ? fallback.flatMap { monitorReason(for: $0.state) } : state.reason ?? fallback.flatMap { monitorReason(for: $0.state) })
             : .monitorPausedOrRevalidating
         let observedAt = fallback?.observedAt ?? state.observedAt
-        let freshnessState: FreshnessState = switch resolvedAvailability { case .available: .fresh; case .stale: .stale; case .unavailable, .unknown: .unknown }
-        return MonitorSourceHealth(source: source, availability: resolvedAvailability, freshness: Freshness(state: freshnessState, assessedAt: now, observedAt: observedAt, reason: resolvedReason?.rawValue), reason: resolvedReason)
+        let resolvedFreshnessState: FreshnessState = switch resolvedAvailability {
+        case .available: .fresh
+        case .stale: .stale
+        case .unavailable, .unknown: .unknown
+        }
+        let freshnessState = freshnessOverride?.state ?? resolvedFreshnessState
+        let freshnessObservedAt = freshnessOverride?.observedAt ?? observedAt
+        let freshnessReason = freshnessOverride?.reason ?? resolvedReason?.rawValue
+        return MonitorSourceHealth(source: source, availability: resolvedAvailability, freshness: Freshness(state: freshnessState, assessedAt: freshnessOverride?.assessedAt ?? now, observedAt: freshnessObservedAt, reason: freshnessReason), reason: resolvedReason)
     }
 
     /// Historical threads remain in `threads`, but their freshness is not a
@@ -443,6 +616,10 @@ public actor MonitorRuntimeStore {
     /// old unavailable record from turning a current IDLE/WORKING/THINKING
     /// snapshot into Source Unavailable.
     private func desktopHealth(for current: MonitorThreadViewModel?, lane: SourceState, now: Date) -> MonitorSourceHealth {
+        if desktopCycleHealth != nil {
+            let decision = desktopAvailabilityDecision(runtime: engine.snapshot())
+            return desktopCycleSourceHealth(availability: decision.dataAvailability, reason: decision.reason, now: now)
+        }
         guard let current else {
             return sourceHealth(for: .desktopLocal, state: lane, now: now)
         }
@@ -460,6 +637,81 @@ public actor MonitorRuntimeStore {
             availability: availability,
             freshness: Freshness(state: current.freshness.state, assessedAt: now, observedAt: current.freshness.observedAt, reason: reason?.rawValue),
             reason: reason
+        )
+    }
+
+    private func applyDesktopCycleHealth(_ health: DesktopCycleHealth) {
+        let activeThreads = Set(engine.snapshot().threads.compactMap { $0.activeTurnID == nil ? nil : $0.threadID })
+        desktopCycleHasActiveThreadFailure = !activeThreads.isDisjoint(with: Set(health.failedThreadIDs))
+        for threadID in Set(health.failedThreadIDs + health.removedThreadIDs) { engine.remove(threadID: threadID) }
+        desktopCycleHealth = health
+        let now = clock.now()
+        if !health.processRunning {
+            desktopSource = SourceState(availability: .unavailable, observedAt: now, reason: .codexProcessNotRunning)
+            semanticIdleSince = nil
+            semanticUnavailableSince = nil
+        } else if !health.stateDBReadable || desktopCycleHasActiveThreadFailure {
+            desktopSource = SourceState(availability: .unavailable, observedAt: now, reason: .sourceUnavailable)
+            semanticIdleSince = nil
+            semanticDisconnectedSince = nil
+        } else {
+            desktopSource = SourceState(availability: .available, observedAt: now, reason: nil)
+            semanticUnavailableSince = nil
+            semanticDisconnectedSince = nil
+        }
+    }
+
+    private func desktopCycleSourceHealth(availability: MonitorDataAvailability, reason: MonitorUnavailabilityReason?, now: Date) -> MonitorSourceHealth {
+        let freshness: FreshnessState = availability == .available ? .fresh : .unknown
+        return MonitorSourceHealth(source: .desktopLocal, availability: availability, freshness: Freshness(state: freshness, assessedAt: now, observedAt: desktopSource.observedAt, reason: reason?.rawValue), reason: reason)
+    }
+
+    private func desktopSemanticState(_ runtime: GlobalRuntimeSnapshot, now: Date) -> (state: MonitorRuntimeState, since: Date, activity: RuntimeActivityCategory) {
+        guard desktopCycleHealth != nil else {
+            return (runtime.state, runtime.stateSince, runtime.currentActivityCategory)
+        }
+        let decision = desktopAvailabilityDecision(runtime: runtime)
+        switch decision {
+        case .disconnected:
+            semanticIdleSince = nil
+            if semanticDisconnectedSince == nil { semanticDisconnectedSince = now }
+            return (.disconnected, semanticDisconnectedSince ?? now, .disconnected)
+        case .paused:
+            semanticIdleSince = nil
+            return (.paused, runtime.stateSince, .idle)
+        case .sourceFailure:
+            semanticIdleSince = nil
+            if semanticUnavailableSince == nil { semanticUnavailableSince = now }
+            return (runtime.state, semanticUnavailableSince ?? now, runtime.currentActivityCategory)
+        case .availableActive:
+            semanticIdleSince = nil
+            return (runtime.state, runtime.stateSince, runtime.currentActivityCategory)
+        case .availableIdle:
+            let terminal = [MonitorRuntimeState.completed, .failed, .interrupted, .systemError].contains(runtime.state)
+            guard !terminal else { return (runtime.state, runtime.stateSince, runtime.currentActivityCategory) }
+            if semanticIdleSince == nil {
+                semanticIdleSince = runtime.state == .idle ? runtime.stateSince : now
+            }
+            return (.idle, semanticIdleSince ?? now, .idle)
+        }
+    }
+
+    private func desktopAvailabilityDecision(runtime: GlobalRuntimeSnapshot) -> DesktopAvailabilityDecision {
+        guard let health = desktopCycleHealth else {
+            return DesktopAvailabilityDecision(
+                processRunning: desktopSource.availability == .available,
+                stateDBReadable: desktopSource.availability == .available,
+                monitorPaused: monitoringPhase == .paused,
+                activeTurnPresent: runtime.activeThreadCount > 0,
+                fatalSourceError: desktopSource.availability == .unavailable
+            )
+        }
+        return DesktopAvailabilityDecision(
+            processRunning: health.processRunning,
+            stateDBReadable: health.stateDBReadable,
+            monitorPaused: monitoringPhase == .paused,
+            activeTurnPresent: runtime.activeThreadCount > 0,
+            fatalSourceError: desktopCycleHasActiveThreadFailure
         )
     }
 

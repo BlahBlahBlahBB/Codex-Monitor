@@ -4,6 +4,31 @@ import XCTest
 /// Opt-in read-only validation against an installed Codex source.  It carries
 /// no body text or production identifiers into test output or assertions.
 final class ProductionPathValidationTests: XCTestCase {
+    func testInstalledApprovalRowAtExactLogIDMapsToRequest() throws {
+        guard let path = ProcessInfo.processInfo.environment["CODEX_MONITOR_REAL_APPROVAL_DB"],
+              let rawLogID = ProcessInfo.processInfo.environment["CODEX_MONITOR_REAL_APPROVAL_LOG_ID"],
+              let logID = Int64(rawLogID) else {
+            throw XCTSkip("Set CODEX_MONITOR_REAL_APPROVAL_DB and CODEX_MONITOR_REAL_APPROVAL_LOG_ID to run the exact local probe")
+        }
+        let database = URL(fileURLWithPath: path)
+        let identity = try XCTUnwrap(FileIdentity.readOnlyIdentity(of: database))
+        let adapter = ApprovalLocalAdapter(
+            databaseURL: database,
+            sourceID: ApprovalLocalSourceID("production-exact-row-probe")!,
+            schema: .init(acceptedUserVersions: [0]),
+            checkpoint: ApprovalLogCursor(fileIdentity: identity, lastLogID: logID - 1),
+            retryPolicy: .init(maximumRowsPerPoll: 1)
+        )
+
+        let result = try adapter.poll()
+        XCTAssertEqual(result.cursor?.lastLogID, logID)
+        let request = try XCTUnwrap(result.observations.compactMap { observation -> ApprovalRequested? in
+            guard case .requested(let request) = observation else { return nil }
+            return request
+        }.first)
+        XCTAssertTrue(ApprovalRequestCorrelation.isTurnScoped(request.requestID, for: request.turnID))
+    }
+
     func testInstalledApprovalDatabaseAdmitsLifecycleEvidence() throws {
         guard let path = ProcessInfo.processInfo.environment["CODEX_MONITOR_REAL_APPROVAL_DB"] else {
             throw XCTSkip("Set CODEX_MONITOR_REAL_APPROVAL_DB to run the local read-only probe")
@@ -36,13 +61,13 @@ final class ProductionPathValidationTests: XCTestCase {
                     // typed boundary.
                     engine.ingest(RolloutRecordEnvelope(threadID: request.threadID, turnID: request.turnID, itemID: nil, kind: .taskStarted, activity: nil, tokenSnapshot: nil, model: nil, reasoningEffort: nil, eventID: nil, authoritativeEventAt: request.observedAt, observedAt: request.observedAt, fileOffset: 0))
                     engine.ingest(value)
-                    XCTAssertEqual(engine.snapshot().threads.first { $0.threadID == request.threadID }?.state, .waitingApproval)
+                    XCTAssertTrue(engine.snapshot().threads.first { $0.threadID == request.threadID }?.approvalRequestObserved == true)
                 case .resolved(let resolution):
                     resolutions += 1
                     let before = engine.snapshot().threads.first { $0.threadID == resolution.threadID }?.state
                     engine.ingest(value)
                     let after = engine.snapshot().threads.first { $0.threadID == resolution.threadID }?.state
-                    if before == .waitingApproval && after != .waitingApproval { reducerResolutionTransitions += 1 }
+                    if before != after { reducerResolutionTransitions += 1 }
                     XCTAssertFalse(adapter.lifecycleCheckpoint().unresolved.contains { $0.threadID == resolution.threadID && $0.turnID == resolution.turnID && $0.requestID == resolution.requestID })
                 case .sourceHealth, .sourceUnavailable: break
                 }
@@ -52,7 +77,7 @@ final class ProductionPathValidationTests: XCTestCase {
         }
         XCTAssertGreaterThan(requests, 0, "must admit at least one installed request")
         XCTAssertGreaterThan(resolutions, 0, "must admit at least one installed exact resolution")
-        XCTAssertGreaterThan(reducerResolutionTransitions, 0, "an installed resolution must clear its exact Waiting Approval state")
+        XCTAssertEqual(reducerResolutionTransitions, 0, "V1 does not project backend resolution into the main approval lifecycle")
         XCTAssertTrue(recoveredAfterUnavailable, "a malformed historical row must not leave the source permanently unavailable")
         XCTAssertNotNil(lastCursor, "read-only source must advance a cursor")
     }

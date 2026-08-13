@@ -167,6 +167,11 @@ final class MonitorStatusItemController: NSObject, NSPopoverDelegate {
     private let statusItem: NSStatusItem
     private let popover = NSPopover()
     private var hostedCapsule: NSHostingView<AnyView>?
+    /// Native `.transient` remains the primary behavior. These monitors exist
+    /// only while the popover is visible to cover AppKit's menu-bar dismissal
+    /// gaps on some macOS versions, then are removed immediately on close.
+    private var localOutsideClickMonitor: Any?
+    private var globalOutsideClickMonitor: Any?
 
     init(model: MonitorAppModel, preferences: MonitorPreferences, localization: LocalizationController, actions: MonitorSurfaceActions) {
         self.model = model
@@ -180,13 +185,17 @@ final class MonitorStatusItemController: NSObject, NSPopoverDelegate {
     }
 
     func refresh() {
-        hostedCapsule?.rootView = AnyView(LocalizedRoot(localization: localization) { MenuStatusCapsuleView(model: model).allowsHitTesting(false) })
+        hostedCapsule?.rootView = AnyView(LocalizedRoot(localization: localization) { MenuStatusCapsuleView(model: model, preferences: preferences).allowsHitTesting(false) })
     }
 
     func invalidate() {
         popover.performClose(nil)
+        removeOutsideClickFallback()
         NSStatusBar.system.removeStatusItem(statusItem)
     }
+
+    /// Read-only lifecycle seam for the native-popover regression test.
+    var popoverBehaviorForTesting: NSPopover.Behavior { popover.behavior }
 
     @objc private func togglePopover(_ sender: Any?) {
         guard let button = statusItem.button else { return }
@@ -195,6 +204,7 @@ final class MonitorStatusItemController: NSObject, NSPopoverDelegate {
         } else {
             preparePopoverContent(for: button)
             popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
+            installOutsideClickFallback()
             DiagnosticEvent.record(.popover, [
                 "event": "show", "placementOwner": "AppKitNativePopover",
                 "locale": L10n.resolvedLanguage
@@ -214,7 +224,7 @@ final class MonitorStatusItemController: NSObject, NSPopoverDelegate {
         // always uses its accessible label instead.
         button.toolTip = nil
 
-        let hosting = NSHostingView(rootView: AnyView(LocalizedRoot(localization: localization) { MenuStatusCapsuleView(model: model).allowsHitTesting(false) }))
+        let hosting = NSHostingView(rootView: AnyView(LocalizedRoot(localization: localization) { MenuStatusCapsuleView(model: model, preferences: preferences).allowsHitTesting(false) }))
         hosting.frame = NSRect(x: 0, y: 0, width: 48, height: 22)
         hosting.autoresizingMask = [.width, .height]
         button.addSubview(hosting)
@@ -228,7 +238,55 @@ final class MonitorStatusItemController: NSObject, NSPopoverDelegate {
     }
 
     func popoverDidClose(_ notification: Notification) {
+        removeOutsideClickFallback()
         DiagnosticEvent.record(.popover, ["event": "close", "locale": L10n.resolvedLanguage])
+    }
+
+    private func installOutsideClickFallback() {
+        guard localOutsideClickMonitor == nil, globalOutsideClickMonitor == nil else { return }
+        let mask: NSEvent.EventTypeMask = [.leftMouseDown, .rightMouseDown, .otherMouseDown]
+        localOutsideClickMonitor = NSEvent.addLocalMonitorForEvents(matching: mask) { [weak self] event in
+            let point = NSEvent.mouseLocation
+            Task { @MainActor [weak self] in self?.dismissPopoverIfOutsideClick(at: point) }
+            return event
+        }
+        globalOutsideClickMonitor = NSEvent.addGlobalMonitorForEvents(matching: mask) { [weak self] _ in
+            let point = NSEvent.mouseLocation
+            Task { @MainActor [weak self] in self?.dismissPopoverIfOutsideClick(at: point) }
+        }
+        DiagnosticEvent.record(.popover, ["event": "outsideClickFallbackInstalled"])
+    }
+
+    private func removeOutsideClickFallback() {
+        if let localOutsideClickMonitor {
+            NSEvent.removeMonitor(localOutsideClickMonitor)
+            self.localOutsideClickMonitor = nil
+        }
+        if let globalOutsideClickMonitor {
+            NSEvent.removeMonitor(globalOutsideClickMonitor)
+            self.globalOutsideClickMonitor = nil
+        }
+    }
+
+    private func dismissPopoverIfOutsideClick(at screenPoint: CGPoint) {
+        guard popover.isShown,
+              let popoverFrame = popover.contentViewController?.view.window?.frame,
+              let statusButtonFrame = statusButtonFrameOnScreen else {
+            return
+        }
+        guard Self.shouldDismissPopover(at: screenPoint, popoverFrame: popoverFrame, statusButtonFrame: statusButtonFrame) else { return }
+        DiagnosticEvent.record(.popover, ["event": "outsideClickFallbackDismiss"])
+        popover.performClose(nil)
+    }
+
+    private var statusButtonFrameOnScreen: CGRect? {
+        guard let button = statusItem.button, let window = button.window else { return nil }
+        let frameInWindow = button.convert(button.bounds, to: nil)
+        return window.convertToScreen(frameInWindow)
+    }
+
+    static func shouldDismissPopover(at point: CGPoint, popoverFrame: CGRect, statusButtonFrame: CGRect) -> Bool {
+        !popoverFrame.contains(point) && !statusButtonFrame.contains(point)
     }
 
     private func popoverRoot(maximumContentHeight: CGFloat?) -> AnyView {

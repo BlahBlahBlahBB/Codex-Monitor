@@ -84,6 +84,20 @@ public struct NamespacedID: Hashable, Codable, Sendable {
     }
 }
 
+/// Canonical local-calendar key for account usage day buckets.  Account usage
+/// is presented as calendar days rather than instants, so every producer and
+/// consumer must use the same calendar and timezone when deriving a key.
+public enum LocalUsageDateKey {
+    public static func value(for date: Date, calendar: Calendar = .autoupdatingCurrent) -> String {
+        let formatter = DateFormatter()
+        formatter.calendar = calendar
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = calendar.timeZone
+        formatter.dateFormat = "yyyy-MM-dd"
+        return formatter.string(from: date)
+    }
+}
+
 public struct AdapterID: Hashable, Codable, Sendable {
     public let rawValue: String
     public init?(_ rawValue: String) {

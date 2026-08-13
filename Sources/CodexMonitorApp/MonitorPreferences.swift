@@ -28,6 +28,15 @@ public final class MonitorPreferences: ObservableObject {
     @Published public var waitingApprovalNotifications: Bool { didSet { defaults.set(waitingApprovalNotifications, forKey: Keys.waitingApprovalNotifications) } }
     @Published public var taskCompletedNotifications: Bool { didSet { defaults.set(taskCompletedNotifications, forKey: Keys.taskCompletedNotifications) } }
     @Published public var hideAccountInfo: Bool { didSet { defaults.set(hideAccountInfo, forKey: Keys.hideAccountInfo) } }
+    @Published public var quotaWarningEnabled: Bool { didSet { defaults.set(quotaWarningEnabled, forKey: Keys.quotaWarningEnabled) } }
+    @Published public var quotaWarningThreshold: Double {
+        didSet {
+            let snapped = QuotaWarningThreshold.snap(quotaWarningThreshold)
+            if snapped != quotaWarningThreshold { quotaWarningThreshold = snapped; return }
+            defaults.set(quotaWarningThreshold, forKey: Keys.quotaWarningThreshold)
+        }
+    }
+    @Published public var experimentalApprovalYellowEnabled: Bool { didSet { defaults.set(experimentalApprovalYellowEnabled, forKey: Keys.experimentalApprovalYellowEnabled) } }
     @Published public var interfaceLanguage: InterfaceLanguage { didSet { defaults.set(interfaceLanguage.rawValue, forKey: Keys.interfaceLanguage) } }
     @Published public var orbOrigin: CGPoint? { didSet { persistOrigin() } }
 
@@ -44,6 +53,9 @@ public final class MonitorPreferences: ObservableObject {
         static let waitingApprovalNotifications = "monitor.waitingApprovalNotifications"
         static let taskCompletedNotifications = "monitor.taskCompletedNotifications"
         static let hideAccountInfo = "monitor.hideAccountInfo"
+        static let quotaWarningEnabled = "monitor.quotaWarningEnabled"
+        static let quotaWarningThreshold = "monitor.quotaWarningThreshold"
+        static let experimentalApprovalYellowEnabled = "monitor.experimentalApprovalYellowEnabled"
         static let interfaceLanguage = "monitor.interfaceLanguage"
         static let orbX = "monitor.orbX"
         static let orbY = "monitor.orbY"
@@ -63,6 +75,9 @@ public final class MonitorPreferences: ObservableObject {
         waitingApprovalNotifications = defaults.object(forKey: Keys.waitingApprovalNotifications) as? Bool ?? false
         taskCompletedNotifications = defaults.object(forKey: Keys.taskCompletedNotifications) as? Bool ?? false
         hideAccountInfo = defaults.object(forKey: Keys.hideAccountInfo) as? Bool ?? false
+        quotaWarningEnabled = defaults.object(forKey: Keys.quotaWarningEnabled) as? Bool ?? true
+        quotaWarningThreshold = QuotaWarningThreshold.snap(defaults.object(forKey: Keys.quotaWarningThreshold) as? Double ?? QuotaWarningThreshold.defaultValue)
+        experimentalApprovalYellowEnabled = defaults.object(forKey: Keys.experimentalApprovalYellowEnabled) as? Bool ?? false
         interfaceLanguage = InterfaceLanguage(rawValue: defaults.string(forKey: Keys.interfaceLanguage) ?? "") ?? .system
         if defaults.object(forKey: Keys.orbX) != nil, defaults.object(forKey: Keys.orbY) != nil {
             orbOrigin = CGPoint(x: defaults.double(forKey: Keys.orbX), y: defaults.double(forKey: Keys.orbY))

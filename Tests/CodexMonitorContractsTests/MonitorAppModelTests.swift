@@ -34,7 +34,7 @@ final class MonitorAppModelTests: XCTestCase {
         XCTAssertEqual(model.snapshot?.capabilities[.approvalResolution]?.availability, .unavailable)
     }
 
-    func testUnavailableAndWaitingApprovalSnapshotsRemainVisibleToUI() async {
+    func testUnavailableAndApprovalObservedSnapshotsRemainVisibleToUI() async {
         let clock = AppModelTestClock()
         let runtime = MonitorRuntimeStore(engine: RuntimeStateEngine(clock: clock, initialPhase: .live), clock: clock, initialPhase: .live)
         let thread = id(.thread, "thread"), turn = id(.turn, "turn"), request = id(.item, "request")
@@ -44,7 +44,8 @@ final class MonitorAppModelTests: XCTestCase {
         await runtime.ingest(event(thread, turn, .taskStarted, clock: clock))
         await runtime.ingest(.requested(ApprovalRequested(threadID: thread, turnID: turn, requestID: request, observedAt: clock.now())))
         model.apply(await runtime.snapshot())
-        XCTAssertEqual(model.snapshot?.currentState, .waitingApproval)
+        XCTAssertEqual(model.snapshot?.currentState, .thinking)
+        XCTAssertEqual(model.snapshot?.approvalRequestObserved, true)
         XCTAssertEqual(model.snapshot?.capabilities[.waitingApproval]?.availability, .available)
 
         await runtime.ingest(.sourceHealth(DesktopSourceHealth(threadID: thread, state: .unavailable, processEpoch: nil, fileIdentity: nil, reason: .sourceMissing)))
@@ -66,6 +67,80 @@ final class MonitorAppModelTests: XCTestCase {
         XCTAssertEqual(snapshot.currentState, .idle)
         XCTAssertEqual(snapshot.sourceHealth[.desktopLocal]?.availability, .available)
         XCTAssertEqual(VisualStatePresentation.forSnapshot(snapshot), .init(dots: [.green, .green, .green], orbTone: .green, breathes: false, stateTextKey: "state.idle"))
+    }
+
+    func testHeartbeatTimestampDoesNotChangePresentation() async {
+        let clock = AppModelTestClock()
+        let runtime = MonitorRuntimeStore(engine: RuntimeStateEngine(clock: clock, initialPhase: .live), clock: clock, initialPhase: .live)
+        let model = MonitorAppModel()
+        let thread = id(.thread, "heartbeat")
+        await runtime.applyDesktopCycle(
+            registrations: [DesktopThreadSnapshot(threadID: thread, title: "Idle", model: nil, reasoningEffort: nil, updatedAtMilliseconds: 1_700_000_000, tokensUsed: nil)],
+            observations: [],
+            health: DesktopCycleHealth(processRunning: true, stateDBReadable: true)
+        )
+        model.apply(await runtime.snapshot())
+        let baseline = model.acceptedSnapshotCount
+
+        for _ in 0..<100 {
+            clock.advance(2)
+            await runtime.applyDesktopCycle(registrations: [], observations: [], health: DesktopCycleHealth(processRunning: true, stateDBReadable: true))
+            model.apply(await runtime.snapshot())
+        }
+        XCTAssertEqual(model.acceptedSnapshotCount, baseline)
+
+        clock.advance(2)
+        await runtime.applyDesktopCycle(registrations: [], observations: [], health: DesktopCycleHealth(processRunning: true, stateDBReadable: false))
+        model.apply(await runtime.snapshot())
+        XCTAssertEqual(model.acceptedSnapshotCount, baseline + 1)
+        XCTAssertEqual(model.snapshot?.sourceHealth[.desktopLocal]?.availability, .unavailable)
+    }
+
+    /// Exercises the same production driver policy used by the two-second
+    /// source loop. An exact transient WAL disappearance after a long idle
+    /// interval is not evidence that a running Codex Desktop disappeared.
+    func testProductionIdleWatchdogDoesNotInvalidateRunningCodex() async {
+        let clock = AppModelTestClock()
+        let runtime = MonitorRuntimeStore(engine: RuntimeStateEngine(clock: clock, initialPhase: .live), clock: clock, initialPhase: .live)
+        await runtime.applyDesktopCycle(
+            registrations: [],
+            observations: [],
+            health: DesktopCycleHealth(processRunning: true, stateDBReadable: true)
+        )
+
+        clock.advance(1_801)
+        let disposition = DesktopPrimarySourceReadDisposition(
+            error: StateDBError.transientWALUnavailable,
+            hasSuccessfulStateDBRead: true
+        )
+        XCTAssertEqual(disposition, .retainLastKnownHealthy)
+
+        // This is the exact health write the production loop performs after a
+        // transient read failure. There is no parallel test-only reducer.
+        await runtime.applyDesktopCycle(
+            registrations: [],
+            observations: [],
+            health: DesktopCycleHealth(
+                processRunning: true,
+                stateDBReadable: disposition == .retainLastKnownHealthy
+            )
+        )
+        let snapshot = await runtime.snapshot()
+        XCTAssertEqual(snapshot.currentState, .idle)
+        XCTAssertEqual(snapshot.sourceHealth[.desktopLocal]?.availability, .available)
+    }
+
+    func testFatalStateDatabaseErrorsRemainUnavailable() {
+        for error in [StateDBError.readOnlyOpenFailed, .schemaMismatch, .queryFailed] {
+            XCTAssertEqual(
+                DesktopPrimarySourceReadDisposition(error: error, hasSuccessfulStateDBRead: true),
+                .fatal
+            )
+        }
+        XCTAssertEqual(
+            DesktopPrimarySourceReadDisposition(error: StateDBError.transientWALUnavailable, hasSuccessfulStateDBRead: false),
+            .fatal
+        )
     }
 
     private func id(_ kind: EntityKind, _ raw: String) -> NamespacedID {

@@ -20,7 +20,8 @@ final class CodexMonitorApplication: NSObject {
 @MainActor
 final class CodexMonitorAppDelegate: NSObject, NSApplicationDelegate {
     private let runtime = MonitorRuntimeStore()
-    private lazy var driver = CodexLocalMonitorDriver(runtime: runtime)
+    private let usageLedger = LocalUsageLedgerProvider()
+    private lazy var driver = CodexLocalMonitorDriver(runtime: runtime, usageLedger: usageLedger)
     private lazy var accountProvider = AccountUsageProvider(runtime: runtime)
     private let model = MonitorAppModel()
     let preferences = MonitorPreferences()
@@ -48,6 +49,7 @@ final class CodexMonitorAppDelegate: NSObject, NSApplicationDelegate {
         )
         self.surfaces = surfaces
         model.startObserving(runtime)
+        model.startObserving(usageLedger)
         surfaces.start()
         Task { await driver.start() }
         Task { await accountProvider.start() }
