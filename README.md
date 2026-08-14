@@ -17,7 +17,7 @@
 [![直接下载 macOS](https://img.shields.io/badge/直接下载-macOS-black?style=for-the-badge&logo=apple)](https://github.com/BlahBlahBlahBB/Codex-Monitor/releases/latest/download/Codex-Monitor-macOS.zip)
 
 
----
+<br> 
 
 
 ## 项目简介
@@ -40,7 +40,7 @@ Codex Monitor 采用 Capability-driven（能力驱动）架构。
 只有当底层数据源真正具备对应能力时，界面才会展示相关状态，避免把无法可靠确认的数据伪装成实时信息。
 
 
----
+<br> 
 
 
 ## 主要功能
@@ -99,7 +99,7 @@ Codex Monitor 不会使用推测数据替代真实数据。
 - 避免不同来源信息被错误混合
 
 
----
+<br> 
 
 
 ## 技术架构
@@ -145,7 +145,7 @@ Codex Monitor 当前主要技术栈：
 当前不会输出模拟、占位或伪造的实时数据。
 
 
----
+<br> 
 
 
 ## 系统要求
@@ -155,7 +155,7 @@ Codex Monitor 当前主要技术栈：
 - Xcode 或 Xcode Command Line Tools
 
 
----
+<br> 
 
 
 ## 获取源码
