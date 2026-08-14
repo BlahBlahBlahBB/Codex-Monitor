@@ -1,4 +1,0 @@
-command: codex app-server daemon version
-sanitized output:
-Error: failed to connect to <CODEX_HOME>/app-server-control/app-server-control.sock
-Caused by: No such file or directory (os error 2)

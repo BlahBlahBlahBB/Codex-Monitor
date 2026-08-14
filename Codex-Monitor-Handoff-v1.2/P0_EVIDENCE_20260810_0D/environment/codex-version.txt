@@ -1,6 +1,0 @@
-command: codex --version
-sanitized output:
-codex-cli 0.147.0-alpha.6.5
-
-binary: <APPLICATION_BUNDLE>/Contents/Resources/codex
-platform: macOS 26.5.2 / arm64

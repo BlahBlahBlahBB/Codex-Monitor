@@ -1,9 +1,0 @@
-{
-  "command": "python3 Tools/P0Probe/p0_probe.py status --socket <CODEX_HOME>/app-server-control/app-server-control.sock",
-  "output": {
-    "policy": "do_not_start_or_restart_daemon",
-    "socket": "<CODEX_HOME>/app-server-control/app-server-control.sock",
-    "status": "absent"
-  },
-  "interpretation": "P0Probe correctly did not attempt a connection because the actual resolved Unix socket did not exist."
-}
