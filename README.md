@@ -1,4 +1,5 @@
-# 🟢🟡🔴 Codex Monitor
+# 🟢🟡🔴
+# Codex Monitor
 
 一个原生 macOS Codex 辅助工具，通过菜单栏状态胶囊、桌面悬浮球、Quick View、用量和设置等界面，为 Codex 提供轻量、快速、低打扰的桌面辅助体验。
 
