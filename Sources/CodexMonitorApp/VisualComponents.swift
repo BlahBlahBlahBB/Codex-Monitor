@@ -16,8 +16,10 @@ private struct PresentationBreathing: ViewModifier {
     func body(content: Content) -> some View {
         if enabled && !reduceMotion {
             TimelineView(.animation(minimumInterval: 1.0 / 30.0, paused: false)) { timeline in
-                let phase = (sin(timeline.date.timeIntervalSinceReferenceDate * .pi * 2 / 2.4) + 1) / 2
-                content.opacity(0.62 + phase * 0.36)
+                // Keep breathing as a quiet brightness cue. It intentionally
+                // never changes geometry, scale, or adds a glow.
+                let phase = (sin(timeline.date.timeIntervalSinceReferenceDate * .pi * 2 / 2.8) + 1) / 2
+                content.opacity(0.72 + phase * 0.18)
             }
         } else {
             content.opacity(steadyOpacity)
@@ -262,7 +264,7 @@ private struct OrbDepthHighlight: View {
             Circle()
                 .fill(
                     RadialGradient(
-                        colors: [Color.white.opacity(0.10), .clear],
+                        colors: [Color.white.opacity(0.06), .clear],
                         center: .topLeading,
                         startRadius: 0,
                         endRadius: max(1, size * 0.82)
@@ -369,11 +371,16 @@ struct MonitorValueRow: View {
 
 struct MonitorSectionTitle: View {
     let title: String
-    var body: some View { Text(title).font(.system(size: 15, weight: .semibold)).foregroundStyle(.primary) }
+    var body: some View {
+        Text(title)
+            .font(.system(size: 14, weight: .semibold))
+            .tracking(-0.08)
+            .foregroundStyle(.primary)
+    }
 }
 
 struct MonitorDivider: View {
-    var body: some View { Rectangle().fill(Color(nsColor: .separatorColor).opacity(0.72)).frame(height: 0.5) }
+    var body: some View { Rectangle().fill(Color(nsColor: .separatorColor).opacity(0.60)).frame(height: 0.5) }
 }
 
 enum MonitorDisplayValue {
@@ -499,6 +506,13 @@ enum MonitorDisplayValue {
 
     static func taskTitle(_ snapshot: MonitorRuntimeSnapshot?) -> String {
         taskTitleForPresentation(snapshot?.currentThread?.taskTitle)
+    }
+
+    /// Usage intentionally shares Quick View's resolved conversation title.
+    /// The structured thread ID remains available separately for runtime
+    /// identity and token accounting, but is never presentation text here.
+    static func sessionInfo(_ snapshot: MonitorRuntimeSnapshot?) -> String {
+        quickViewTaskTitle(snapshot)
     }
 
     /// Idle has no active task attribution. Keep the brief completed

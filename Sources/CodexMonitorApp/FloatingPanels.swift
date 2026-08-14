@@ -304,39 +304,38 @@ struct FloatingOrbRoot: View {
 private struct QuickView: View {
     @ObservedObject var model: MonitorAppModel
     @ObservedObject var preferences: MonitorPreferences
-    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
 
     var body: some View {
         let snapshot = model.snapshot
         let presentation = model.presentation(using: preferences)
-        GlassSurface(cornerRadius: 22, shadow: false) {
+        GlassSurface(cornerRadius: 18, shadow: false) {
             VStack(alignment: .leading, spacing: 0) {
-                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                HStack(alignment: .firstTextBaseline, spacing: 7) {
                     Text("Codex")
-                        .font(.system(size: 17, weight: .semibold))
+                        .font(.system(size: 16, weight: .semibold))
                         .tracking(-0.15)
                     Spacer(minLength: 8)
                     Text(MonitorDisplayValue.update(snapshot))
-                        .font(.system(size: 11, weight: .medium))
+                        .font(.system(size: 10.5, weight: .medium))
                         .foregroundStyle(.secondary)
                 }
                 HStack(spacing: 6) {
                     Circle().fill(presentation.orbTone.color).frame(width: 7, height: 7)
                     Text(MonitorDisplayValue.state(presentation))
-                        .font(.system(size: 14, weight: .semibold))
+                        .font(.system(size: 13, weight: .semibold))
                 }
-                .padding(.top, 5)
+                .padding(.top, 4)
 
                 Text(MonitorDisplayValue.quickViewTaskTitle(snapshot))
                     .font(.system(size: 14, weight: .medium))
                     .lineLimit(1)
-                    .padding(.top, 12)
+                    .padding(.top, 10)
                 Text(MonitorDisplayValue.activity(snapshot))
                     .font(.system(size: 12))
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
-                    .padding(.top, 3)
-                MonitorDivider().padding(.vertical, 12)
+                    .padding(.top, 2)
+                MonitorDivider().padding(.vertical, 10)
 
                 Text(MonitorDisplayValue.modelRuntime(snapshot))
                     .font(.system(size: 11, weight: .medium))
@@ -347,16 +346,16 @@ private struct QuickView: View {
                     .foregroundStyle(.secondary)
                     .monospacedDigit()
                     .lineLimit(1)
-                    .padding(.top, 6)
+                    .padding(.top, 5)
                 Text("\(L10n.tr("label.quotaReset"))  \(MonitorDisplayValue.quotaResetDate(snapshot))")
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
                     .monospacedDigit()
                     .lineLimit(1)
-                    .padding(.top, 6)
+                    .padding(.top, 5)
             }
-            .padding(.horizontal, 16)
-            .padding(.vertical, 16)
+            .padding(.horizontal, 14)
+            .padding(.vertical, 14)
         }
         .frame(width: 350, height: 214)
         .accessibilityElement(children: .combine)

@@ -109,6 +109,7 @@ struct PopoverActionRow: View {
             HStack(spacing: 10) {
                 Image(systemName: symbol)
                     .frame(width: 18)
+                    .font(.system(size: 12.5, weight: .medium))
                     .imageScale(.small)
                     .foregroundStyle(.secondary)
                 Text(title).font(.system(size: 13, weight: .medium))
@@ -169,13 +170,13 @@ struct UsageWindowView: View {
     var body: some View {
         let snapshot = model.snapshot
         ScrollView {
-            VStack(alignment: .leading, spacing: 20) {
+            VStack(alignment: .leading, spacing: 18) {
                 UsageFactSection(title: L10n.tr("label.account")) {
                     UsageFactRow(label: L10n.tr("label.account"), value: MonitorDisplayValue.account(snapshot, hidden: preferences.hideAccountInfo))
                     UsageFactRow(label: L10n.tr("label.plan"), value: MonitorDisplayValue.plan(snapshot))
                 }
                 UsageFactSection(title: L10n.tr("label.session")) {
-                    UsageFactRow(label: L10n.tr("label.currentSession"), value: MonitorDisplayValue.taskTitle(snapshot))
+                    UsageFactRow(label: L10n.tr("label.currentSession"), value: MonitorDisplayValue.sessionInfo(snapshot))
                     UsageFactRow(label: L10n.tr("label.sessionToken"), value: MonitorDisplayValue.token(snapshot))
                 }
                 UsageFactSection(title: L10n.tr("label.resetCredit")) {
@@ -205,9 +206,9 @@ private struct UsageFactSection<Content: View>: View {
     let title: String
     @ViewBuilder let content: Content
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
+        VStack(alignment: .leading, spacing: 10) {
             MonitorSectionTitle(title: title)
-            VStack(alignment: .leading, spacing: 8) { content }
+            VStack(alignment: .leading, spacing: 7) { content }
         }
     }
 }
@@ -219,8 +220,12 @@ private struct UsageFactRow: View {
         HStack(alignment: .firstTextBaseline) {
             Text(label).font(.system(size: 13)).foregroundStyle(.secondary)
             Spacer(minLength: 16)
-            Text(value).font(.system(size: 13, weight: .medium)).multilineTextAlignment(.trailing).lineLimit(1)
+            Text(value)
+                .font(.system(size: 13, weight: .medium))
+                .multilineTextAlignment(.trailing)
+                .lineLimit(2)
         }
+        .frame(minHeight: 20, alignment: .center)
     }
 }
 
@@ -241,7 +246,11 @@ private struct UsageMetricGrid: View {
             UsageMetric(title: L10n.tr("label.todayToken"), value: localUsage?.today.map { MonitorDisplayValue.summaryTokenFormat($0.totalTokens) } ?? "--")
             UsageMetric(title: L10n.tr("label.last30DaysToken"), value: hybrid?.headlineTokens.map { MonitorDisplayValue.summaryTokenFormat($0) } ?? "--")
         }
-        .background(Color(nsColor: .controlBackgroundColor).opacity(0.28), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .background(Color(nsColor: .controlBackgroundColor).opacity(0.20), in: RoundedRectangle(cornerRadius: 11, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 11, style: .continuous)
+                .strokeBorder(Color.primary.opacity(0.07), lineWidth: 0.5)
+        }
     }
 }
 
@@ -254,14 +263,14 @@ private struct UsageMetric: View {
                 .font(.system(size: 11, weight: .medium))
                 .foregroundStyle(.secondary)
             Text(value)
-                .font(.system(size: 19, weight: .semibold))
+                .font(.system(size: 18, weight: .semibold))
                 .monospacedDigit()
                 .lineLimit(1)
                 .minimumScaleFactor(0.7)
         }
-        .frame(maxWidth: .infinity, minHeight: 72, alignment: .leading)
-        .padding(.horizontal, 16)
-        .overlay(alignment: .trailing) { Rectangle().fill(Color(nsColor: .separatorColor).opacity(0.42)).frame(width: 0.5) }
+        .frame(maxWidth: .infinity, minHeight: 68, alignment: .leading)
+        .padding(.horizontal, 14)
+        .overlay(alignment: .trailing) { Rectangle().fill(Color(nsColor: .separatorColor).opacity(0.30)).frame(width: 0.5) }
     }
 }
 
@@ -312,6 +321,14 @@ private struct UsageHistoryChart: View {
             )
             .foregroundStyle(chartColor(for: bucket))
             .clipShape(RoundedRectangle(cornerRadius: 2, style: .continuous))
+        }
+        .chartPlotStyle { plotArea in
+            plotArea
+                .background(Color.primary.opacity(0.025), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        .strokeBorder(Color.primary.opacity(0.06), lineWidth: 0.5)
+                }
         }
         .chartXAxis(.hidden)
         .chartYAxis(.hidden)
@@ -387,7 +404,7 @@ private struct UsageChartTooltip: View {
             .padding(.horizontal, 8)
             .padding(.vertical, 6)
             .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
-            .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).strokeBorder(Color(nsColor: .separatorColor).opacity(0.58), lineWidth: 0.5))
+            .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).strokeBorder(Color(nsColor: .separatorColor).opacity(0.46), lineWidth: 0.5))
             .lineLimit(3)
     }
 }
@@ -643,12 +660,16 @@ private struct SettingsDetail<Content: View>: View {
     @ViewBuilder let content: Content
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 16) {
+            VStack(alignment: .leading, spacing: 14) {
                 Text(title)
                     .font(.system(size: 16, weight: .semibold))
                     .tracking(-0.1)
                 VStack(spacing: 0) { content }
-                    .background(Color(nsColor: .controlBackgroundColor).opacity(0.22), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                    .background(Color(nsColor: .controlBackgroundColor).opacity(0.18), in: RoundedRectangle(cornerRadius: 11, style: .continuous))
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 11, style: .continuous)
+                            .strokeBorder(Color.primary.opacity(0.06), lineWidth: 0.5)
+                    }
             }
             .padding(20)
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -671,7 +692,10 @@ private struct SettingsRow<Control: View>: View {
                 .frame(width: 204, alignment: .trailing)
         }
         .padding(.horizontal, 16)
-        .frame(minHeight: 52)
+        .frame(minHeight: 48)
+        .overlay(alignment: .bottom) {
+            MonitorDivider().padding(.leading, 16)
+        }
     }
 }
 
@@ -804,9 +828,10 @@ private struct QuotaWarningSettingsRow: View {
                         }
                     }
                 )
+                .controlSize(.small)
                 Text("\(Int(preferences.quotaWarningThreshold))%")
                     .font(.system(size: 12, weight: .medium))
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(.primary)
                     .monospacedDigit()
                     .frame(width: 36, alignment: .trailing)
             }
@@ -850,8 +875,12 @@ private struct AdvancedSettingsDetail: View {
             }
             SettingsRow(title: L10n.tr("settings.refresh")) { Button(L10n.tr("settings.refresh"), action: actions.refresh).buttonStyle(.bordered) }
             SettingsRow(title: L10n.tr("settings.openCodex")) { Button(L10n.tr("settings.openCodex"), action: actions.openCodex).buttonStyle(.bordered) }
+#if !CODEX_MONITOR_RELEASE
+            // These local troubleshooting controls are deliberately omitted from
+            // the distributable product. The QA build continues to expose them.
             SettingsRow(title: L10n.tr("settings.openLogsFolder")) { Button(L10n.tr("settings.openLogsFolder"), action: actions.openLogsFolder).buttonStyle(.bordered) }
             SettingsRow(title: L10n.tr("settings.openDiagnostics")) { Button(L10n.tr("settings.openDiagnostics"), action: actions.showDiagnostics).buttonStyle(.bordered) }
+#endif
         }
     }
 }

@@ -164,6 +164,62 @@ final class MonitorProductIntegrationTests: XCTestCase {
         XCTAssertEqual(MonitorDisplayValue.taskTitleForPresentation("Implement the status view"), "Implement the status view")
     }
 
+    func testUsageCurrentSessionUsesResolvedDisplayTitle() async {
+        let snapshot = await activeUsageSessionSnapshot(
+            title: "Codex Monitor — Luna Final Visual Polish",
+            threadRawID: "019ffa90-a5ce-7523-99d5-a85aaa140d0f",
+            sessionTokens: 35_275_465
+        )
+
+        XCTAssertEqual(MonitorDisplayValue.sessionInfo(snapshot), "Codex Monitor — Luna Final Visual Polish")
+    }
+
+    func testUsageCurrentSessionDoesNotDisplayThreadUUID() async {
+        let uuid = "019ffa90-a5ce-7523-99d5-a85aaa140d0f"
+        let snapshot = await activeUsageSessionSnapshot(
+            title: "Codex Monitor — Luna Final Visual Polish",
+            threadRawID: uuid,
+            sessionTokens: 35_275_465
+        )
+
+        XCTAssertNotEqual(MonitorDisplayValue.sessionInfo(snapshot), uuid)
+        XCTAssertEqual(MonitorDisplayValue.sessionInfo(snapshot), "Codex Monitor — Luna Final Visual Polish")
+    }
+
+    func testUsageCurrentSessionDoesNotDisplayRawPrompt() async {
+        let rawPrompt = "The following is Codex agent history and hidden context\n# Files mentioned by the user"
+        let snapshot = await activeUsageSessionSnapshot(
+            title: rawPrompt,
+            threadRawID: "019ffa90-a5ce-7523-99d5-a85aaa140d0f",
+            sessionTokens: 35_275_465
+        )
+
+        XCTAssertNotEqual(MonitorDisplayValue.sessionInfo(snapshot), rawPrompt)
+        XCTAssertEqual(MonitorDisplayValue.sessionInfo(snapshot), L10n.tr("activity.currentTask"))
+    }
+
+    func testUsageAndQuickViewResolveSameCurrentConversationTitle() async {
+        let snapshot = await activeUsageSessionSnapshot(
+            title: "Codex Monitor — Current Conversation",
+            threadRawID: "019ffa90-a5ce-7523-99d5-a85aaa140d0f",
+            sessionTokens: 35_275_465
+        )
+
+        XCTAssertEqual(MonitorDisplayValue.sessionInfo(snapshot), MonitorDisplayValue.quickViewTaskTitle(snapshot))
+    }
+
+    func testUsageSessionTokenStillUsesCorrectSessionIdentity() async {
+        let snapshot = await activeUsageSessionSnapshot(
+            title: "Codex Monitor — Current Conversation",
+            threadRawID: "019ffa90-a5ce-7523-99d5-a85aaa140d0f",
+            sessionTokens: 35_275_465
+        )
+
+        XCTAssertEqual(snapshot.currentSessionThread?.threadID.rawID, "019ffa90-a5ce-7523-99d5-a85aaa140d0f")
+        XCTAssertEqual(snapshot.sessionToken, 35_275_465)
+        XCTAssertEqual(MonitorDisplayValue.token(snapshot), "35,275,465 Token")
+    }
+
     func testIdleQuickViewNeverShowsHistoricalTaskTitle() async {
         let source = SourceID("quick-view-idle")!
         let thread = NamespacedID(sourceID: source, entityKind: .thread, rawID: "historical")!
@@ -902,6 +958,32 @@ final class MonitorProductIntegrationTests: XCTestCase {
         let account = AccountSnapshot(provenance: provenance, usage: usage)!
         let runtime = MonitorRuntimeStore(initialPhase: .live)
         await runtime.ingest(account: account)
+        return await runtime.snapshot()
+    }
+
+    private func activeUsageSessionSnapshot(title: String, threadRawID: String, sessionTokens: Int64) async -> MonitorRuntimeSnapshot {
+        let clock = PermissionPresentationTestClock()
+        let runtime = MonitorRuntimeStore(
+            engine: RuntimeStateEngine(clock: clock, initialPhase: .live),
+            clock: clock,
+            initialPhase: .live
+        )
+        let source = SourceID("usage-current-session-title")!
+        let thread = NamespacedID(sourceID: source, entityKind: .thread, rawID: threadRawID)!
+        let turn = NamespacedID(sourceID: source, entityKind: .turn, rawID: "usage-current-session-turn")!
+        await runtime.registerDesktopThread(DesktopThreadSnapshot(threadID: thread, title: title, model: "gpt-test", reasoningEffort: nil, updatedAtMilliseconds: nil, tokensUsed: nil))
+        await runtime.ingest(.rollout(RolloutRecordEnvelope(
+            threadID: thread,
+            turnID: turn,
+            itemID: nil,
+            kind: .taskStarted,
+            activity: nil,
+            tokenSnapshot: TokenSnapshot(totalTokens: sessionTokens, lastCallTokens: nil),
+            model: nil,
+            reasoningEffort: nil,
+            observedAt: clock.now(),
+            fileOffset: 0
+        )))
         return await runtime.snapshot()
     }
 
