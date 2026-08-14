@@ -18,10 +18,6 @@
 
 [![直接下载 macOS](https://img.shields.io/badge/直接下载-macOS-black?style=for-the-badge&logo=apple)](https://github.com/BlahBlahBlahBB/Codex-Monitor/releases/latest/download/Codex-Monitor-macOS.zip)
 
-> 首个 GitHub Release 正式发布前，以上下载入口可能暂不可用。
->
-> 后续正式 Release 将提供可直接安装或解压使用的 macOS 版本。
-
 
 ---
 
