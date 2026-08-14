@@ -19,7 +19,7 @@
 
 <br> 
 
-## 项目简介
+## 📑 项目简介
 
 Codex Monitor 是一个面向 macOS 的原生桌面辅助工具。
 
@@ -40,7 +40,7 @@ Codex Monitor 采用 Capability-driven（能力驱动）架构。
 
 <br> 
 
-## 主要功能
+## 📗 主要功能
 
 ### 菜单栏状态胶囊
 
@@ -97,7 +97,7 @@ Codex Monitor 不会使用推测数据替代真实数据。
 
 <br> 
 
-## 技术架构
+## 💾 技术架构
 
 Codex Monitor 当前主要技术栈：
 
@@ -141,7 +141,7 @@ Codex Monitor 当前主要技术栈：
 
 <br> 
 
-## 系统要求
+## ⚠️ 系统要求
 
 - macOS 13 或以上
 - Swift 6 兼容工具链
@@ -149,7 +149,7 @@ Codex Monitor 当前主要技术栈：
 
 <br> 
 
-## 获取源码
+## 🗂️ 获取源码
 
 通过 SSH：
 
