@@ -9,7 +9,7 @@
 
 <br> 
 
-## 📂 下载
+## 📂 Download
 
 ### macOS
 
@@ -19,7 +19,7 @@
 
 <br> 
 
-## 📑 项目简介
+## 📑 简介
 
 Codex Monitor 是一个面向 macOS 的原生桌面辅助工具。
 
