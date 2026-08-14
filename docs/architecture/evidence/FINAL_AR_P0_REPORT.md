@@ -2,7 +2,7 @@
 
 Phase: AR-P0R — GPT-5.6 Sol / High  
 Date: 2026-08-10  
-Architecture baseline: `14_ARCHITECTURE_REVISION_HYBRID_V1.md`  
+Architecture baseline: `../14_ARCHITECTURE_REVISION_HYBRID_V1.md`<br>
 Review scope: evidence and architecture decision only; no production implementation.
 
 ## Final decisions
@@ -33,6 +33,8 @@ The reviewed baseline is not beta or public-release eligible. Official OpenAI do
 
 ## Evidence reviewed
 
+> Historical evidence inputs; original paths are retained only on `codex/github-readiness-audit`.
+
 - `AR_P0_REPORT_DRAFT.md`
 - `PHASE_AR_P0_REPORT.md`
 - `AR_P0_CAPABILITY_MATRIX.json`
@@ -46,6 +48,8 @@ The reviewed baseline is not beta or public-release eligible. Official OpenAI do
 All retained JSON evidence parsed successfully. A static credential/email/home-path/private-key scan found no retained sensitive value in the reviewed evidence roots. The AR-P0 safety fields report no Desktop `thread/resume`/`thread/start`/`thread/fork`, no approval response, no reset-credit consume call, and no raw payload retention.
 
 ## Evidence integrity corrections
+
+> The artifact paths named below are historical evidence inputs retained only on `codex/github-readiness-audit`.
 
 The draft artifacts are directionally honest, but the following corrections are binding for architecture decisions:
 

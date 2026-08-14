@@ -10,17 +10,16 @@
 
 Read in this order:
 
-1. `17_MASTER_PRD_V2_HYBRID.md`
-2. `14_ARCHITECTURE_REVISION_HYBRID_V1.md`
-3. `FINAL_AR_P0_REPORT.md`
-4. `18_SPEC_SUPERSESSION_AND_SOURCE_OF_TRUTH.md`
-5. `19_CAPABILITY_BASELINE_AND_GATES.md`
-6. `20_HYBRID_PHASE_MODEL_PLAYBOOK.md`
-7. `21_HYBRID_EXECUTION_PACK/00_START_HERE_HYBRID_EXECUTION.md`
+1. `product/17_MASTER_PRD_V2_HYBRID.md`
+2. `architecture/14_ARCHITECTURE_REVISION_HYBRID_V1.md`
+3. `architecture/evidence/FINAL_AR_P0_REPORT.md`
+4. `architecture/18_SPEC_SUPERSESSION_AND_SOURCE_OF_TRUTH.md`
+5. `architecture/19_CAPABILITY_BASELINE_AND_GATES.md`
+6. `product/20_HYBRID_PHASE_MODEL_PLAYBOOK.md`
 
 The approved visual reference remains:
 
-`00_APPROVED_VISUAL_REFERENCE_v1.9.html`
+`design/APPROVED_VISUAL_REFERENCE.html`
 
 but it is a visual reference only. Production remains native SwiftUI + AppKit.
 

@@ -102,7 +102,7 @@ No H2 transport, sockets, WebSocket framing, JSON-RPC, runtime launch/supervisio
 
 None from the H1F functional scope. Swift's compiler cache required local execution approval because the sandbox cannot write the platform cache; no project dependency or external network access was used.
 
-An unrelated tracked Finder metadata file, `Codex-Monitor-Hybrid-Handoff-v2.0/.DS_Store`, is modified in the working tree and was intentionally not staged or included in the H1F implementation commit.
+An unrelated tracked Finder metadata file, historically recorded as `Codex-Monitor-Hybrid-Handoff-v2.0/.DS_Store` and retained only on `codex/github-readiness-audit`, was intentionally not staged or included in the H1F implementation commit.
 
 ## Stop condition
 

@@ -2,7 +2,7 @@
 
 > Status: **ARCHITECTURE REVISION — Ready for review; not implementation authorization**  
 > Revision date: 2026-08-10  
-> Inputs: `FINAL_P0_REVALIDATION_REPORT.md`, `PHASE_0E_REPORT.md`, specifications 04–11  
+> Historical inputs (retained only on `codex/github-readiness-audit`): `FINAL_P0_REVALIDATION_REPORT.md`, `PHASE_0E_REPORT.md`, specifications 04–11
 > Supersedes: every conflicting runtime-observation, Desktop-state, reconnect, Session Token, approval, and phase-order statement in specifications 04–11  
 > Does not authorize: old Phase 1, production code, UI implementation, `thread/resume`-as-observer, private APIs, scraping, or credential extraction
 
@@ -799,6 +799,6 @@ Hybrid v1 is complete only when:
 
 ## 19. Stop condition
 
-Architecture Revision 1 ends with this specification and `PHASE_AR1_REPORT.md`.
+Architecture Revision 1 ends with this specification and `evidence/PHASE_AR1_REPORT.md`.
 
 Do not execute old Phase 1. Do not write production code. Do not modify UI. Do not run `thread/resume` or any further observer workaround. The next authorized activity, if separately requested, is the disposable AR-P0 Hybrid capability validation plan/execution.

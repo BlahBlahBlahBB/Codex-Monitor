@@ -11,18 +11,18 @@ End commit: none (Git was intentionally not initialized)
 
 ## Master/specs read
 
-- `README_START_HERE_V2.md`
-- `17_MASTER_PRD_V2_HYBRID.md` — active Master Source of Truth
-- `14_ARCHITECTURE_REVISION_HYBRID_V1.md`
+- `../../README.md`
+- `../../product/17_MASTER_PRD_V2_HYBRID.md` — active Master Source of Truth
+- `../14_ARCHITECTURE_REVISION_HYBRID_V1.md`
 - `FINAL_AR_P0_REPORT.md`
-- `18_SPEC_SUPERSESSION_AND_SOURCE_OF_TRUTH.md`
-- `19_CAPABILITY_BASELINE_AND_GATES.md`
-- `20_HYBRID_PHASE_MODEL_PLAYBOOK.md`
-- `21_HYBRID_EXECUTION_PACK/00_START_HERE_HYBRID_EXECUTION.md`
-- `21_HYBRID_EXECUTION_PACK/01_H1_TERRA_CAPABILITY_CONTRACTS.md`
-- `21_HYBRID_EXECUTION_PACK/91_PHASE_REPORT_TEMPLATE_V2.md`
-- `21_HYBRID_EXECUTION_PACK/92_HYBRID_STOP_GATES.md`
-- `LEGACY_REFERENCES/04–09`, used only for non-conflicting frozen semantics, privacy, native architecture, and UI constraints.
+- `../18_SPEC_SUPERSESSION_AND_SOURCE_OF_TRUTH.md`
+- `../19_CAPABILITY_BASELINE_AND_GATES.md`
+- `../../product/20_HYBRID_PHASE_MODEL_PLAYBOOK.md`
+- Historical material; retained only on `codex/github-readiness-audit`: `21_HYBRID_EXECUTION_PACK/00_START_HERE_HYBRID_EXECUTION.md`
+- Historical material; retained only on `codex/github-readiness-audit`: `21_HYBRID_EXECUTION_PACK/01_H1_TERRA_CAPABILITY_CONTRACTS.md`
+- Historical material; retained only on `codex/github-readiness-audit`: `21_HYBRID_EXECUTION_PACK/91_PHASE_REPORT_TEMPLATE_V2.md`
+- Historical material; retained only on `codex/github-readiness-audit`: `21_HYBRID_EXECUTION_PACK/92_HYBRID_STOP_GATES.md`
+- `../../reference/legacy-v1.2/04–09`, used only for non-conflicting frozen semantics, privacy, native architecture, and UI constraints.
 
 ## Capability baseline at start and end
 
@@ -53,9 +53,9 @@ No capability was promoted. The end baseline remains:
 
 ## Files changed
 
-- `H1_CAPABILITY_BASELINE.md`
-- `H1_ADAPTER_CONTRACTS.md`
-- `H1_TRANSPORT_DECISION.md`
+- `../H1_CAPABILITY_BASELINE.md`
+- `../H1_ADAPTER_CONTRACTS.md`
+- `../H1_TRANSPORT_DECISION.md`
 - `PHASE_H1_REPORT.md`
 
 ## Tests
@@ -70,7 +70,7 @@ The following H1 static contract checks were completed after writing the deliver
 4. The transport document contains one exact selected local transport plus lifecycle/permission/security assumptions.
 5. No H2 implementation artifact, transport connection, reset mutation, Desktop lifecycle workaround, or product UI was introduced.
 
-The executable test hooks required for a later test target are enumerated in `H1_CAPABILITY_BASELINE.md` and cross-referenced by `H1_ADAPTER_CONTRACTS.md`.
+The executable test hooks required for a later test target are enumerated in `../H1_CAPABILITY_BASELINE.md` and cross-referenced by `../H1_ADAPTER_CONTRACTS.md`.
 
 ## Result
 

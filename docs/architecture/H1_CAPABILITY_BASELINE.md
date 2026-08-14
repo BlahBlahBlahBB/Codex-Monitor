@@ -7,7 +7,7 @@
 
 ## 1. Authority and non-promotion rule
 
-This baseline is derived from `17_MASTER_PRD_V2_HYBRID.md`, `FINAL_AR_P0_REPORT.md`, and `14_ARCHITECTURE_REVISION_HYBRID_V1.md`. A capability state is an evidence claim, not a decoder, fixture, schema name, or UI preference.
+This baseline is derived from `../product/17_MASTER_PRD_V2_HYBRID.md`, `evidence/FINAL_AR_P0_REPORT.md`, and `14_ARCHITECTURE_REVISION_HYBRID_V1.md`. A capability state is an evidence claim, not a decoder, fixture, schema name, or UI preference.
 
 | State | Meaning | Product eligibility |
 |---|---|---|

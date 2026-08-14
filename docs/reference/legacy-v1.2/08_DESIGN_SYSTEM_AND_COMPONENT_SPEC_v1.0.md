@@ -7,7 +7,7 @@
 > Depends on:
 > - `04_STATE_ENGINE_AND_EVENT_MAPPING_v1.1_FROZEN.md`
 > - `07_MACOS_SWIFTUI_APPKIT_ARCHITECTURE_v1.0.md`
-> - approved visual prototype `Codex-Monitor-Visual-Review-Mobile-v1.9.html`
+> - historical approved visual prototype (retained only on `codex/github-readiness-audit`): `Codex-Monitor-Visual-Review-Mobile-v1.9.html`
 
 ---
 

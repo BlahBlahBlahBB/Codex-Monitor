@@ -9,8 +9,10 @@ End commit: N/A — workspace is not a Git repository
 
 ## Specs and evidence read
 
-- `13_EXECUTION_PACK/16_AR_P0R_SOL_DECISION_REVIEW.md`
-- `14_ARCHITECTURE_REVISION_HYBRID_V1.md`
+> Historical material; original evidence paths are retained only on `codex/github-readiness-audit`.
+
+- Historical material; retained only on `codex/github-readiness-audit`: `13_EXECUTION_PACK/16_AR_P0R_SOL_DECISION_REVIEW.md`
+- `../14_ARCHITECTURE_REVISION_HYBRID_V1.md`
 - `PHASE_AR1_REPORT.md`
 - `AR_P0_REPORT_DRAFT.md`
 - `PHASE_AR_P0_REPORT.md`

@@ -9,6 +9,8 @@ End commit: N/A — workspace is not a Git repository
 
 ## Specs and evidence read
 
+> Historical material; original paths are retained only on `codex/github-readiness-audit`.
+
 - `FINAL_P0_REVALIDATION_REPORT.md`
 - `PHASE_0E_REPORT.md`
 - `P0_EVIDENCE_20260810_0B/schema/method_matrix.md`
@@ -52,7 +54,7 @@ End commit: N/A — workspace is not a Git repository
 
 ## Files changed
 
-- `14_ARCHITECTURE_REVISION_HYBRID_V1.md`
+- `../14_ARCHITECTURE_REVISION_HYBRID_V1.md`
 - `PHASE_AR1_REPORT.md`
 
 No production source, project configuration, UI asset, visual reference, probe, database, or existing 04–13 specification was modified.

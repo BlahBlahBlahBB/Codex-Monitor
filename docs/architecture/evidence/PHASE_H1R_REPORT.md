@@ -24,24 +24,24 @@ No capability is promoted by this review. Architecture remains **CONDITIONAL GO*
 
 Primary sources:
 
-- `17_MASTER_PRD_V2_HYBRID.md`
+- `../../product/17_MASTER_PRD_V2_HYBRID.md`
 - `FINAL_AR_P0_REPORT.md`
-- `14_ARCHITECTURE_REVISION_HYBRID_V1.md`
-- `19_CAPABILITY_BASELINE_AND_GATES.md`
-- `20_HYBRID_PHASE_MODEL_PLAYBOOK.md`
-- `21_HYBRID_EXECUTION_PACK/01_H1_TERRA_CAPABILITY_CONTRACTS.md`
-- `21_HYBRID_EXECUTION_PACK/02_H1R_SOL_ARCHITECTURE_REVIEW.md`
-- `21_HYBRID_EXECUTION_PACK/03_H2_TERRA_TRANSPORT_ADAPTERS.md`
-- `21_HYBRID_EXECUTION_PACK/91_PHASE_REPORT_TEMPLATE_V2.md`
-- `21_HYBRID_EXECUTION_PACK/92_HYBRID_STOP_GATES.md`
-- `21_HYBRID_EXECUTION_PACK/93_MASTER_CHECKLIST_V2.md`
-- `22_RELEASE_MATURITY_GATES.md`
+- `../14_ARCHITECTURE_REVISION_HYBRID_V1.md`
+- `../19_CAPABILITY_BASELINE_AND_GATES.md`
+- `../../product/20_HYBRID_PHASE_MODEL_PLAYBOOK.md`
+- Historical material; retained only on `codex/github-readiness-audit`: `21_HYBRID_EXECUTION_PACK/01_H1_TERRA_CAPABILITY_CONTRACTS.md`
+- Historical material; retained only on `codex/github-readiness-audit`: `21_HYBRID_EXECUTION_PACK/02_H1R_SOL_ARCHITECTURE_REVIEW.md`
+- Historical material; retained only on `codex/github-readiness-audit`: `21_HYBRID_EXECUTION_PACK/03_H2_TERRA_TRANSPORT_ADAPTERS.md`
+- Historical material; retained only on `codex/github-readiness-audit`: `21_HYBRID_EXECUTION_PACK/91_PHASE_REPORT_TEMPLATE_V2.md`
+- Historical material; retained only on `codex/github-readiness-audit`: `21_HYBRID_EXECUTION_PACK/92_HYBRID_STOP_GATES.md`
+- Historical material; retained only on `codex/github-readiness-audit`: `21_HYBRID_EXECUTION_PACK/93_MASTER_CHECKLIST_V2.md`
+- `../../release/RELEASE_MATURITY_GATES.md`
 
 H1 deliverables reviewed completely:
 
-- `H1_CAPABILITY_BASELINE.md`
-- `H1_ADAPTER_CONTRACTS.md`
-- `H1_TRANSPORT_DECISION.md`
+- `../H1_CAPABILITY_BASELINE.md`
+- `../H1_ADAPTER_CONTRACTS.md`
+- `../H1_TRANSPORT_DECISION.md`
 - `PHASE_H1_REPORT.md`
 
 Current official transport support boundary was checked against the [official OpenAI Codex App Server documentation](https://developers.openai.com/codex/app-server/).
@@ -86,7 +86,7 @@ The written intent is mostly correct:
 - the current owned-runtime capabilities remain `unvalidated`;
 - a fixture/mock cannot promote real Adapter capability.
 
-However, `H1_ADAPTER_CONTRACTS.md` currently also:
+However, `../H1_ADAPTER_CONTRACTS.md` currently also:
 
 - lists `RuntimeObservationEnvelope` as a general `AdapterOutput` payload;
 - says output is rejected when capability state does not match the descriptor, which still permits a matching `unvalidated` state;
@@ -141,7 +141,7 @@ Without a local repository there is no start/end commit, trustworthy phase diff,
 
 **Unix-socket WebSocket is acceptable as H2's single forward candidate**, subject to H1F completion and a later explicit H2 authorization. Official OpenAI documentation currently lists `--listen unix://` / `unix://PATH` as WebSocket over a Unix socket using the HTTP Upgrade handshake. The same documentation continues to classify the app-server command and WebSocket transport as experimental and unsupported for production workloads. This remains compatible only with the present **INTERNAL / DEVELOPER ONLY** maturity.
 
-`H1_TRANSPORT_DECISION.md` correctly separates:
+`../H1_TRANSPORT_DECISION.md` correctly separates:
 
 ```text
 forward H2 choice: Unix-socket WebSocket
@@ -223,7 +223,7 @@ This is a contract/admission primitive, not an H3 State Engine implementation.
 
 ### 5. Sanitized fixtures and evidence separation
 
-Provide minimal sanitized fixtures for the evidence-supported shapes catalogued in `H1_CAPABILITY_BASELINE.md`. Every fixture must include fixture ID, source kind, exact baseline capability state, evidence run, CLI version, historical transport evidence label, harness/digest availability, sanitizer availability/version, confidence, and limitations.
+Provide minimal sanitized fixtures for the evidence-supported shapes catalogued in `../H1_CAPABILITY_BASELINE.md`. Every fixture must include fixture ID, source kind, exact baseline capability state, evidence run, CLI version, historical transport evidence label, harness/digest availability, sanitizer availability/version, confidence, and limitations.
 
 Required rules:
 

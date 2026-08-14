@@ -11,10 +11,10 @@
 1. Frozen product decisions and the current Hybrid runtime/capability contracts.
 2. The verified functional baseline at `d823b05`:
    runtime, state engine, Desktop-local monitoring, Waiting Approval detection, session-token semantics, snapshot truthfulness, panel lifecycle, drag/resize, position persistence, Quick View placement, menu behavior, settings persistence, reconnect and sleep/wake recovery.
-3. Approved visual reference `Codex-Monitor-Hybrid-Handoff-v2.0/00_APPROVED_VISUAL_REFERENCE_v1.9.html`.
-4. `Codex-Monitor-Hybrid-Handoff-v2.0/LEGACY_REFERENCES/08_DESIGN_SYSTEM_AND_COMPONENT_SPEC_v1.0.md`.
-5. `Codex-Monitor-Hybrid-Handoff-v2.0/LEGACY_REFERENCES/07_MACOS_SWIFTUI_APPKIT_ARCHITECTURE_v1.0.md`.
-6. `Codex-Monitor-Handoff-v1.2/11_MASTER_PRD_AND_CODEX_BUILD_INSTRUCTIONS_v1.0.md`.
+3. Approved visual reference `APPROVED_VISUAL_REFERENCE.html`.
+4. `../reference/legacy-v1.2/08_DESIGN_SYSTEM_AND_COMPONENT_SPEC_v1.0.md`.
+5. `../reference/legacy-v1.2/07_MACOS_SWIFTUI_APPKIT_ARCHITECTURE_v1.0.md`.
+6. Historical material; retained only on `codex/github-readiness-audit`: `Codex-Monitor-Handoff-v1.2/11_MASTER_PRD_AND_CODEX_BUILD_INSTRUCTIONS_v1.0.md`.
 7. Earlier prototypes, then the failed V1 implementation last.
 
 The product/runtime sources win whenever an older visual document proposes a capability that is not present in the verified local capability contract. In particular, approval *resolution* remains **UNAVAILABLE**. No view may infer or present Approved, Declined, or Cancelled.

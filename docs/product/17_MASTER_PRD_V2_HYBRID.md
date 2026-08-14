@@ -7,9 +7,9 @@
 > UI stack: SwiftUI + AppKit
 > Current implementation authorization: **CONDITIONAL GO — H1 only**
 > Current release maturity: **INTERNAL / DEVELOPER ONLY**
-> Visual reference: `00_APPROVED_VISUAL_REFERENCE_v1.9.html`
-> Architecture baseline: `14_ARCHITECTURE_REVISION_HYBRID_V1.md`
-> Capability decision baseline: `FINAL_AR_P0_REPORT.md`
+> Visual reference: `../design/APPROVED_VISUAL_REFERENCE.html`
+> Architecture baseline: `../architecture/14_ARCHITECTURE_REVISION_HYBRID_V1.md`
+> Capability decision baseline: `../architecture/evidence/FINAL_AR_P0_REPORT.md`
 
 ---
 
@@ -760,11 +760,11 @@ If files conflict:
 
 ```text
 1. 17_MASTER_PRD_V2_HYBRID.md
-2. FINAL_AR_P0_REPORT.md
-3. 14_ARCHITECTURE_REVISION_HYBRID_V1.md
+2. ../architecture/evidence/FINAL_AR_P0_REPORT.md
+3. ../architecture/14_ARCHITECTURE_REVISION_HYBRID_V1.md
 4. later Hybrid specialist/execution specification
-5. retained non-conflicting rules in LEGACY_REFERENCES/04–09
-6. visual reference v1.9
+5. retained non-conflicting rules in ../reference/legacy-v1.2/04–09
+6. ../design/APPROVED_VISUAL_REFERENCE.html
 7. any retired v1 / old Phase artifact
 ```
 
