@@ -4,6 +4,22 @@ import ServiceManagement
 import UserNotifications
 import CodexMonitorContracts
 
+enum MonitorNotificationAppName {
+    static func resolve(info: [String: Any]) -> String {
+        for key in ["CFBundleDisplayName", "CFBundleName"] {
+            if let value = info[key] as? String {
+                let name = value.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !name.isEmpty { return name }
+            }
+        }
+        return "Codex Monitor"
+    }
+
+    static func current() -> String {
+        resolve(info: Bundle.main.infoDictionary ?? [:])
+    }
+}
+
 struct MonitorNotificationContent: Equatable {
     let title: String
     let subtitle: String
@@ -13,13 +29,13 @@ struct MonitorNotificationContent: Equatable {
         Self(title: L10n.tr("state.waitingApproval"), subtitle: "", body: L10n.tr("activity.waitingConfirmation"))
     }
 
-    static func completed(snapshot: MonitorRuntimeSnapshot?, languageCode: String? = nil) -> Self {
+    static func completed(snapshot: MonitorRuntimeSnapshot?, languageCode: String? = nil, appDisplayName: String? = nil) -> Self {
         // The body deliberately reuses the sole approved conversation-name
         // presentation chain. It admits only threads.name and its safe,
         // localized fallback; it never reads raw thread title or runtime metadata.
         Self(
-            title: L10n.tr("state.completed", languageCode: languageCode),
-            subtitle: "",
+            title: appDisplayName ?? MonitorNotificationAppName.current(),
+            subtitle: L10n.tr("state.completed", languageCode: languageCode),
             body: MonitorDisplayValue.resolvedConversationDisplayTitle(snapshot, languageCode: languageCode)
         )
     }

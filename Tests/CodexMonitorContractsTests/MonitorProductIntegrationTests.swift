@@ -218,21 +218,31 @@ final class MonitorProductIntegrationTests: XCTestCase {
         XCTAssertEqual(L10n.tr("activity.noSession", languageCode: "en"), "No session")
     }
 
-    func testCompletedNotificationUsesLocalizedTitleAndAuthoritativeConversationName() async {
+    func testCompletedNotificationUsesBundleTitleLocalizedSubtitleAndAuthoritativeConversationName() async {
         let snapshot = await activeUsageSessionSnapshot(
             conversationName: "开始 Codex Monitor 1.0.1 Phase 4C",
             threadRawID: "completed-notification-authoritative-name",
             sessionTokens: 1
         )
-        let chinese = MonitorNotificationContent.completed(snapshot: snapshot, languageCode: "zh-Hans")
-        let english = MonitorNotificationContent.completed(snapshot: snapshot, languageCode: "en")
+        let appName = "Codex Monitor 1.0.1 QA Build 3"
+        let chinese = MonitorNotificationContent.completed(snapshot: snapshot, languageCode: "zh-Hans", appDisplayName: appName)
+        let english = MonitorNotificationContent.completed(snapshot: snapshot, languageCode: "en", appDisplayName: appName)
 
-        XCTAssertEqual(chinese.title, "已完成")
-        XCTAssertEqual(english.title, "Completed")
-        XCTAssertEqual(chinese.subtitle, "")
-        XCTAssertEqual(english.subtitle, "")
+        XCTAssertEqual(chinese.title, appName)
+        XCTAssertEqual(english.title, appName)
+        XCTAssertEqual(chinese.subtitle, "已完成")
+        XCTAssertEqual(english.subtitle, "Completed")
         XCTAssertEqual(chinese.body, "开始 Codex Monitor 1.0.1 Phase 4C")
         XCTAssertEqual(english.body, "开始 Codex Monitor 1.0.1 Phase 4C")
+    }
+
+    func testCompletedNotificationAppNameResolutionUsesDisplayNameThenBundleNameThenSafeFallback() {
+        XCTAssertEqual(
+            MonitorNotificationAppName.resolve(info: ["CFBundleDisplayName": "Codex Monitor 1.0.1 QA Build 3", "CFBundleName": "Ignored Bundle Name"]),
+            "Codex Monitor 1.0.1 QA Build 3"
+        )
+        XCTAssertEqual(MonitorNotificationAppName.resolve(info: ["CFBundleName": "Codex Monitor Production"]), "Codex Monitor Production")
+        XCTAssertEqual(MonitorNotificationAppName.resolve(info: [:]), "Codex Monitor")
     }
 
     func testCompletedNotificationUsesLocalizedCurrentTaskForMissingName() async {
@@ -285,8 +295,8 @@ final class MonitorProductIntegrationTests: XCTestCase {
             taskCompletedEnabled: true
         )
         XCTAssertEqual(completed?.body, "Authoritative notification name")
-        XCTAssertEqual(completed?.title, L10n.tr("state.completed"))
-        XCTAssertEqual(completed?.subtitle, "")
+        XCTAssertEqual(completed?.title, MonitorNotificationAppName.current())
+        XCTAssertEqual(completed?.subtitle, L10n.tr("state.completed"))
 
         XCTAssertNil(MonitorNotificationContent.forTransition(
             from: .working,
