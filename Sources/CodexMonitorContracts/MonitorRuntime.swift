@@ -459,9 +459,9 @@ public actor MonitorRuntimeStore {
         engine.ingest(observation)
     }
 
-    public func ingest(account snapshot: AccountSnapshot) {
+    public func ingest(account snapshot: AccountSnapshot, refreshDegraded: Bool = false) {
         accountSnapshot = snapshot
-        accountRefreshDegraded = false
+        accountRefreshDegraded = refreshDegraded
         let freshness = snapshot.provenance.freshness
         accountSource = SourceState(availability: freshness.state == .fresh ? .available : monitorAvailability(for: freshness.state), observedAt: freshness.observedAt, reason: freshness.state == .fresh ? nil : monitorReason(for: freshness.state))
         publishSnapshot()
@@ -473,6 +473,7 @@ public actor MonitorRuntimeStore {
     /// blank Account, Plan, Usage, or Quota in the UI.
     public func markAccountRefreshDegraded() {
         accountRefreshDegraded = true
+        publishSnapshot()
     }
 
     public func markSourceUnavailable(_ source: MonitorRuntimeSource, observedAt: Date? = nil) {

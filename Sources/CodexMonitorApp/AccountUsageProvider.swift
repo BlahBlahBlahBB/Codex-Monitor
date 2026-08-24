@@ -8,15 +8,46 @@ import CodexMonitorContracts
 public actor AccountUsageProvider {
     private let runtime: MonitorRuntimeStore
     private let refreshInterval: Duration
+    private let retryDelay: Duration
+    private let refreshCycle: @Sendable () async -> AccountRefreshCycleResult
+    private let sleep: @Sendable (Duration) async throws -> Void
     private var loopTask: Task<Void, Never>?
+    /// The provider remains one-shot refresh capable until its first explicit
+    /// stop, preserving construction-time callers while ensuring no queued UI
+    /// refresh can restart I/O during termination drain.
+    private var acceptsRefreshes = true
+    private var inFlightRefresh: InFlightRefresh?
+    private var stoppingRefresh: InFlightRefresh?
+    /// This is deliberately a whole admitted snapshot, never individual
+    /// components. It is only used to decide whether a transient quota read
+    /// can be held while one replacement cycle is attempted.
+    private var lastCompleteSnapshot: AccountSnapshot?
 
     public init(runtime: MonitorRuntimeStore, refreshInterval: Duration = .seconds(60)) {
         self.runtime = runtime
         self.refreshInterval = refreshInterval
+        self.retryDelay = .milliseconds(500)
+        self.refreshCycle = Self.productionRefreshCycle
+        self.sleep = Self.productionSleep
+    }
+
+    init(
+        runtime: MonitorRuntimeStore,
+        refreshInterval: Duration = .seconds(60),
+        retryDelay: Duration = .milliseconds(500),
+        refreshCycle: @escaping @Sendable () async -> AccountRefreshCycleResult,
+        sleep: @escaping @Sendable (Duration) async throws -> Void = { _ in }
+    ) {
+        self.runtime = runtime
+        self.refreshInterval = refreshInterval
+        self.retryDelay = retryDelay
+        self.refreshCycle = refreshCycle
+        self.sleep = sleep
     }
 
     public func start() {
         guard loopTask == nil else { return }
+        acceptsRefreshes = true
         loopTask = Task { [weak self] in
             guard let self else { return }
             while !Task.isCancelled {
@@ -26,12 +57,145 @@ public actor AccountUsageProvider {
         }
     }
 
-    public func stop() {
+    public func stop() async {
+        // Close the lifecycle gate before awaiting cancellation so queued UI
+        // tasks cannot create a replacement operation during the drain.
+        acceptsRefreshes = false
         loopTask?.cancel()
         loopTask = nil
+        let activeRefresh = inFlightRefresh
+        inFlightRefresh = nil
+        let alreadyStopping = stoppingRefresh
+        if let activeRefresh {
+            activeRefresh.task.cancel()
+            if alreadyStopping == nil {
+                stoppingRefresh = activeRefresh
+            }
+        }
+        if let alreadyStopping {
+            await alreadyStopping.task.value
+            clearStoppingRefreshIfOwned(by: alreadyStopping.id)
+        }
+        if let activeRefresh {
+            await activeRefresh.task.value
+            clearStoppingRefreshIfOwned(by: activeRefresh.id)
+        }
     }
 
     public func refreshOnce() async {
+        guard acceptsRefreshes else { return }
+        if let inFlightRefresh {
+            Self.recordRefreshEvent("refreshCoalesced")
+            await inFlightRefresh.task.value
+            return
+        }
+        let operationID = UUID()
+        let refresh = Task { [weak self] in
+            guard let self else { return }
+            await self.performRefresh(operationID: operationID)
+        }
+        inFlightRefresh = InFlightRefresh(id: operationID, task: refresh)
+        await refresh.value
+        clearInFlightRefreshIfOwned(by: operationID)
+    }
+
+    private func performRefresh(operationID: UUID) async {
+        let initial = await refreshCycle()
+        guard isCurrent(operationID) else { return }
+        switch initial {
+        case .connectionFailure(let diagnostics):
+            Self.record(diagnostics)
+            // A transient account refresh failure must not erase the last
+            // authoritative Account/Plan/Usage/Quota snapshot. The runtime
+            // keeps it visible and records refresh degradation internally.
+            await markRefreshDegradedIfCurrent(operationID)
+        case .connected(let assembled):
+            Self.record(assembled.diagnostics)
+            guard shouldHoldTransientQuotaPartial(assembled) else {
+                await admit(assembled, operationID: operationID)
+                return
+            }
+
+            // Hold the *entire* previous coherent snapshot. In particular,
+            // do not admit the current account metadata with prior-cycle
+            // quota while the one permitted replacement cycle is pending.
+            Self.recordRefreshEvent("transientQuotaPartialHeld")
+            await markRefreshDegradedIfCurrent(operationID)
+            guard isCurrent(operationID) else { return }
+            Self.recordRefreshEvent("boundedRetryStarted")
+            do {
+                try await sleep(retryDelay)
+            } catch {
+                return
+            }
+            guard isCurrent(operationID) else { return }
+
+            let retry = await refreshCycle()
+            guard isCurrent(operationID) else { return }
+            switch retry {
+            case .connectionFailure(let diagnostics):
+                Self.record(diagnostics)
+                // Keep the held snapshot under the established whole-
+                // connection-failure behavior; the next normal cadence can
+                // recover it without publishing an invented partial cycle.
+                await markRefreshDegradedIfCurrent(operationID)
+            case .connected(let retryAssembly):
+                Self.record(retryAssembly.diagnostics)
+                if retryAssembly.isComplete {
+                    Self.recordRefreshEvent("boundedRetrySucceeded")
+                } else {
+                    Self.recordRefreshEvent("boundedRetryExhausted")
+                }
+                // Retry exhaustion is intentionally fail-closed: this admits
+                // only the retry cycle's components, never a component merged
+                // from the held snapshot.
+                await admit(retryAssembly, operationID: operationID)
+            }
+        }
+    }
+
+    private func shouldHoldTransientQuotaPartial(_ assembled: AccountRefreshAssembly) -> Bool {
+        assembled.snapshot != nil
+            && assembled.diagnostics.rateLimits != .available
+            && lastCompleteSnapshot != nil
+    }
+
+    private func admit(_ assembled: AccountRefreshAssembly, operationID: UUID) async {
+        guard isCurrent(operationID) else { return }
+        if let snapshot = assembled.snapshot {
+            await runtime.ingest(account: snapshot, refreshDegraded: assembled.diagnostics.degraded)
+            guard isCurrent(operationID) else { return }
+            // This tracks the snapshot currently held by the runtime. Once a
+            // normal partial cycle is admitted, an older complete snapshot is
+            // no longer available to preserve as a coherent whole.
+            lastCompleteSnapshot = assembled.isCompleteQuotaSnapshot ? snapshot : nil
+        }
+    }
+
+    private func markRefreshDegradedIfCurrent(_ operationID: UUID) async {
+        guard isCurrent(operationID) else { return }
+        await runtime.markAccountRefreshDegraded()
+    }
+
+    private func isCurrent(_ operationID: UUID) -> Bool {
+        !Task.isCancelled && inFlightRefresh?.id == operationID
+    }
+
+    private func clearInFlightRefreshIfOwned(by operationID: UUID) {
+        guard inFlightRefresh?.id == operationID else { return }
+        inFlightRefresh = nil
+    }
+
+    private func clearStoppingRefreshIfOwned(by operationID: UUID) {
+        guard stoppingRefresh?.id == operationID else { return }
+        stoppingRefresh = nil
+    }
+
+    private static func productionSleep(_ duration: Duration) async throws {
+        try await Task.sleep(for: duration)
+    }
+
+    private static func productionRefreshCycle() async -> AccountRefreshCycleResult {
         do {
             let resolver = OfficialSocketResolver()
             let endpoint = try UnixSocketWebSocketEndpoint(capability: resolver.resolve())
@@ -53,20 +217,10 @@ public actor AccountUsageProvider {
                 usage: await usage,
                 observedAt: Date()
             )
-            Self.record(assembled.diagnostics)
-            if let snapshot = assembled.snapshot {
-                await runtime.ingest(account: snapshot)
-            }
-            if assembled.diagnostics.degraded {
-                await runtime.markAccountRefreshDegraded()
-            }
             await client.close()
+            return .connected(assembled)
         } catch {
-            // A transient account refresh failure must not erase the last
-            // authoritative Account/Plan/Usage/Quota snapshot. The runtime
-            // keeps it visible and records refresh degradation internally.
-            Self.record(.wholeConnectionFailure(error))
-            await runtime.markAccountRefreshDegraded()
+            return .connectionFailure(.wholeConnectionFailure(error))
         }
     }
 
@@ -221,6 +375,10 @@ public actor AccountUsageProvider {
 
     private static func record(_ diagnostics: AccountRefreshDiagnostics) {
         DiagnosticEvent.record(.state, diagnostics.fields)
+    }
+
+    private static func recordRefreshEvent(_ event: String) {
+        DiagnosticEvent.record(.state, ["event": event])
     }
 
     private static func rateLimitSnapshots(from root: [String: JSONValue]) -> [[String: JSONValue]] {
@@ -381,6 +539,32 @@ struct AccountRefreshDiagnostics: Sendable, Equatable {
 struct AccountRefreshAssembly: Sendable {
     let snapshot: AccountSnapshot?
     let diagnostics: AccountRefreshDiagnostics
+
+    /// A complete refresh means all three RPC components decoded correctly.
+    var isComplete: Bool {
+        diagnostics.account == .available
+            && diagnostics.rateLimits == .available
+            && diagnostics.usage == .available
+    }
+
+    /// Only an already visible, complete snapshot with an authoritative
+    /// primary quota can be held during a later transient quota failure. A
+    /// successful rate-limits RPC that contains no primary quota remains an
+    /// authoritative absence and is admitted normally instead.
+    var isCompleteQuotaSnapshot: Bool {
+        isComplete
+            && snapshot?.primaryRateLimit != nil
+    }
+}
+
+enum AccountRefreshCycleResult: Sendable {
+    case connected(AccountRefreshAssembly)
+    case connectionFailure(AccountRefreshDiagnostics)
+}
+
+private struct InFlightRefresh: Sendable {
+    let id: UUID
+    let task: Task<Void, Never>
 }
 
 private struct AccountMetadata: Sendable {
