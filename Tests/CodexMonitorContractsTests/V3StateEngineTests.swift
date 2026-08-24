@@ -34,8 +34,8 @@ final class V3StateEngineTests: XCTestCase {
     func testIdleHeartbeatDoesNotChangeRepresentativeThread() {
         let old = id(.thread, "idle-old")
         let current = id(.thread, "idle-current")
-        engine.register(DesktopThreadSnapshot(threadID: old, title: "Old task", model: "old-model", reasoningEffort: nil, updatedAtMilliseconds: 1_700_000_000, tokensUsed: 10))
-        engine.register(DesktopThreadSnapshot(threadID: current, title: "Current task", model: "current-model", reasoningEffort: nil, updatedAtMilliseconds: 1_700_000_100_000, tokensUsed: 20))
+        engine.register(DesktopThreadSnapshot(threadID: old, conversationName: "Old task", model: "old-model", reasoningEffort: nil, updatedAtMilliseconds: 1_700_000_000, tokensUsed: 10))
+        engine.register(DesktopThreadSnapshot(threadID: current, conversationName: "Current task", model: "current-model", reasoningEffort: nil, updatedAtMilliseconds: 1_700_000_100_000, tokensUsed: 20))
 
         for _ in 0..<100 {
             clock.advance(1)
@@ -50,7 +50,7 @@ final class V3StateEngineTests: XCTestCase {
 
     func testIdleStateSinceDoesNotResetOnSourceHeartbeat() {
         let thread = id(.thread, "idle-stable")
-        engine.register(DesktopThreadSnapshot(threadID: thread, title: "Current task", model: nil, reasoningEffort: nil, updatedAtMilliseconds: 1_700_000_000, tokensUsed: nil))
+        engine.register(DesktopThreadSnapshot(threadID: thread, conversationName: "Current task", model: nil, reasoningEffort: nil, updatedAtMilliseconds: 1_700_000_000, tokensUsed: nil))
         let initial = threadSnapshot(thread).stateSince
 
         clock.advance(60)
@@ -262,11 +262,11 @@ final class V3StateEngineTests: XCTestCase {
     func testTokenRolloutAuthorityDoesNotRegressOnRegisterAndReconciliation() {
         let thread = id(.thread, "token"), turn = id(.turn, "turn")
         engine.ingest(event(thread, turn, .taskStarted, tokens: 100))
-        engine.register(DesktopThreadSnapshot(threadID: thread, title: nil, model: nil, reasoningEffort: nil, updatedAtMilliseconds: nil, tokensUsed: 90))
+        engine.register(DesktopThreadSnapshot(threadID: thread, conversationName: nil, model: nil, reasoningEffort: nil, updatedAtMilliseconds: nil, tokensUsed: 90))
         XCTAssertEqual(threadSnapshot(thread).sessionTokenCumulative, 100)
         XCTAssertEqual(threadSnapshot(thread).sessionTokenProvenance, .rolloutCumulativeAuthoritative)
         let hydration = RolloutCheckpointHydration(activeTurnID: turn, turnStartedAt: clock.now(), activeItemID: nil, activeItemCategory: nil, latestActiveState: .thinking, latestActiveStateAt: clock.now(), terminal: nil, authoritativeTokenTotal: 100)
-        let seed = DesktopThreadSnapshot(threadID: thread, title: nil, model: nil, reasoningEffort: nil, updatedAtMilliseconds: nil, tokensUsed: 90)
+        let seed = DesktopThreadSnapshot(threadID: thread, conversationName: nil, model: nil, reasoningEffort: nil, updatedAtMilliseconds: nil, tokensUsed: 90)
         let rebuilt = LocalRuntimeReconciliationOwner.thread(snapshot: seed, hydration: hydration, approval: ApprovalLifecycleCheckpoint(cursor: nil, unresolved: []), approvalHealth: .availableKnownNotWaiting, runtimeSourceAvailable: true, observedAt: clock.now())
         LocalRuntimeReconciliationOwner.install([rebuilt], into: engine)
         XCTAssertEqual(threadSnapshot(thread).sessionTokenCumulative, 100)

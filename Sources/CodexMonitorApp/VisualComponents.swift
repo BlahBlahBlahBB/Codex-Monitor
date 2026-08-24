@@ -511,11 +511,11 @@ enum MonitorDisplayValue {
         guard let currentThread = snapshot?.currentThread else {
             return L10n.tr("activity.noSession")
         }
-        return trustedConversationDisplayTitle(currentThread.taskTitle)
+        return trustedConversationDisplayName(currentThread.conversationName)
             ?? L10n.tr("activity.currentTask")
     }
 
-    static func taskTitle(_ snapshot: MonitorRuntimeSnapshot?) -> String {
+    static func conversationName(_ snapshot: MonitorRuntimeSnapshot?) -> String {
         resolvedConversationDisplayTitle(snapshot)
     }
 
@@ -527,14 +527,15 @@ enum MonitorDisplayValue {
         resolvedConversationDisplayTitle(snapshot)
     }
 
-    /// A state-DB title is the only admitted title source. This predicate is a
-    /// narrow presentation safeguard for values that unmistakably look like
+    /// A persisted sidebar conversation name is the only admitted title
+    /// source. This predicate is a narrow presentation safeguard for values
+    /// that unmistakably look like
     /// internal source material, identifiers, or filesystem locations. It
     /// deliberately does not reject a slash by itself: titles such as
     /// "UI/UX redesign" are valid Conversation Display Titles.
-    private static func trustedConversationDisplayTitle(_ rawTitle: String?) -> String? {
-        guard let rawTitle else { return nil }
-        let title = rawTitle.trimmingCharacters(in: .whitespacesAndNewlines)
+    private static func trustedConversationDisplayName(_ rawName: String?) -> String? {
+        guard let rawName else { return nil }
+        let title = rawName.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !title.isEmpty else { return nil }
 
         let lowered = title.lowercased()
@@ -547,6 +548,7 @@ enum MonitorDisplayValue {
             "tool instruction",
             "tool metadata",
             "you are codex",
+            "# files pasted by the user",
             "# files mentioned by the user"
         ]
         guard !internalMarkers.contains(where: lowered.contains),

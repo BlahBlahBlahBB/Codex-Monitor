@@ -13,7 +13,7 @@ final class MonitorAppModelTests: XCTestCase {
         let thread = id(.thread, "thread"), turn = id(.turn, "turn")
         let model = MonitorAppModel()
 
-        await runtime.registerDesktopThread(DesktopThreadSnapshot(threadID: thread, title: "UI task", model: "gpt-5", reasoningEffort: nil, updatedAtMilliseconds: nil, tokensUsed: nil))
+        await runtime.registerDesktopThread(DesktopThreadSnapshot(threadID: thread, conversationName: "UI task", model: "gpt-5", reasoningEffort: nil, updatedAtMilliseconds: nil, tokensUsed: nil))
         await runtime.ingest(event(thread, turn, .taskStarted, clock: clock))
         await runtime.ingest(event(thread, turn, .activity, activity: .tool, item: id(.item, "tool"), clock: clock))
         let working = await runtime.snapshot()
@@ -40,7 +40,7 @@ final class MonitorAppModelTests: XCTestCase {
         let thread = id(.thread, "thread"), turn = id(.turn, "turn"), request = id(.item, "request")
         let model = MonitorAppModel()
 
-        await runtime.registerDesktopThread(DesktopThreadSnapshot(threadID: thread, title: nil, model: nil, reasoningEffort: nil, updatedAtMilliseconds: nil, tokensUsed: nil))
+        await runtime.registerDesktopThread(DesktopThreadSnapshot(threadID: thread, conversationName: nil, model: nil, reasoningEffort: nil, updatedAtMilliseconds: nil, tokensUsed: nil))
         await runtime.ingest(event(thread, turn, .taskStarted, clock: clock))
         await runtime.ingest(.requested(ApprovalRequested(threadID: thread, turnID: turn, requestID: request, observedAt: clock.now())))
         model.apply(await runtime.snapshot())
@@ -58,10 +58,10 @@ final class MonitorAppModelTests: XCTestCase {
         let clock = AppModelTestClock()
         let runtime = MonitorRuntimeStore(engine: RuntimeStateEngine(clock: clock, initialPhase: .live), clock: clock, initialPhase: .live)
         let old = id(.thread, "old"), current = id(.thread, "current")
-        await runtime.registerDesktopThread(DesktopThreadSnapshot(threadID: old, title: nil, model: nil, reasoningEffort: nil, updatedAtMilliseconds: nil, tokensUsed: nil))
+        await runtime.registerDesktopThread(DesktopThreadSnapshot(threadID: old, conversationName: nil, model: nil, reasoningEffort: nil, updatedAtMilliseconds: nil, tokensUsed: nil))
         await runtime.ingest(.sourceHealth(DesktopSourceHealth(threadID: old, state: .unavailable, processEpoch: nil, fileIdentity: nil, reason: .sourceMissing)))
         clock.advance(1)
-        await runtime.registerDesktopThread(DesktopThreadSnapshot(threadID: current, title: nil, model: nil, reasoningEffort: nil, updatedAtMilliseconds: nil, tokensUsed: nil))
+        await runtime.registerDesktopThread(DesktopThreadSnapshot(threadID: current, conversationName: nil, model: nil, reasoningEffort: nil, updatedAtMilliseconds: nil, tokensUsed: nil))
 
         let snapshot = await runtime.snapshot()
         XCTAssertEqual(snapshot.currentState, .idle)
@@ -75,7 +75,7 @@ final class MonitorAppModelTests: XCTestCase {
         let model = MonitorAppModel()
         let thread = id(.thread, "heartbeat")
         await runtime.applyDesktopCycle(
-            registrations: [DesktopThreadSnapshot(threadID: thread, title: "Idle", model: nil, reasoningEffort: nil, updatedAtMilliseconds: 1_700_000_000, tokensUsed: nil)],
+            registrations: [DesktopThreadSnapshot(threadID: thread, conversationName: "Idle", model: nil, reasoningEffort: nil, updatedAtMilliseconds: 1_700_000_000, tokensUsed: nil)],
             observations: [],
             health: DesktopCycleHealth(processRunning: true, stateDBReadable: true)
         )
