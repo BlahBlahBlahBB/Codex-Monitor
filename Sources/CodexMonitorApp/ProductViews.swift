@@ -903,7 +903,7 @@ struct DiagnosticsWindowView: View {
         Form {
             Section(L10n.tr("diagnostics.runtime")) {
                 LabeledContent(L10n.tr("diagnostics.state"), value: MonitorDisplayValue.state(presentation))
-                LabeledContent(L10n.tr("label.session"), value: MonitorDisplayValue.taskTitle(snapshot))
+                LabeledContent(L10n.tr("label.session"), value: MonitorDisplayValue.conversationName(snapshot))
             }
             Section(L10n.tr("diagnostics.sourceHealth")) {
                 ForEach(MonitorRuntimeSource.allCases, id: \.rawValue) { source in

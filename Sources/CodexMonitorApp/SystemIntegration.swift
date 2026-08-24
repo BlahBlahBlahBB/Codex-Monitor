@@ -4,6 +4,63 @@ import ServiceManagement
 import UserNotifications
 import CodexMonitorContracts
 
+enum MonitorNotificationAppName {
+    static func resolve(info: [String: Any]) -> String {
+        for key in ["CFBundleDisplayName", "CFBundleName"] {
+            if let value = info[key] as? String {
+                let name = value.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !name.isEmpty { return name }
+            }
+        }
+        return "Codex Monitor"
+    }
+
+    static func current() -> String {
+        resolve(info: Bundle.main.infoDictionary ?? [:])
+    }
+}
+
+struct MonitorNotificationContent: Equatable {
+    let title: String
+    let subtitle: String
+    let body: String
+
+    static func waitingApproval() -> Self {
+        Self(title: L10n.tr("state.waitingApproval"), subtitle: "", body: L10n.tr("activity.waitingConfirmation"))
+    }
+
+    static func completed(snapshot: MonitorRuntimeSnapshot?, languageCode: String? = nil, appDisplayName: String? = nil) -> Self {
+        // The body deliberately reuses the sole approved conversation-name
+        // presentation chain. It admits only threads.name and its safe,
+        // localized fallback; it never reads raw thread title or runtime metadata.
+        Self(
+            title: appDisplayName ?? MonitorNotificationAppName.current(),
+            subtitle: L10n.tr("state.completed", languageCode: languageCode),
+            body: MonitorDisplayValue.resolvedConversationDisplayTitle(snapshot, languageCode: languageCode)
+        )
+    }
+
+    static func forTransition(
+        from previous: MonitorRuntimeState?,
+        to current: MonitorRuntimeState,
+        snapshot: MonitorRuntimeSnapshot,
+        desktopSourceAvailable: Bool,
+        waitingApprovalEnabled: Bool,
+        taskCompletedEnabled: Bool
+    ) -> Self? {
+        guard desktopSourceAvailable,
+              let previous,
+              previous != current else { return nil }
+        if current == .waitingApproval, waitingApprovalEnabled {
+            return waitingApproval()
+        }
+        if current == .completed, taskCompletedEnabled {
+            return completed(snapshot: snapshot)
+        }
+        return nil
+    }
+}
+
 @MainActor
 final class LoginItemController: ObservableObject {
     @Published private(set) var isEnabled = false
@@ -56,20 +113,22 @@ final class MonitorNotificationController {
 
     private func handle(snapshot: MonitorRuntimeSnapshot, preferences: MonitorPreferences) {
         defer { lastState = snapshot.currentState }
-        guard snapshot.sourceHealth[.desktopLocal]?.availability == .available,
-              let previous = lastState,
-              previous != snapshot.currentState else { return }
-        if snapshot.currentState == .waitingApproval, preferences.waitingApprovalNotifications {
-            deliver(title: L10n.tr("state.waitingApproval"), body: L10n.tr("activity.waitingConfirmation"))
-        } else if snapshot.currentState == .completed, preferences.taskCompletedNotifications {
-            deliver(title: L10n.tr("state.completed"), body: MonitorDisplayValue.taskTitle(snapshot))
-        }
+        guard let notification = MonitorNotificationContent.forTransition(
+            from: lastState,
+            to: snapshot.currentState,
+            snapshot: snapshot,
+            desktopSourceAvailable: snapshot.sourceHealth[.desktopLocal]?.availability == .available,
+            waitingApprovalEnabled: preferences.waitingApprovalNotifications,
+            taskCompletedEnabled: preferences.taskCompletedNotifications
+        ) else { return }
+        deliver(notification)
     }
 
-    private func deliver(title: String, body: String) {
+    private func deliver(_ notification: MonitorNotificationContent) {
         let content = UNMutableNotificationContent()
-        content.title = title
-        content.body = body
+        content.title = notification.title
+        content.subtitle = notification.subtitle
+        content.body = notification.body
         let request = UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil)
         UNUserNotificationCenter.current().add(request)
     }

@@ -11,7 +11,7 @@ final class MonitorRuntimeTests: XCTestCase {
         let thread = id(.thread, "thread-a")
         let turn = id(.turn, "turn-a")
 
-        await store.registerDesktopThread(DesktopThreadSnapshot(threadID: thread, title: "Build monitor", model: "gpt-5", reasoningEffort: nil, updatedAtMilliseconds: nil, tokensUsed: 4))
+        await store.registerDesktopThread(DesktopThreadSnapshot(threadID: thread, conversationName: "Build monitor", model: "gpt-5", reasoningEffort: nil, updatedAtMilliseconds: nil, tokensUsed: 4))
         await store.ingest(event(thread, turn, .taskStarted, tokens: 12, clock: clock))
         await store.ingest(event(thread, turn, .activity, activity: .tool, item: id(.item, "tool-a"), tokens: 15, clock: clock))
         await store.ingest(account: accountSnapshot(clock: clock, usage: UsagePresence(summaryAvailable: true, totalTokens: 99), primary: RateLimitWindow(usedPercent: 25, windowDurationMinutes: 300), resetCount: 2))
@@ -35,7 +35,7 @@ final class MonitorRuntimeTests: XCTestCase {
         let store = makeStore(clock: clock)
         let thread = id(.thread, "thread-a")
         let turn = id(.turn, "turn-a")
-        await store.registerDesktopThread(DesktopThreadSnapshot(threadID: thread, title: nil, model: nil, reasoningEffort: nil, updatedAtMilliseconds: nil, tokensUsed: nil))
+        await store.registerDesktopThread(DesktopThreadSnapshot(threadID: thread, conversationName: nil, model: nil, reasoningEffort: nil, updatedAtMilliseconds: nil, tokensUsed: nil))
         await store.ingest(event(thread, turn, .taskStarted, tokens: 10, clock: clock))
         await store.ingest(DesktopObservation.sourceHealth(DesktopSourceHealth(threadID: thread, state: .unavailable, processEpoch: nil, fileIdentity: nil, reason: .sourceMissing)))
 
@@ -52,7 +52,7 @@ final class MonitorRuntimeTests: XCTestCase {
         let store = makeStore(clock: clock)
         let thread = id(.thread, "thread-a")
         let turn = id(.turn, "turn-a")
-        await store.registerDesktopThread(DesktopThreadSnapshot(threadID: thread, title: "Resume", model: nil, reasoningEffort: nil, updatedAtMilliseconds: nil, tokensUsed: nil))
+        await store.registerDesktopThread(DesktopThreadSnapshot(threadID: thread, conversationName: "Resume", model: nil, reasoningEffort: nil, updatedAtMilliseconds: nil, tokensUsed: nil))
         await store.ingest(event(thread, turn, .taskStarted, clock: clock))
 
         await store.setPaused(true)
@@ -63,7 +63,7 @@ final class MonitorRuntimeTests: XCTestCase {
 
         await store.setPaused(false)
         await store.installReconciliation([
-            RuntimeReconciliationThread(threadID: thread, title: "Resume", model: nil, activeTurnID: turn, turnStartedAt: clock.now(), latestActiveState: .thinking, latestActiveStateAt: clock.now(), approvalHealth: .availableKnownNotWaiting, unresolvedApprovals: [], runtimeSourceAvailable: true, runtimeObservedAt: clock.now(), approvalObservedAt: clock.now())
+            RuntimeReconciliationThread(threadID: thread, conversationName: "Resume", model: nil, activeTurnID: turn, turnStartedAt: clock.now(), latestActiveState: .thinking, latestActiveStateAt: clock.now(), approvalHealth: .availableKnownNotWaiting, unresolvedApprovals: [], runtimeSourceAvailable: true, runtimeObservedAt: clock.now(), approvalObservedAt: clock.now())
         ])
         snapshot = await store.snapshot()
         XCTAssertEqual(snapshot.monitoringPhase, .live)
@@ -77,7 +77,7 @@ final class MonitorRuntimeTests: XCTestCase {
         let thread = id(.thread, "thread-a")
         let turn = id(.turn, "turn-a")
         let request = id(.item, "request-a")
-        await store.registerDesktopThread(DesktopThreadSnapshot(threadID: thread, title: nil, model: nil, reasoningEffort: nil, updatedAtMilliseconds: nil, tokensUsed: nil))
+        await store.registerDesktopThread(DesktopThreadSnapshot(threadID: thread, conversationName: nil, model: nil, reasoningEffort: nil, updatedAtMilliseconds: nil, tokensUsed: nil))
         await store.ingest(event(thread, turn, .taskStarted, clock: clock))
         await store.ingest(ApprovalObservation.requested(ApprovalRequested(threadID: thread, turnID: turn, requestID: request, observedAt: clock.now())))
         await store.ingest(ApprovalObservation.resolved(ApprovalResolved(threadID: thread, turnID: turn, requestID: request, status: .approved, observedAt: clock.now())))
@@ -99,7 +99,7 @@ final class MonitorRuntimeTests: XCTestCase {
         let store = makeStore(clock: clock)
         let thread = id(.thread, "ordinary-thread")
         let turn = id(.turn, "ordinary-turn")
-        await store.registerDesktopThread(DesktopThreadSnapshot(threadID: thread, title: nil, model: nil, reasoningEffort: nil, updatedAtMilliseconds: nil, tokensUsed: nil))
+        await store.registerDesktopThread(DesktopThreadSnapshot(threadID: thread, conversationName: nil, model: nil, reasoningEffort: nil, updatedAtMilliseconds: nil, tokensUsed: nil))
         await store.ingest(event(thread, turn, .taskStarted, clock: clock))
         await store.ingest(event(thread, turn, .activity, activity: .tool, item: id(.item, "ordinary-tool"), clock: clock))
 
@@ -149,8 +149,8 @@ final class MonitorRuntimeTests: XCTestCase {
         let store = makeStore(clock: clock)
         let first = id(.thread, "thread-a"), firstTurn = id(.turn, "turn-a")
         let second = id(.thread, "thread-b"), secondTurn = id(.turn, "turn-b")
-        await store.registerDesktopThread(DesktopThreadSnapshot(threadID: first, title: "First", model: nil, reasoningEffort: nil, updatedAtMilliseconds: nil, tokensUsed: nil))
-        await store.registerDesktopThread(DesktopThreadSnapshot(threadID: second, title: "Second", model: nil, reasoningEffort: nil, updatedAtMilliseconds: nil, tokensUsed: nil))
+        await store.registerDesktopThread(DesktopThreadSnapshot(threadID: first, conversationName: "First", model: nil, reasoningEffort: nil, updatedAtMilliseconds: nil, tokensUsed: nil))
+        await store.registerDesktopThread(DesktopThreadSnapshot(threadID: second, conversationName: "Second", model: nil, reasoningEffort: nil, updatedAtMilliseconds: nil, tokensUsed: nil))
         await store.ingest(event(first, firstTurn, .taskStarted, clock: clock))
         await store.ingest(event(first, firstTurn, .activity, activity: .tool, item: id(.item, "tool-a"), clock: clock))
         clock.advance(1)
@@ -177,7 +177,7 @@ final class MonitorRuntimeTests: XCTestCase {
         XCTAssertEqual(initial?.currentState, .disconnected)
 
         let thread = id(.thread, "event-thread")
-        await store.registerDesktopThread(DesktopThreadSnapshot(threadID: thread, title: nil, model: nil, reasoningEffort: nil, updatedAtMilliseconds: nil, tokensUsed: nil))
+        await store.registerDesktopThread(DesktopThreadSnapshot(threadID: thread, conversationName: nil, model: nil, reasoningEffort: nil, updatedAtMilliseconds: nil, tokensUsed: nil))
         let updated = await iterator.next()
         XCTAssertEqual(updated?.currentState, .idle)
         XCTAssertEqual(updated?.sourceHealth[.desktopLocal]?.availability, .available)
@@ -200,8 +200,8 @@ final class MonitorRuntimeTests: XCTestCase {
         let secondStart = event(second, secondTurn, .taskStarted, clock: clock)
         await store.applyDesktopCycle(
             registrations: [
-                DesktopThreadSnapshot(threadID: first, title: "First", model: nil, reasoningEffort: nil, updatedAtMilliseconds: 1_700_000_000, tokensUsed: 10),
-                DesktopThreadSnapshot(threadID: second, title: "Second", model: nil, reasoningEffort: nil, updatedAtMilliseconds: 1_700_000_100, tokensUsed: 20)
+                DesktopThreadSnapshot(threadID: first, conversationName: "First", model: nil, reasoningEffort: nil, updatedAtMilliseconds: 1_700_000_000, tokensUsed: 10),
+                DesktopThreadSnapshot(threadID: second, conversationName: "Second", model: nil, reasoningEffort: nil, updatedAtMilliseconds: 1_700_000_100, tokensUsed: 20)
             ],
             observations: [
                 firstStart,
@@ -223,7 +223,7 @@ final class MonitorRuntimeTests: XCTestCase {
         let thread = id(.thread, "approval-batch")
         let turn = id(.turn, "approval-turn")
         let request = id(.item, "approval-request")
-        await store.registerDesktopThread(DesktopThreadSnapshot(threadID: thread, title: "Approval", model: nil, reasoningEffort: nil, updatedAtMilliseconds: 1_700_000_000, tokensUsed: nil))
+        await store.registerDesktopThread(DesktopThreadSnapshot(threadID: thread, conversationName: "Approval", model: nil, reasoningEffort: nil, updatedAtMilliseconds: 1_700_000_000, tokensUsed: nil))
         await store.ingest(event(thread, turn, .taskStarted, clock: clock))
 
         let model = await MainActor.run { MonitorAppModel() }
@@ -345,8 +345,8 @@ final class MonitorRuntimeTests: XCTestCase {
         let old = id(.thread, "archived"), current = id(.thread, "current")
         await store.applyDesktopCycle(
             registrations: [
-                DesktopThreadSnapshot(threadID: old, title: "Old", model: nil, reasoningEffort: nil, updatedAtMilliseconds: 1_700_000_000, tokensUsed: 10),
-                DesktopThreadSnapshot(threadID: current, title: "Current", model: nil, reasoningEffort: nil, updatedAtMilliseconds: 1_700_000_100, tokensUsed: 20)
+                DesktopThreadSnapshot(threadID: old, conversationName: "Old", model: nil, reasoningEffort: nil, updatedAtMilliseconds: 1_700_000_000, tokensUsed: 10),
+                DesktopThreadSnapshot(threadID: current, conversationName: "Current", model: nil, reasoningEffort: nil, updatedAtMilliseconds: 1_700_000_100, tokensUsed: 20)
             ],
             observations: [],
             health: DesktopCycleHealth(processRunning: true, stateDBReadable: true)
@@ -363,7 +363,7 @@ final class MonitorRuntimeTests: XCTestCase {
         let clock = RuntimeSnapshotTestClock()
         let store = makeStore(clock: clock)
         let archived = id(.thread, "archived")
-        await store.applyDesktopCycle(registrations: [DesktopThreadSnapshot(threadID: archived, title: "Old", model: nil, reasoningEffort: nil, updatedAtMilliseconds: 1_700_000_000, tokensUsed: nil)], observations: [], health: DesktopCycleHealth(processRunning: true, stateDBReadable: true))
+        await store.applyDesktopCycle(registrations: [DesktopThreadSnapshot(threadID: archived, conversationName: "Old", model: nil, reasoningEffort: nil, updatedAtMilliseconds: 1_700_000_000, tokensUsed: nil)], observations: [], health: DesktopCycleHealth(processRunning: true, stateDBReadable: true))
         await store.applyDesktopCycle(registrations: [], observations: [], health: DesktopCycleHealth(processRunning: true, stateDBReadable: true, removedThreadIDs: [archived]))
         let snapshot = await store.snapshot()
         XCTAssertEqual(snapshot.currentState, .idle)
@@ -401,7 +401,7 @@ final class MonitorRuntimeTests: XCTestCase {
         var iterator = stream.makeAsyncIterator()
         _ = await iterator.next()
 
-        await store.registerDesktopThread(DesktopThreadSnapshot(threadID: thread, title: nil, model: nil, reasoningEffort: nil, updatedAtMilliseconds: nil, tokensUsed: nil))
+        await store.registerDesktopThread(DesktopThreadSnapshot(threadID: thread, conversationName: nil, model: nil, reasoningEffort: nil, updatedAtMilliseconds: nil, tokensUsed: nil))
         _ = await iterator.next()
         let now = Date()
         await store.ingest(.rollout(RolloutRecordEnvelope(threadID: thread, turnID: turn, itemID: nil, kind: .taskStarted, activity: nil, tokenSnapshot: nil, model: nil, reasoningEffort: nil, observedAt: now, fileOffset: 0)))
@@ -424,10 +424,10 @@ final class MonitorRuntimeTests: XCTestCase {
         let clock = RuntimeSnapshotTestClock()
         let store = makeStore(clock: clock)
         let old = id(.thread, "old"), current = id(.thread, "current")
-        await store.registerDesktopThread(DesktopThreadSnapshot(threadID: old, title: nil, model: nil, reasoningEffort: nil, updatedAtMilliseconds: nil, tokensUsed: nil))
+        await store.registerDesktopThread(DesktopThreadSnapshot(threadID: old, conversationName: nil, model: nil, reasoningEffort: nil, updatedAtMilliseconds: nil, tokensUsed: nil))
         await store.ingest(.sourceHealth(DesktopSourceHealth(threadID: old, state: .unavailable, processEpoch: nil, fileIdentity: nil, reason: .sourceMissing)))
         clock.advance(1)
-        await store.registerDesktopThread(DesktopThreadSnapshot(threadID: current, title: nil, model: nil, reasoningEffort: nil, updatedAtMilliseconds: nil, tokensUsed: nil))
+        await store.registerDesktopThread(DesktopThreadSnapshot(threadID: current, conversationName: nil, model: nil, reasoningEffort: nil, updatedAtMilliseconds: nil, tokensUsed: nil))
 
         let snapshot = await store.snapshot()
         XCTAssertEqual(snapshot.currentThread?.threadID, current)
@@ -441,7 +441,7 @@ final class MonitorRuntimeTests: XCTestCase {
         let current = id(.thread, "current")
         let historical = (0..<5).map { id(.thread, "historical-\($0)") }
         await store.applyDesktopCycle(
-            registrations: historical.map { DesktopThreadSnapshot(threadID: $0, title: nil, model: nil, reasoningEffort: nil, updatedAtMilliseconds: 1_700_000_000, tokensUsed: nil) } + [DesktopThreadSnapshot(threadID: current, title: nil, model: nil, reasoningEffort: nil, updatedAtMilliseconds: 1_700_000_100, tokensUsed: nil)],
+            registrations: historical.map { DesktopThreadSnapshot(threadID: $0, conversationName: nil, model: nil, reasoningEffort: nil, updatedAtMilliseconds: 1_700_000_000, tokensUsed: nil) } + [DesktopThreadSnapshot(threadID: current, conversationName: nil, model: nil, reasoningEffort: nil, updatedAtMilliseconds: 1_700_000_100, tokensUsed: nil)],
             observations: [],
             health: DesktopCycleHealth(processRunning: true, stateDBReadable: true)
         )

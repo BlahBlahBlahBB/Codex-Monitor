@@ -52,7 +52,7 @@ public struct ThreadRuntimeSnapshot: Sendable, Equatable {
     /// reducer. It is absent when no exact local turn is active; consumers
     /// must not infer or manufacture one from a thread title or status.
     public let activeTurnID: NamespacedID?
-    public let taskTitle: String?
+    public let conversationName: String?
     public let model: String?
     public let state: MonitorRuntimeState
     public let stateSince: Date
@@ -103,7 +103,7 @@ public struct ReconciledTerminal: Sendable, Equatable {
 /// PAUSED/STALE, so live state never leaks between old and rebuilt reducers.
 public struct RuntimeReconciliationThread: Sendable, Equatable {
     public let threadID: NamespacedID
-    public let title: String?
+    public let conversationName: String?
     public let model: String?
     public let activeTurnID: NamespacedID?
     public let turnStartedAt: Date?
@@ -123,8 +123,8 @@ public struct RuntimeReconciliationThread: Sendable, Equatable {
     /// freshness so an idle representative cannot be reordered by heartbeats.
     public let lastMeaningfulActivityAt: Date?
 
-    public init(threadID: NamespacedID, title: String? = nil, model: String? = nil, activeTurnID: NamespacedID?, turnStartedAt: Date?, latestActiveState: MonitorRuntimeState?, latestActiveStateAt: Date?, activeItemID: NamespacedID? = nil, activeItemCategory: RuntimeActivityCategory? = nil, terminal: ReconciledTerminal? = nil, sessionTokenCumulative: Int64? = nil, sessionTokenProvenance: SessionTokenProvenance? = nil, approvalHealth: ApprovalCapabilityHealth, unresolvedApprovals: [ApprovalRequested], runtimeSourceAvailable: Bool, runtimeObservedAt: Date, approvalObservedAt: Date, lastMeaningfulActivityAt: Date? = nil) {
-        self.threadID = threadID; self.title = title; self.model = model; self.activeTurnID = activeTurnID
+    public init(threadID: NamespacedID, conversationName: String? = nil, model: String? = nil, activeTurnID: NamespacedID?, turnStartedAt: Date?, latestActiveState: MonitorRuntimeState?, latestActiveStateAt: Date?, activeItemID: NamespacedID? = nil, activeItemCategory: RuntimeActivityCategory? = nil, terminal: ReconciledTerminal? = nil, sessionTokenCumulative: Int64? = nil, sessionTokenProvenance: SessionTokenProvenance? = nil, approvalHealth: ApprovalCapabilityHealth, unresolvedApprovals: [ApprovalRequested], runtimeSourceAvailable: Bool, runtimeObservedAt: Date, approvalObservedAt: Date, lastMeaningfulActivityAt: Date? = nil) {
+        self.threadID = threadID; self.conversationName = conversationName; self.model = model; self.activeTurnID = activeTurnID
         self.turnStartedAt = turnStartedAt; self.latestActiveState = latestActiveState; self.latestActiveStateAt = latestActiveStateAt
         self.activeItemID = activeItemID; self.activeItemCategory = activeItemCategory; self.terminal = terminal
         self.sessionTokenCumulative = sessionTokenCumulative; self.sessionTokenProvenance = sessionTokenProvenance
@@ -159,7 +159,7 @@ public final class RuntimeStateEngine: @unchecked Sendable {
         guard pausePhase == .live else { return }
         let now = observedAt ?? clock.now()
         var record = record(for: snapshot.threadID, at: now)
-        record.title = safeTitle(snapshot.title); record.model = snapshot.model
+        record.conversationName = safeConversationName(snapshot.conversationName); record.model = snapshot.model
         if let updatedAt = Self.desktopUpdatedAt(snapshot.updatedAtMilliseconds) {
             record.lastMeaningfulActivityAt = latest(record.lastMeaningfulActivityAt, updatedAt)
         }
@@ -327,7 +327,7 @@ public final class RuntimeStateEngine: @unchecked Sendable {
         let now = clock.now(); var rebuilt: [NamespacedID: ThreadRecord] = [:]
         for value in values {
             var record = ThreadRecord(threadID: value.threadID, at: now)
-            record.title = safeTitle(value.title); record.model = value.model; record.activeTurnID = value.activeTurnID
+            record.conversationName = safeConversationName(value.conversationName); record.model = value.model; record.activeTurnID = value.activeTurnID
             record.turnStartedAt = value.turnStartedAt; record.lastActiveState = value.latestActiveState; record.lastActiveStateAt = value.latestActiveStateAt
             record.activeItemID = value.activeItemID; record.activeItemCategory = value.activeItemCategory; record.lastActivity = value.activeItemCategory ?? activity(for: value.latestActiveState ?? .idle)
             record.tokens = value.sessionTokenCumulative; record.tokenProvenance = value.sessionTokenProvenance
@@ -351,7 +351,7 @@ public final class RuntimeStateEngine: @unchecked Sendable {
         let threadSnapshots = records.values.map { snapshot(for: $0, now: now) }.sorted { stableID($0.threadID) < stableID($1.threadID) }
         if pausePhase != .live {
             let since = pauseSince ?? now
-            let pausedThreads = threadSnapshots.map { value in ThreadRuntimeSnapshot(threadID: value.threadID, activeTurnID: value.activeTurnID, taskTitle: value.taskTitle, model: value.model, state: .paused, stateSince: since, turnRuntimeStartedAt: value.turnRuntimeStartedAt, sessionTokenCumulative: value.sessionTokenCumulative, sessionTokenProvenance: value.sessionTokenProvenance, sessionTokenAvailable: value.sessionTokenAvailable, sourceFreshness: stale(value.sourceFreshness, at: now), approvalHealth: .stale, approvalFreshness: stale(value.approvalFreshness, at: now), approvalRequestObserved: false, currentActivityCategory: value.currentActivityCategory) }
+            let pausedThreads = threadSnapshots.map { value in ThreadRuntimeSnapshot(threadID: value.threadID, activeTurnID: value.activeTurnID, conversationName: value.conversationName, model: value.model, state: .paused, stateSince: since, turnRuntimeStartedAt: value.turnRuntimeStartedAt, sessionTokenCumulative: value.sessionTokenCumulative, sessionTokenProvenance: value.sessionTokenProvenance, sessionTokenAvailable: value.sessionTokenAvailable, sourceFreshness: stale(value.sourceFreshness, at: now), approvalHealth: .stale, approvalFreshness: stale(value.approvalFreshness, at: now), approvalRequestObserved: false, currentActivityCategory: value.currentActivityCategory) }
             return GlobalRuntimeSnapshot(state: .paused, stateSince: since, representativeThreadID: nil, currentActivityCategory: .idle, currentActivityShortSafeLabel: RuntimeActivityCategory.idle.shortSafeLabel, sourceFreshness: Freshness(state: .stale, assessedAt: now, observedAt: since, reason: "monitorPausedOrRevalidating"), activeThreadCount: 0, waitingApprovalCount: 0, approvalRequestObserved: false, representativeThread: nil, threads: pausedThreads)
         }
         let ranked = threadSnapshots.sorted { lhs, rhs in
@@ -448,7 +448,7 @@ public final class RuntimeStateEngine: @unchecked Sendable {
         let runtimeFreshness = Freshness(state: record.runtimeSourceAvailable ? .fresh : .unknown, assessedAt: now, observedAt: record.runtimeObservedAt, reason: record.runtimeSourceAvailable ? nil : "runtimeSourceUnavailable")
         let approvalFreshness = Freshness(state: record.approvalHealth == .unavailable ? .unknown : (record.approvalHealth == .stale ? .stale : .fresh), assessedAt: now, observedAt: record.approvalObservedAt, reason: record.approvalHealth == .unavailable ? "approvalSourceUnavailable" : nil)
         let category = [.thinking, .working].contains(state) ? record.lastActivity : activity(for: state)
-        return ThreadRuntimeSnapshot(threadID: record.threadID, activeTurnID: record.activeTurnID, taskTitle: record.title, model: record.model, state: state, stateSince: since, turnRuntimeStartedAt: record.turnStartedAt, sessionTokenCumulative: record.tokens, sessionTokenProvenance: record.tokenProvenance, sessionTokenAvailable: record.sessionTokenAvailable, sourceFreshness: runtimeFreshness, approvalHealth: record.approvalHealth, approvalFreshness: approvalFreshness, approvalRequestObserved: record.approvalRequestObservedAt != nil, currentActivityCategory: category)
+        return ThreadRuntimeSnapshot(threadID: record.threadID, activeTurnID: record.activeTurnID, conversationName: record.conversationName, model: record.model, state: state, stateSince: since, turnRuntimeStartedAt: record.turnStartedAt, sessionTokenCumulative: record.tokens, sessionTokenProvenance: record.tokenProvenance, sessionTokenAvailable: record.sessionTokenAvailable, sourceFreshness: runtimeFreshness, approvalHealth: record.approvalHealth, approvalFreshness: approvalFreshness, approvalRequestObserved: record.approvalRequestObservedAt != nil, currentActivityCategory: category)
     }
 
     private func state(for record: ThreadRecord, now: Date) -> MonitorRuntimeState {
@@ -470,7 +470,7 @@ private struct Terminal { let turnID: NamespacedID; let eventID: String; let sta
 private struct PendingApproval { let request: ApprovalRequested }
 private struct ThreadRecord {
     let threadID: NamespacedID; let createdAt: Date
-    var title: String? = nil; var model: String? = nil; var activeTurnID: NamespacedID? = nil; var turnStartedAt: Date? = nil
+    var conversationName: String? = nil; var model: String? = nil; var activeTurnID: NamespacedID? = nil; var turnStartedAt: Date? = nil
     var lastActiveState: MonitorRuntimeState? = nil; var lastActiveStateAt: Date? = nil; var lastActivity: RuntimeActivityCategory = .thinking
     var activeItemID: NamespacedID? = nil; var activeItemCategory: RuntimeActivityCategory? = nil
     var pendingApprovals: [NamespacedID: PendingApproval] = [:]; var approvalHealth: ApprovalCapabilityHealth = .availableKnownNotWaiting; var approvalObservedAt: Date
@@ -482,5 +482,5 @@ private struct ThreadRecord {
     init(threadID: NamespacedID, at: Date) { self.threadID = threadID; createdAt = at; runtimeObservedAt = at; approvalObservedAt = at }
 }
 
-private func safeTitle(_ value: String?) -> String? { guard let value else { return nil }; let compact = value.components(separatedBy: .newlines).joined(separator: " ").trimmingCharacters(in: .whitespacesAndNewlines); return compact.isEmpty ? nil : String(compact.prefix(120)) }
+private func safeConversationName(_ value: String?) -> String? { guard let value else { return nil }; let compact = value.components(separatedBy: .newlines).joined(separator: " ").trimmingCharacters(in: .whitespacesAndNewlines); return compact.isEmpty ? nil : String(compact.prefix(120)) }
 private func stableID(_ id: NamespacedID) -> String { id.sourceID.rawValue + "\u{0}" + id.entityKind.rawValue + "\u{0}" + id.rawID }

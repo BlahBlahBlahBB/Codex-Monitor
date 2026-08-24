@@ -70,7 +70,7 @@ public struct MonitorSourceHealth: Sendable, Equatable {
 public struct MonitorThreadViewModel: Sendable, Equatable {
     public let threadID: NamespacedID
     public let activeTurnID: NamespacedID?
-    public let taskTitle: String?
+    public let conversationName: String?
     public let model: String?
     public let state: MonitorRuntimeState
     public let stateSince: Date
@@ -85,7 +85,7 @@ public struct MonitorThreadViewModel: Sendable, Equatable {
     init(_ value: ThreadRuntimeSnapshot) {
         threadID = value.threadID
         activeTurnID = value.activeTurnID
-        taskTitle = value.taskTitle
+        conversationName = value.conversationName
         model = value.model
         state = value.state
         stateSince = value.stateSince
@@ -208,7 +208,7 @@ public struct MonitorRuntimeSnapshot: Sendable, Equatable {
     }
 
     private func equivalent(_ lhs: MonitorThreadViewModel, _ rhs: MonitorThreadViewModel) -> Bool {
-        lhs.threadID == rhs.threadID && lhs.activeTurnID == rhs.activeTurnID && lhs.taskTitle == rhs.taskTitle && lhs.model == rhs.model && lhs.state == rhs.state && lhs.stateSince == rhs.stateSince && lhs.activity == rhs.activity && lhs.waitingApproval == rhs.waitingApproval && lhs.approvalRequestObserved == rhs.approvalRequestObserved && lhs.sessionToken == rhs.sessionToken && lhs.sessionTokenAvailability == rhs.sessionTokenAvailability && lhs.sessionTokenProvenance == rhs.sessionTokenProvenance && equivalent(lhs.freshness, rhs.freshness)
+        lhs.threadID == rhs.threadID && lhs.activeTurnID == rhs.activeTurnID && lhs.conversationName == rhs.conversationName && lhs.model == rhs.model && lhs.state == rhs.state && lhs.stateSince == rhs.stateSince && lhs.activity == rhs.activity && lhs.waitingApproval == rhs.waitingApproval && lhs.approvalRequestObserved == rhs.approvalRequestObserved && lhs.sessionToken == rhs.sessionToken && lhs.sessionTokenAvailability == rhs.sessionTokenAvailability && lhs.sessionTokenProvenance == rhs.sessionTokenProvenance && equivalent(lhs.freshness, rhs.freshness)
     }
 
     private func equivalent(_ lhs: MonitorSourceHealth, _ rhs: MonitorSourceHealth) -> Bool {
@@ -459,9 +459,9 @@ public actor MonitorRuntimeStore {
         engine.ingest(observation)
     }
 
-    public func ingest(account snapshot: AccountSnapshot) {
+    public func ingest(account snapshot: AccountSnapshot, refreshDegraded: Bool = false) {
         accountSnapshot = snapshot
-        accountRefreshDegraded = false
+        accountRefreshDegraded = refreshDegraded
         let freshness = snapshot.provenance.freshness
         accountSource = SourceState(availability: freshness.state == .fresh ? .available : monitorAvailability(for: freshness.state), observedAt: freshness.observedAt, reason: freshness.state == .fresh ? nil : monitorReason(for: freshness.state))
         publishSnapshot()
@@ -473,6 +473,7 @@ public actor MonitorRuntimeStore {
     /// blank Account, Plan, Usage, or Quota in the UI.
     public func markAccountRefreshDegraded() {
         accountRefreshDegraded = true
+        publishSnapshot()
     }
 
     public func markSourceUnavailable(_ source: MonitorRuntimeSource, observedAt: Date? = nil) {

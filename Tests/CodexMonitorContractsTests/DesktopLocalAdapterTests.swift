@@ -3,6 +3,7 @@ import Foundation
 import Darwin
 import CSQLite
 @testable import CodexMonitorContracts
+@testable import CodexMonitorApp
 
 final class DesktopLocalAdapterTests: XCTestCase {
     private var fixture: LocalFixture!
@@ -23,6 +24,45 @@ final class DesktopLocalAdapterTests: XCTestCase {
         let wrong = try fixture.rollout("thread-b", lines: [fixture.session("not-thread-b")])
         try fixture.addThread("thread-b", rollout: wrong)
         XCTAssertThrowsError(try adapter.open(threadRawID: "thread-b")) { XCTAssertEqual($0 as? DesktopLocalAdapterError, .threadNotFound) }
+    }
+
+    func testOptionalConversationNameIsAuthoritativeAndRawTitleIsNeverPresented() async throws {
+        let file = try fixture.rollout("thread-a", lines: [fixture.session("thread-a")])
+        let rawPrompt = "# Files pasted by the user:\n/Users/test/pasted-text.txt\n019ffa90-a5ce-7523-99d5-a85aaa140d0f\n普通中文 Prompt"
+        try fixture.addThread("thread-a", rollout: file, title: rawPrompt)
+        try fixture.addConversationNameColumn()
+        try fixture.setConversationName("开始 1.0.1 Phase 4A QA 构建", for: "thread-a")
+
+        let snapshot = try fixture.adapter().open(threadRawID: "thread-a")
+        XCTAssertEqual(snapshot.conversationName, "开始 1.0.1 Phase 4A QA 构建")
+        XCTAssertNotEqual(snapshot.conversationName, rawPrompt)
+
+        let runtime = MonitorRuntimeStore(engine: RuntimeStateEngine(initialPhase: .live), initialPhase: .live)
+        await runtime.registerDesktopThread(snapshot)
+        let runtimeSnapshot = await runtime.snapshot()
+        let display = MonitorDisplayValue.resolvedConversationDisplayTitle(runtimeSnapshot)
+        XCTAssertEqual(display, "开始 1.0.1 Phase 4A QA 构建")
+        XCTAssertNotEqual(display, rawPrompt)
+
+        let notification = MonitorNotificationContent.completed(snapshot: runtimeSnapshot, languageCode: "zh-Hans")
+        XCTAssertEqual(notification.body, "开始 1.0.1 Phase 4A QA 构建")
+        XCTAssertNotEqual(notification.body, rawPrompt)
+    }
+
+    func testOlderSchemaWithoutNameStillReadsThreadAndUsesGenericPresentationFallback() async throws {
+        let file = try fixture.rollout("thread-a", lines: [fixture.session("thread-a"), fixture.started("turn-a"), fixture.token(total: 42, last: 4)])
+        try fixture.addThread("thread-a", rollout: file, title: "Normal-looking raw prompt")
+
+        let adapter = try fixture.adapter()
+        let snapshot = try adapter.open(threadRawID: "thread-a")
+        XCTAssertNil(snapshot.conversationName)
+        XCTAssertEqual(snapshot.tokensUsed, 0)
+        XCTAssertEqual(try adapter.poll(threadID: snapshot.threadID).observations.rollouts.tokenTotals, [42])
+
+        let runtime = MonitorRuntimeStore(engine: RuntimeStateEngine(initialPhase: .live), initialPhase: .live)
+        await runtime.registerDesktopThread(snapshot)
+        let rendered = MonitorDisplayValue.resolvedConversationDisplayTitle(await runtime.snapshot())
+        XCTAssertEqual(rendered, L10n.tr("activity.currentTask"))
     }
 
     func testInterleavedIdenticalTimestampsNeverCrossThreadOrToken() throws {
@@ -547,6 +587,11 @@ private final class LocalFixture {
     }
     func addThread(_ id: String, rollout: URL, title: String = "title") throws {
         try executeDatabase("INSERT INTO threads VALUES ('\(sql(id))', '\(sql(rollout.path))', '\(sql(title))', 'gpt-test', 'high', 1, 0)")
+    }
+    func addConversationNameColumn() throws { try executeDatabase("ALTER TABLE threads ADD COLUMN name TEXT") }
+    func setConversationName(_ name: String?, for id: String) throws {
+        let value = name.map { "'\(sql($0))'" } ?? "NULL"
+        try executeDatabase("UPDATE threads SET name = \(value) WHERE id = '\(sql(id))'")
     }
     func updatePath(thread: String, path: URL) throws { try executeDatabase("UPDATE threads SET rollout_path = '\(sql(path.path))' WHERE id = '\(sql(thread))'") }
     func session(_ id: String) -> String { "{\"type\":\"session_meta\",\"payload\":{\"id\":\"\(id)\"}}" }

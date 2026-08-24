@@ -80,14 +80,17 @@ public struct DesktopSourceHealth: Sendable, Equatable {
 
 public struct DesktopThreadSnapshot: Sendable, Equatable {
     public let threadID: NamespacedID
-    public let title: String?
+    /// The persisted Codex Desktop sidebar name, when this State DB schema
+    /// exposes `threads.name`. Raw `threads.title` is intentionally not read
+    /// into this presentation-facing model.
+    public let conversationName: String?
     public let model: String?
     public let reasoningEffort: String?
     public let updatedAtMilliseconds: Int64?
     /// A same-thread cross-check only; it is never merged with account usage.
     public let tokensUsed: Int64?
-    public init(threadID: NamespacedID, title: String?, model: String?, reasoningEffort: String?, updatedAtMilliseconds: Int64?, tokensUsed: Int64?) {
-        self.threadID = threadID; self.title = title; self.model = model; self.reasoningEffort = reasoningEffort
+    public init(threadID: NamespacedID, conversationName: String?, model: String?, reasoningEffort: String?, updatedAtMilliseconds: Int64?, tokensUsed: Int64?) {
+        self.threadID = threadID; self.conversationName = conversationName; self.model = model; self.reasoningEffort = reasoningEffort
         self.updatedAtMilliseconds = updatedAtMilliseconds; self.tokensUsed = tokensUsed
     }
 }
@@ -246,9 +249,10 @@ public final class StateDBReader: @unchecked Sendable {
         let version = try scalarInt(database, sql: "PRAGMA user_version")
         guard schema.acceptedUserVersions.contains(Int32(version)) else { throw StateDBError.schemaMismatch }
         let columns = try tableColumns(database, table: "threads")
-        let required: Set<String> = ["id", "rollout_path", "title", "model", "reasoning_effort", "updated_at", "tokens_used"]
+        let required: Set<String> = ["id", "rollout_path", "model", "reasoning_effort", "updated_at", "tokens_used"]
         guard required.isSubset(of: columns) else { throw StateDBError.schemaMismatch }
-        let sql = "SELECT id, rollout_path, title, model, reasoning_effort, updated_at, tokens_used FROM threads WHERE id = ? LIMIT 1"
+        let conversationName = columns.contains("name") ? "name" : "NULL"
+        let sql = "SELECT id, rollout_path, \(conversationName), model, reasoning_effort, updated_at, tokens_used FROM threads WHERE id = ? LIMIT 1"
         var statement: OpaquePointer?
         let prepared = sqlite3_prepare_v2(database, sql, -1, &statement, nil)
         guard prepared == SQLITE_OK, let statement else { throw stateError(for: database) }
@@ -260,7 +264,7 @@ public final class StateDBReader: @unchecked Sendable {
         guard let id = text(statement, column: 0), id == rawID,
               let path = text(statement, column: 1),
               let threadID = NamespacedID(sourceID: sourceID.value, entityKind: .thread, rawID: id) else { throw StateDBError.schemaMismatch }
-        let snapshot = DesktopThreadSnapshot(threadID: threadID, title: text(statement, column: 2), model: text(statement, column: 3), reasoningEffort: text(statement, column: 4), updatedAtMilliseconds: integer(statement, column: 5), tokensUsed: integer(statement, column: 6))
+        let snapshot = DesktopThreadSnapshot(threadID: threadID, conversationName: text(statement, column: 2), model: text(statement, column: 3), reasoningEffort: text(statement, column: 4), updatedAtMilliseconds: integer(statement, column: 5), tokensUsed: integer(statement, column: 6))
         return StateDBThreadRecord(snapshot: snapshot, rolloutURL: URL(fileURLWithPath: path))
     }
 
@@ -274,9 +278,10 @@ public final class StateDBReader: @unchecked Sendable {
         let version = try scalarInt(database, sql: "PRAGMA user_version")
         guard schema.acceptedUserVersions.contains(Int32(version)) else { throw StateDBError.schemaMismatch }
         let columns = try tableColumns(database, table: "threads")
-        let required: Set<String> = ["id", "rollout_path", "title", "model", "reasoning_effort", "updated_at", "tokens_used"]
+        let required: Set<String> = ["id", "rollout_path", "model", "reasoning_effort", "updated_at", "tokens_used"]
         guard required.isSubset(of: columns) else { throw StateDBError.schemaMismatch }
-        let sql = "SELECT id, rollout_path, title, model, reasoning_effort, updated_at, tokens_used FROM threads ORDER BY updated_at DESC LIMIT ?"
+        let conversationName = columns.contains("name") ? "name" : "NULL"
+        let sql = "SELECT id, rollout_path, \(conversationName), model, reasoning_effort, updated_at, tokens_used FROM threads ORDER BY updated_at DESC LIMIT ?"
         var statement: OpaquePointer?
         guard sqlite3_prepare_v2(database, sql, -1, &statement, nil) == SQLITE_OK, let statement else { throw stateError(for: database) }
         defer { sqlite3_finalize(statement) }
@@ -289,7 +294,7 @@ public final class StateDBReader: @unchecked Sendable {
                   let id = text(statement, column: 0),
                   let path = text(statement, column: 1),
                   let threadID = NamespacedID(sourceID: sourceID.value, entityKind: .thread, rawID: id) else { throw StateDBError.schemaMismatch }
-            let snapshot = DesktopThreadSnapshot(threadID: threadID, title: text(statement, column: 2), model: text(statement, column: 3), reasoningEffort: text(statement, column: 4), updatedAtMilliseconds: integer(statement, column: 5), tokensUsed: integer(statement, column: 6))
+            let snapshot = DesktopThreadSnapshot(threadID: threadID, conversationName: text(statement, column: 2), model: text(statement, column: 3), reasoningEffort: text(statement, column: 4), updatedAtMilliseconds: integer(statement, column: 5), tokensUsed: integer(statement, column: 6))
             records.append(StateDBThreadRecord(snapshot: snapshot, rolloutURL: URL(fileURLWithPath: path)))
         }
         return records
