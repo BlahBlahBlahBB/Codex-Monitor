@@ -218,56 +218,80 @@ final class MonitorProductIntegrationTests: XCTestCase {
         XCTAssertEqual(L10n.tr("activity.noSession", languageCode: "en"), "No session")
     }
 
-    func testCompletedNotificationNeverUsesConversationTitleAsItsBody() async {
-        let titles: [String?] = [
-            "完成跨设备兼容性检查",
-            "Finish the compatibility check",
-            "/Users/test/Desktop/project",
-            "/Volumes/SSD/project",
-            "file:///Users/test/project",
-            "~/.codex/session",
-            "Please read the project and implement every requested change.",
-            "019ffa90-a5ce-7523-99d5-a85aaa140d0f",
-            nil
-        ]
-
-        for (index, title) in titles.enumerated() {
-            let snapshot = await activeUsageSessionSnapshot(
-                conversationName: title,
-                threadRawID: "completed-notification-title-\(index)",
-                sessionTokens: 1
-            )
-            let notification = MonitorNotificationContent.completed()
-
-            XCTAssertEqual(notification.body, "", "conversation name must never reach the completed notification body: \(snapshot.currentThread?.conversationName ?? "nil")")
-            XCTAssertNotEqual(notification.body, snapshot.currentThread?.conversationName)
-        }
-    }
-
-    func testCompletedNotificationUsesLocalizedTitleAndEmptyBody() {
-        let chinese = MonitorNotificationContent.completed(languageCode: "zh-Hans")
-        let english = MonitorNotificationContent.completed(languageCode: "en")
+    func testCompletedNotificationUsesLocalizedTitleAndAuthoritativeConversationName() async {
+        let snapshot = await activeUsageSessionSnapshot(
+            conversationName: "开始 Codex Monitor 1.0.1 Phase 4C",
+            threadRawID: "completed-notification-authoritative-name",
+            sessionTokens: 1
+        )
+        let chinese = MonitorNotificationContent.completed(snapshot: snapshot, languageCode: "zh-Hans")
+        let english = MonitorNotificationContent.completed(snapshot: snapshot, languageCode: "en")
 
         XCTAssertEqual(chinese.title, "已完成")
         XCTAssertEqual(english.title, "Completed")
-        XCTAssertEqual(chinese.body, "")
-        XCTAssertEqual(english.body, "")
+        XCTAssertEqual(chinese.subtitle, "")
+        XCTAssertEqual(english.subtitle, "")
+        XCTAssertEqual(chinese.body, "开始 Codex Monitor 1.0.1 Phase 4C")
+        XCTAssertEqual(english.body, "开始 Codex Monitor 1.0.1 Phase 4C")
     }
 
-    func testCompletedNotificationPreservesTransitionAndPreferenceGates() {
+    func testCompletedNotificationUsesLocalizedCurrentTaskForMissingName() async {
+        let snapshot = await activeUsageSessionSnapshot(
+            conversationName: nil,
+            threadRawID: "completed-notification-missing-name",
+            sessionTokens: 1
+        )
+
+        XCTAssertEqual(MonitorNotificationContent.completed(snapshot: snapshot, languageCode: "zh-Hans").body, "当前任务")
+        XCTAssertEqual(MonitorNotificationContent.completed(snapshot: snapshot, languageCode: "en").body, "Current task")
+    }
+
+    func testCompletedNotificationNeverUsesUnsafeNameAsItsBody() async {
+        let unsafeNames = [
+            "/Users/test/Desktop/project",
+            "file:///Users/test/project",
+            "019ffa90-a5ce-7523-99d5-a85aaa140d0f",
+            "# Files pasted by the user:\n/Users/test/pasted-text.txt\nPrompt text",
+            "The following is Codex agent history and hidden context"
+        ]
+
+        for (index, unsafeName) in unsafeNames.enumerated() {
+            let snapshot = await activeUsageSessionSnapshot(
+                conversationName: unsafeName,
+                threadRawID: "completed-notification-unsafe-name-\(index)",
+                sessionTokens: 1
+            )
+            let notification = MonitorNotificationContent.completed(snapshot: snapshot, languageCode: "en")
+
+            XCTAssertEqual(notification.body, "Current task")
+            XCTAssertNotEqual(notification.body, unsafeName)
+            XCTAssertFalse(notification.body.contains("/Users/"))
+            XCTAssertFalse(notification.body.contains("019ffa90-a5ce-7523-99d5-a85aaa140d0f"))
+        }
+    }
+
+    func testCompletedNotificationPreservesTransitionAndPreferenceGates() async {
+        let snapshot = await activeUsageSessionSnapshot(
+            conversationName: "Authoritative notification name",
+            threadRawID: "completed-notification-transition",
+            sessionTokens: 1
+        )
         let completed = MonitorNotificationContent.forTransition(
             from: .working,
             to: .completed,
+            snapshot: snapshot,
             desktopSourceAvailable: true,
             waitingApprovalEnabled: false,
             taskCompletedEnabled: true
         )
-        XCTAssertEqual(completed?.body, "")
+        XCTAssertEqual(completed?.body, "Authoritative notification name")
         XCTAssertEqual(completed?.title, L10n.tr("state.completed"))
+        XCTAssertEqual(completed?.subtitle, "")
 
         XCTAssertNil(MonitorNotificationContent.forTransition(
             from: .working,
             to: .completed,
+            snapshot: snapshot,
             desktopSourceAvailable: true,
             waitingApprovalEnabled: false,
             taskCompletedEnabled: false
@@ -275,6 +299,7 @@ final class MonitorProductIntegrationTests: XCTestCase {
         XCTAssertNil(MonitorNotificationContent.forTransition(
             from: .completed,
             to: .completed,
+            snapshot: snapshot,
             desktopSourceAvailable: true,
             waitingApprovalEnabled: false,
             taskCompletedEnabled: true
@@ -282,6 +307,7 @@ final class MonitorProductIntegrationTests: XCTestCase {
         XCTAssertNil(MonitorNotificationContent.forTransition(
             from: .working,
             to: .working,
+            snapshot: snapshot,
             desktopSourceAvailable: true,
             waitingApprovalEnabled: false,
             taskCompletedEnabled: true
@@ -289,6 +315,7 @@ final class MonitorProductIntegrationTests: XCTestCase {
         XCTAssertNil(MonitorNotificationContent.forTransition(
             from: .working,
             to: .completed,
+            snapshot: snapshot,
             desktopSourceAvailable: false,
             waitingApprovalEnabled: false,
             taskCompletedEnabled: true

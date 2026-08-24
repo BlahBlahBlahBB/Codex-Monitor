@@ -39,9 +39,14 @@ final class DesktopLocalAdapterTests: XCTestCase {
 
         let runtime = MonitorRuntimeStore(engine: RuntimeStateEngine(initialPhase: .live), initialPhase: .live)
         await runtime.registerDesktopThread(snapshot)
-        let display = MonitorDisplayValue.resolvedConversationDisplayTitle(await runtime.snapshot())
+        let runtimeSnapshot = await runtime.snapshot()
+        let display = MonitorDisplayValue.resolvedConversationDisplayTitle(runtimeSnapshot)
         XCTAssertEqual(display, "开始 1.0.1 Phase 4A QA 构建")
         XCTAssertNotEqual(display, rawPrompt)
+
+        let notification = MonitorNotificationContent.completed(snapshot: runtimeSnapshot, languageCode: "zh-Hans")
+        XCTAssertEqual(notification.body, "开始 1.0.1 Phase 4A QA 构建")
+        XCTAssertNotEqual(notification.body, rawPrompt)
     }
 
     func testOlderSchemaWithoutNameStillReadsThreadAndUsesGenericPresentationFallback() async throws {

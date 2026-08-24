@@ -507,12 +507,12 @@ enum MonitorDisplayValue {
     /// The sole user-facing Conversation Display Title resolver. Both Usage
     /// and Quick View intentionally delegate here so they cannot acquire
     /// different fallback rules or accidentally surface runtime provenance.
-    static func resolvedConversationDisplayTitle(_ snapshot: MonitorRuntimeSnapshot?) -> String {
+    static func resolvedConversationDisplayTitle(_ snapshot: MonitorRuntimeSnapshot?, languageCode: String? = nil) -> String {
         guard let currentThread = snapshot?.currentThread else {
-            return L10n.tr("activity.noSession")
+            return L10n.tr("activity.noSession", languageCode: languageCode)
         }
         return trustedConversationDisplayName(currentThread.conversationName)
-            ?? L10n.tr("activity.currentTask")
+            ?? L10n.tr("activity.currentTask", languageCode: languageCode)
     }
 
     static func conversationName(_ snapshot: MonitorRuntimeSnapshot?) -> String {
