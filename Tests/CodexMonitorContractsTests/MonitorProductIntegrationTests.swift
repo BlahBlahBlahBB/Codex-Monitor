@@ -231,6 +231,83 @@ final class MonitorProductIntegrationTests: XCTestCase {
         XCTAssertEqual(L10n.tr("activity.noSession", languageCode: "en"), "No session")
     }
 
+    func testCompletedNotificationNeverUsesConversationTitleAsItsBody() async {
+        let titles: [String?] = [
+            "完成跨设备兼容性检查",
+            "Finish the compatibility check",
+            "/Users/test/Desktop/project",
+            "/Volumes/SSD/project",
+            "file:///Users/test/project",
+            "~/.codex/session",
+            "Please read the project and implement every requested change.",
+            "019ffa90-a5ce-7523-99d5-a85aaa140d0f",
+            nil
+        ]
+
+        for (index, title) in titles.enumerated() {
+            let snapshot = await activeUsageSessionSnapshot(
+                title: title,
+                threadRawID: "completed-notification-title-\(index)",
+                sessionTokens: 1
+            )
+            let notification = MonitorNotificationContent.completed()
+
+            XCTAssertEqual(notification.body, "", "title must never reach the completed notification body: \(snapshot.currentThread?.taskTitle ?? "nil")")
+            XCTAssertNotEqual(notification.body, snapshot.currentThread?.taskTitle)
+        }
+    }
+
+    func testCompletedNotificationUsesLocalizedTitleAndEmptyBody() {
+        let chinese = MonitorNotificationContent.completed(languageCode: "zh-Hans")
+        let english = MonitorNotificationContent.completed(languageCode: "en")
+
+        XCTAssertEqual(chinese.title, "已完成")
+        XCTAssertEqual(english.title, "Completed")
+        XCTAssertEqual(chinese.body, "")
+        XCTAssertEqual(english.body, "")
+    }
+
+    func testCompletedNotificationPreservesTransitionAndPreferenceGates() {
+        let completed = MonitorNotificationContent.forTransition(
+            from: .working,
+            to: .completed,
+            desktopSourceAvailable: true,
+            waitingApprovalEnabled: false,
+            taskCompletedEnabled: true
+        )
+        XCTAssertEqual(completed?.body, "")
+        XCTAssertEqual(completed?.title, L10n.tr("state.completed"))
+
+        XCTAssertNil(MonitorNotificationContent.forTransition(
+            from: .working,
+            to: .completed,
+            desktopSourceAvailable: true,
+            waitingApprovalEnabled: false,
+            taskCompletedEnabled: false
+        ))
+        XCTAssertNil(MonitorNotificationContent.forTransition(
+            from: .completed,
+            to: .completed,
+            desktopSourceAvailable: true,
+            waitingApprovalEnabled: false,
+            taskCompletedEnabled: true
+        ))
+        XCTAssertNil(MonitorNotificationContent.forTransition(
+            from: .working,
+            to: .working,
+            desktopSourceAvailable: true,
+            waitingApprovalEnabled: false,
+            taskCompletedEnabled: true
+        ))
+        XCTAssertNil(MonitorNotificationContent.forTransition(
+            from: .working,
+            to: .completed,
+            desktopSourceAvailable: false,
+            waitingApprovalEnabled: false,
+            taskCompletedEnabled: true
+        ))
+    }
+
     func testUsageCurrentSessionUsesResolvedDisplayTitle() async {
         let snapshot = await activeUsageSessionSnapshot(
             title: "Codex Monitor — Luna Final Visual Polish",

@@ -4,6 +4,40 @@ import ServiceManagement
 import UserNotifications
 import CodexMonitorContracts
 
+struct MonitorNotificationContent: Equatable {
+    let title: String
+    let body: String
+
+    static func waitingApproval() -> Self {
+        Self(title: L10n.tr("state.waitingApproval"), body: L10n.tr("activity.waitingConfirmation"))
+    }
+
+    static func completed(languageCode: String? = nil) -> Self {
+        // A completion notification is deliberately an acknowledgement only.
+        // It must not consume a conversation title or any runtime metadata.
+        Self(title: L10n.tr("state.completed", languageCode: languageCode), body: "")
+    }
+
+    static func forTransition(
+        from previous: MonitorRuntimeState?,
+        to current: MonitorRuntimeState,
+        desktopSourceAvailable: Bool,
+        waitingApprovalEnabled: Bool,
+        taskCompletedEnabled: Bool
+    ) -> Self? {
+        guard desktopSourceAvailable,
+              let previous,
+              previous != current else { return nil }
+        if current == .waitingApproval, waitingApprovalEnabled {
+            return waitingApproval()
+        }
+        if current == .completed, taskCompletedEnabled {
+            return completed()
+        }
+        return nil
+    }
+}
+
 @MainActor
 final class LoginItemController: ObservableObject {
     @Published private(set) var isEnabled = false
@@ -56,20 +90,20 @@ final class MonitorNotificationController {
 
     private func handle(snapshot: MonitorRuntimeSnapshot, preferences: MonitorPreferences) {
         defer { lastState = snapshot.currentState }
-        guard snapshot.sourceHealth[.desktopLocal]?.availability == .available,
-              let previous = lastState,
-              previous != snapshot.currentState else { return }
-        if snapshot.currentState == .waitingApproval, preferences.waitingApprovalNotifications {
-            deliver(title: L10n.tr("state.waitingApproval"), body: L10n.tr("activity.waitingConfirmation"))
-        } else if snapshot.currentState == .completed, preferences.taskCompletedNotifications {
-            deliver(title: L10n.tr("state.completed"), body: MonitorDisplayValue.taskTitle(snapshot))
-        }
+        guard let notification = MonitorNotificationContent.forTransition(
+            from: lastState,
+            to: snapshot.currentState,
+            desktopSourceAvailable: snapshot.sourceHealth[.desktopLocal]?.availability == .available,
+            waitingApprovalEnabled: preferences.waitingApprovalNotifications,
+            taskCompletedEnabled: preferences.taskCompletedNotifications
+        ) else { return }
+        deliver(notification)
     }
 
-    private func deliver(title: String, body: String) {
+    private func deliver(_ notification: MonitorNotificationContent) {
         let content = UNMutableNotificationContent()
-        content.title = title
-        content.body = body
+        content.title = notification.title
+        content.body = notification.body
         let request = UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil)
         UNUserNotificationCenter.current().add(request)
     }
