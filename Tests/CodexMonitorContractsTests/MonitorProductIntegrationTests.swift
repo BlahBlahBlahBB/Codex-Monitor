@@ -1006,6 +1006,270 @@ final class MonitorProductIntegrationTests: XCTestCase {
         XCTAssertEqual(MonitorDisplayValue.todayUsage(snapshot), "45 Token")
     }
 
+    func testPartialAuthoritativeRefreshLetsUsageFailureDegradeOnlyUsage() async throws {
+        let assembled = AccountUsageProvider.assemble(
+            account: .success(accountRPC()),
+            rateLimits: .success(rateLimitsRPC(usedPercent: 40)),
+            usage: .failure(.rpcUnavailable),
+            observedAt: Date()
+        )
+        let account = try XCTUnwrap(assembled.snapshot)
+        let runtime = MonitorRuntimeStore(initialPhase: .live)
+        await runtime.ingest(account: account)
+        let snapshot = await runtime.snapshot()
+
+        XCTAssertEqual(assembled.diagnostics.usage, .rpcUnavailable)
+        XCTAssertTrue(assembled.diagnostics.degraded)
+        XCTAssertEqual(snapshot.account.accountKind, "chatgpt")
+        XCTAssertEqual(snapshot.account.plan, "pro")
+        XCTAssertEqual(snapshot.quota.primary?.usedPercent, 40)
+        XCTAssertEqual(snapshot.usage.availability, .unavailable)
+        XCTAssertEqual(MonitorDisplayValue.orbQuota(snapshot), "60%")
+    }
+
+    func testPartialAuthoritativeRefreshLetsRateLimitFailureDegradeOnlyQuota() async throws {
+        let assembled = AccountUsageProvider.assemble(
+            account: .success(accountRPC()),
+            rateLimits: .failure(.rpcUnavailable),
+            usage: .success(usageRPC(tokens: 45)),
+            observedAt: Date()
+        )
+        let runtime = MonitorRuntimeStore(initialPhase: .live)
+        await runtime.ingest(account: try XCTUnwrap(assembled.snapshot))
+        let snapshot = await runtime.snapshot()
+
+        XCTAssertEqual(assembled.diagnostics.rateLimits, .rpcUnavailable)
+        XCTAssertEqual(snapshot.account.plan, "pro")
+        XCTAssertEqual(snapshot.usage.availability, .available)
+        XCTAssertEqual(snapshot.quota.primaryAvailability, .unavailable)
+        XCTAssertNil(snapshot.quota.primary)
+        XCTAssertEqual(MonitorDisplayValue.orbQuota(snapshot), "--")
+        XCTAssertNotEqual(MonitorDisplayValue.remainingQuota(snapshot), "0%")
+    }
+
+    func testPartialAuthoritativeRefreshLetsAccountFailureDegradeOnlyMetadata() async throws {
+        let assembled = AccountUsageProvider.assemble(
+            account: .failure(.rpcUnavailable),
+            rateLimits: .success(rateLimitsRPC(usedPercent: 40)),
+            usage: .success(usageRPC(tokens: 45)),
+            observedAt: Date()
+        )
+        let runtime = MonitorRuntimeStore(initialPhase: .live)
+        await runtime.ingest(account: try XCTUnwrap(assembled.snapshot))
+        let snapshot = await runtime.snapshot()
+
+        // Account source health remains connection-level. The unavailable
+        // metadata itself is represented by absent fields and the safe,
+        // component-level internal diagnostic.
+        XCTAssertEqual(assembled.diagnostics.account, .rpcUnavailable)
+        XCTAssertEqual(snapshot.account.availability, .available)
+        XCTAssertNil(snapshot.account.accountKind)
+        XCTAssertNil(snapshot.account.plan)
+        XCTAssertEqual(snapshot.quota.primary?.usedPercent, 40)
+        XCTAssertEqual(snapshot.usage.usage?.dailyBuckets?.last?.authoritativeTokens, 45)
+    }
+
+    func testMalformedComponentDoesNotCollapseIndependentAuthoritativeComponents() async throws {
+        let malformedRate = AccountUsageProvider.assemble(
+            account: .success(accountRPC()),
+            rateLimits: .success(.string("not-an-object")),
+            usage: .success(usageRPC(tokens: 45)),
+            observedAt: Date()
+        )
+        XCTAssertEqual(malformedRate.diagnostics.rateLimits, .responseIncompatible)
+        XCTAssertEqual(malformedRate.snapshot?.planType, "pro")
+        XCTAssertNil(malformedRate.snapshot?.primaryRateLimit)
+        XCTAssertNotNil(malformedRate.snapshot?.usage?.dailyBuckets)
+
+        let malformedUsage = AccountUsageProvider.assemble(
+            account: .success(accountRPC()),
+            rateLimits: .success(rateLimitsRPC(usedPercent: 40)),
+            usage: .success(.array([])),
+            observedAt: Date()
+        )
+        XCTAssertEqual(malformedUsage.diagnostics.usage, .responseIncompatible)
+        XCTAssertEqual(malformedUsage.snapshot?.primaryRateLimit?.usedPercent, 40)
+        XCTAssertNil(malformedUsage.snapshot?.usage)
+    }
+
+    func testWholeConnectionFailureRetainsTheCompletePriorSnapshotAsStale() async throws {
+        let now = Date()
+        let full = try XCTUnwrap(AccountUsageProvider.assemble(
+            account: .success(accountRPC(email: "account-a@example.test")),
+            rateLimits: .success(rateLimitsRPC(usedPercent: 40)),
+            usage: .success(usageRPC(tokens: 45)),
+            observedAt: now
+        ).snapshot)
+        let failed = AccountUsageProvider.assemble(
+            account: .failure(.transportUnavailable),
+            rateLimits: .failure(.transportUnavailable),
+            usage: .failure(.transportUnavailable),
+            observedAt: now.addingTimeInterval(60)
+        )
+        XCTAssertNil(failed.snapshot)
+
+        let runtime = MonitorRuntimeStore(initialPhase: .live)
+        await runtime.ingest(account: full)
+        await runtime.markAccountRefreshDegraded()
+        let retained = await runtime.snapshot()
+        XCTAssertEqual(retained.account.plan, "pro")
+        XCTAssertEqual(retained.quota.primary?.usedPercent, 40)
+        XCTAssertEqual(retained.usage.usage?.dailyBuckets?.last?.authoritativeTokens, 45)
+        XCTAssertEqual(retained.sourceHealth[.account]?.freshness.state, .stale)
+    }
+
+    func testCurrentCycleOnlyAccountSuccessDropsPreviousQuotaAndUsage() throws {
+        let now = Date()
+        _ = try XCTUnwrap(AccountUsageProvider.assemble(
+            account: .success(accountRPC(email: "account-a@example.test")),
+            rateLimits: .success(rateLimitsRPC(usedPercent: 40)),
+            usage: .success(usageRPC(tokens: 45)),
+            observedAt: now
+        ).snapshot)
+        let partial = try XCTUnwrap(AccountUsageProvider.assemble(
+            account: .success(accountRPC(email: "account-b@example.test")),
+            rateLimits: .failure(.rpcUnavailable),
+            usage: .failure(.rpcUnavailable),
+            observedAt: now.addingTimeInterval(60)
+        ).snapshot)
+
+        XCTAssertEqual(partial.email, "account-b@example.test")
+        XCTAssertNil(partial.primaryRateLimit)
+        XCTAssertNil(partial.usage)
+        XCTAssertEqual(partial.provenance.observedAt, now.addingTimeInterval(60))
+    }
+
+    func testCurrentCycleOnlyAccountAndQuotaDropPreviousUsageThenRecover() throws {
+        let now = Date()
+        _ = try XCTUnwrap(AccountUsageProvider.assemble(
+            account: .success(accountRPC(email: "account-a@example.test")),
+            rateLimits: .success(rateLimitsRPC(usedPercent: 40)),
+            usage: .success(usageRPC(tokens: 45)),
+            observedAt: now
+        ).snapshot)
+        let partial = try XCTUnwrap(AccountUsageProvider.assemble(
+            account: .success(accountRPC(email: "account-b@example.test")),
+            rateLimits: .success(rateLimitsRPC(usedPercent: 10)),
+            usage: .failure(.rpcUnavailable),
+            observedAt: now.addingTimeInterval(60)
+        ).snapshot)
+        let recovered = try XCTUnwrap(AccountUsageProvider.assemble(
+            account: .success(accountRPC(email: "account-b@example.test")),
+            rateLimits: .success(rateLimitsRPC(usedPercent: 20)),
+            usage: .success(usageRPC(tokens: 99)),
+            observedAt: now.addingTimeInterval(120)
+        ).snapshot)
+
+        XCTAssertEqual(partial.email, "account-b@example.test")
+        XCTAssertEqual(partial.primaryRateLimit?.usedPercent, 10)
+        XCTAssertNil(partial.usage)
+        XCTAssertEqual(recovered.primaryRateLimit?.usedPercent, 20)
+        XCTAssertEqual(recovered.usage?.dailyBuckets?.last?.authoritativeTokens, 99)
+    }
+
+    func testCurrentCycleOnlyAccountAndUsageDropPreviousQuota() async throws {
+        let now = Date()
+        _ = try XCTUnwrap(AccountUsageProvider.assemble(
+            account: .success(accountRPC(email: "account-a@example.test")),
+            rateLimits: .success(rateLimitsRPC(usedPercent: 40)),
+            usage: .success(usageRPC(tokens: 45)),
+            observedAt: now
+        ).snapshot)
+        let partial = AccountUsageProvider.assemble(
+            account: .success(accountRPC(email: "account-b@example.test")),
+            rateLimits: .failure(.rpcUnavailable),
+            usage: .success(usageRPC(tokens: 99)),
+            observedAt: now.addingTimeInterval(60)
+        )
+        let runtime = MonitorRuntimeStore(initialPhase: .live)
+        await runtime.ingest(account: try XCTUnwrap(partial.snapshot))
+        await runtime.markAccountRefreshDegraded()
+        let degraded = await runtime.snapshot()
+
+        XCTAssertTrue(partial.diagnostics.degraded)
+        XCTAssertEqual(degraded.sourceHealth[.account]?.freshness.state, .stale)
+        XCTAssertEqual(degraded.account.plan, "pro")
+        XCTAssertNil(degraded.quota.primary)
+        XCTAssertEqual(MonitorDisplayValue.orbQuota(degraded), "--")
+        XCTAssertEqual(degraded.usage.usage?.dailyBuckets?.last?.authoritativeTokens, 99)
+    }
+
+    func testCurrentCycleOnlyQuotaAndUsageDropPreviousAccount() throws {
+        let now = Date()
+        _ = try XCTUnwrap(AccountUsageProvider.assemble(
+            account: .success(accountRPC(email: "account-a@example.test")),
+            rateLimits: .success(rateLimitsRPC(usedPercent: 40)),
+            usage: .success(usageRPC(tokens: 45)),
+            observedAt: now
+        ).snapshot)
+        let partial = try XCTUnwrap(AccountUsageProvider.assemble(
+            account: .failure(.rpcUnavailable),
+            rateLimits: .success(rateLimitsRPC(usedPercent: 10)),
+            usage: .success(usageRPC(tokens: 99)),
+            observedAt: now.addingTimeInterval(60)
+        ).snapshot)
+
+        XCTAssertNil(partial.email)
+        XCTAssertNil(partial.planType)
+        XCTAssertEqual(partial.primaryRateLimit?.usedPercent, 10)
+        XCTAssertEqual(partial.usage?.dailyBuckets?.last?.authoritativeTokens, 99)
+    }
+
+    func testCurrentCycleOnlyQuotaDropsPreviousAccountAndUsage() throws {
+        let now = Date()
+        _ = try XCTUnwrap(AccountUsageProvider.assemble(
+            account: .success(accountRPC(email: "account-a@example.test")),
+            rateLimits: .success(rateLimitsRPC(usedPercent: 40)),
+            usage: .success(usageRPC(tokens: 45)),
+            observedAt: now
+        ).snapshot)
+        let partial = try XCTUnwrap(AccountUsageProvider.assemble(
+            account: .failure(.rpcUnavailable),
+            rateLimits: .success(rateLimitsRPC(usedPercent: 10)),
+            usage: .failure(.rpcUnavailable),
+            observedAt: now.addingTimeInterval(60)
+        ).snapshot)
+
+        XCTAssertNil(partial.email)
+        XCTAssertNil(partial.usage)
+        XCTAssertEqual(partial.primaryRateLimit?.usedPercent, 10)
+    }
+
+    func testAuthoritativeAbsenceClearsItsSuccessfullyReadComponent() async throws {
+        let now = Date()
+        let accountAbsent = try XCTUnwrap(AccountUsageProvider.assemble(
+            account: .success(.object([:])),
+            rateLimits: .failure(.rpcUnavailable),
+            usage: .failure(.rpcUnavailable),
+            observedAt: now.addingTimeInterval(60)
+        ).snapshot)
+        XCTAssertNil(accountAbsent.authMode)
+        XCTAssertNil(accountAbsent.planType)
+        XCTAssertNil(accountAbsent.primaryRateLimit)
+        XCTAssertNil(accountAbsent.usage)
+
+        let limitsEmpty = try XCTUnwrap(AccountUsageProvider.assemble(
+            account: .success(accountRPC()),
+            rateLimits: .success(.object([:])),
+            usage: .success(usageRPC(tokens: 99)),
+            observedAt: now.addingTimeInterval(120)
+        ).snapshot)
+        XCTAssertNil(limitsEmpty.primaryRateLimit)
+        XCTAssertNil(limitsEmpty.resetCreditCount)
+
+        let usageEmpty = try XCTUnwrap(AccountUsageProvider.assemble(
+            account: .success(accountRPC()),
+            rateLimits: .success(rateLimitsRPC(usedPercent: 20)),
+            usage: .success(.object([:])),
+            observedAt: now.addingTimeInterval(180)
+        ).snapshot)
+        let runtime = MonitorRuntimeStore(initialPhase: .live)
+        await runtime.ingest(account: usageEmpty)
+        let snapshot = await runtime.snapshot()
+        XCTAssertNil(usageEmpty.usage?.dailyBuckets)
+        XCTAssertNil(HybridUsageComposer.compose(accountDailyBuckets: snapshot.usage.usage?.dailyBuckets, accountAvailability: snapshot.usage.availability, localLedger: nil))
+    }
+
     func testAccountUsageProviderSumsDuplicateLocalDatesWithoutPlaceholderOverride() throws {
         var calendar = Calendar(identifier: .gregorian)
         calendar.timeZone = try XCTUnwrap(TimeZone(identifier: "Asia/Shanghai"))
@@ -1024,6 +1288,39 @@ final class MonitorProductIntegrationTests: XCTestCase {
         let bucket = try XCTUnwrap(mapped.usage?.dailyBuckets?.last(where: { $0.startDate == today }))
         XCTAssertTrue(bucket.isSourcePresent)
         XCTAssertEqual(bucket.authoritativeTokens, 30_000)
+    }
+
+    private func accountRPC(email: String = "account@example.test", planType: String = "pro") -> JSONValue {
+        .object([
+            "account": .object([
+                "type": .string("chatgpt"),
+                "planType": .string(planType),
+                "email": .string(email)
+            ])
+        ])
+    }
+
+    private func rateLimitsRPC(usedPercent: Double) -> JSONValue {
+        .object([
+            "rateLimits": .object([
+                "primary": .object(["usedPercent": .number(usedPercent)])
+            ]),
+            "rateLimitResetCredits": .object(["availableCount": .number(2)])
+        ])
+    }
+
+    private func usageRPC(tokens: Int) -> JSONValue {
+        let formatter = DateFormatter()
+        formatter.calendar = .autoupdatingCurrent
+        formatter.timeZone = .autoupdatingCurrent
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "yyyy-MM-dd"
+        return .object([
+            "summary": .object(["lifetimeTokens": .number(Double(tokens))]),
+            "dailyUsageBuckets": .array([
+                .object(["startDate": .string(formatter.string(from: Date())), "tokens": .number(Double(tokens))])
+            ])
+        ])
     }
 
     private func testSettingsActions() -> SettingsSystemActions {
