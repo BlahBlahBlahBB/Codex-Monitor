@@ -18,7 +18,7 @@
 "activity.responding" = "正在响应";
 "activity.waitingConfirmation" = "Codex 正在请求权限";
 "activity.noSnapshot" = "暂无运行时快照";
-"activity.noSession" = "没有活跃会话";
+"activity.noSession" = "暂无会话";
 "activity.currentTask" = "当前任务";
 "update.updated" = "更新于 %@";
 "runtime.unknown" = "运行时未知";

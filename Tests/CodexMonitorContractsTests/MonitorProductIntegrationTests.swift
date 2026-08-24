@@ -156,12 +156,79 @@ final class MonitorProductIntegrationTests: XCTestCase {
         XCTAssertEqual(origin, CGPoint(x: 510, y: 360))
     }
 
-    func testUnsafeTaskTitleIsReplacedByGenericPresentationCopy() {
-        XCTAssertEqual(
-            MonitorDisplayValue.taskTitleForPresentation("The following is Codex agent history and hidden context"),
-            L10n.tr("activity.currentTask")
+    func testUnsafeTaskTitleIsReplacedByGenericPresentationCopy() async {
+        let unsafe = await activeUsageSessionSnapshot(
+            title: "The following is Codex agent history and hidden context",
+            threadRawID: "unsafe-title",
+            sessionTokens: 1
         )
-        XCTAssertEqual(MonitorDisplayValue.taskTitleForPresentation("Implement the status view"), "Implement the status view")
+        let safe = await activeUsageSessionSnapshot(
+            title: "Implement the status view",
+            threadRawID: "safe-title",
+            sessionTokens: 1
+        )
+
+        XCTAssertEqual(MonitorDisplayValue.resolvedConversationDisplayTitle(unsafe), L10n.tr("activity.currentTask"))
+        XCTAssertEqual(MonitorDisplayValue.resolvedConversationDisplayTitle(safe), "Implement the status view")
+    }
+
+    func testConversationDisplayTitleContractUsesOneResolverForQuickViewAndUsage() async {
+        let trustedCases: [(title: String, expected: String)] = [
+            ("读取项目中的 README，并总结前三个标题，不修改文件。", "读取项目中的 README，并总结前三个标题，不修改文件。"),
+            ("README summary", "README summary"),
+            ("UI/UX redesign", "UI/UX redesign"),
+            ("First line\nSecond line", "First line Second line")
+        ]
+        for (index, value) in trustedCases.enumerated() {
+            let snapshot = await activeUsageSessionSnapshot(
+                title: value.title,
+                threadRawID: "trusted-title-\(index)",
+                sessionTokens: 1
+            )
+            XCTAssertEqual(MonitorDisplayValue.resolvedConversationDisplayTitle(snapshot), value.expected)
+            XCTAssertEqual(MonitorDisplayValue.quickViewTaskTitle(snapshot), value.expected)
+            XCTAssertEqual(MonitorDisplayValue.sessionInfo(snapshot), value.expected)
+        }
+
+        let unsafeTitles = [
+            "/Users/test/Desktop/project",
+            "/Volumes/SSD/project",
+            "/Applications/example",
+            "~/Desktop/project",
+            "~/.codex/session",
+            "\\~/Desktop/project",
+            "\\~/.codex/session",
+            "file:///Users/test/project",
+            "system prompt",
+            "developer prompt",
+            "internal transcript",
+            "Codex agent history",
+            "# Files mentioned by the user",
+            "019ffa90-a5ce-7523-99d5-a85aaa140d0f",
+            ""
+        ]
+        for (index, title) in unsafeTitles.enumerated() {
+            let snapshot = await activeUsageSessionSnapshot(
+                title: title,
+                threadRawID: "unsafe-title-\(index)",
+                sessionTokens: 1
+            )
+            XCTAssertEqual(MonitorDisplayValue.resolvedConversationDisplayTitle(snapshot), L10n.tr("activity.currentTask"), "unsafe title: \(title)")
+            XCTAssertEqual(MonitorDisplayValue.quickViewTaskTitle(snapshot), MonitorDisplayValue.sessionInfo(snapshot))
+        }
+
+        let overlongTitle = String(repeating: "a", count: 121)
+        let overlongSnapshot = await activeUsageSessionSnapshot(title: overlongTitle, threadRawID: "overlong-title", sessionTokens: 1)
+        XCTAssertEqual(MonitorDisplayValue.resolvedConversationDisplayTitle(overlongSnapshot), String(repeating: "a", count: 120))
+        XCTAssertEqual(MonitorDisplayValue.quickViewTaskTitle(overlongSnapshot), MonitorDisplayValue.sessionInfo(overlongSnapshot))
+
+        let nilTitleSnapshot = await activeUsageSessionSnapshot(title: nil, threadRawID: "nil-title", sessionTokens: 1)
+        XCTAssertEqual(MonitorDisplayValue.resolvedConversationDisplayTitle(nilTitleSnapshot), L10n.tr("activity.currentTask"))
+        XCTAssertEqual(MonitorDisplayValue.quickViewTaskTitle(nilTitleSnapshot), MonitorDisplayValue.sessionInfo(nilTitleSnapshot))
+
+        XCTAssertEqual(MonitorDisplayValue.resolvedConversationDisplayTitle(nil), L10n.tr("activity.noSession"))
+        XCTAssertEqual(L10n.tr("activity.noSession", languageCode: "zh-Hans"), "暂无会话")
+        XCTAssertEqual(L10n.tr("activity.noSession", languageCode: "en"), "No session")
     }
 
     func testUsageCurrentSessionUsesResolvedDisplayTitle() async {
@@ -228,7 +295,8 @@ final class MonitorProductIntegrationTests: XCTestCase {
         let idle = await store.snapshot()
 
         XCTAssertEqual(idle.currentState, .idle)
-        XCTAssertEqual(MonitorDisplayValue.quickViewTaskTitle(idle), L10n.tr("activity.currentTask"))
+        XCTAssertEqual(MonitorDisplayValue.quickViewTaskTitle(idle), "Historical task title")
+        XCTAssertEqual(MonitorDisplayValue.quickViewTaskTitle(idle), MonitorDisplayValue.sessionInfo(idle))
         XCTAssertTrue(MonitorDisplayValue.modelRuntime(idle).hasSuffix("0:00"))
     }
 
@@ -961,7 +1029,7 @@ final class MonitorProductIntegrationTests: XCTestCase {
         return await runtime.snapshot()
     }
 
-    private func activeUsageSessionSnapshot(title: String, threadRawID: String, sessionTokens: Int64) async -> MonitorRuntimeSnapshot {
+    private func activeUsageSessionSnapshot(title: String?, threadRawID: String, sessionTokens: Int64) async -> MonitorRuntimeSnapshot {
         let clock = PermissionPresentationTestClock()
         let runtime = MonitorRuntimeStore(
             engine: RuntimeStateEngine(clock: clock, initialPhase: .live),

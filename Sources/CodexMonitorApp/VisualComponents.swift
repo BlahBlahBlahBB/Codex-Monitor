@@ -504,39 +504,38 @@ enum MonitorDisplayValue {
         }
     }
 
-    static func taskTitle(_ snapshot: MonitorRuntimeSnapshot?) -> String {
-        taskTitleForPresentation(snapshot?.currentThread?.taskTitle)
-    }
-
-    /// Usage intentionally shares Quick View's resolved conversation title.
-    /// The structured thread ID remains available separately for runtime
-    /// identity and token accounting, but is never presentation text here.
-    static func sessionInfo(_ snapshot: MonitorRuntimeSnapshot?) -> String {
-        quickViewTaskTitle(snapshot)
-    }
-
-    /// Idle has no active task attribution. Keep the brief completed
-    /// retention useful, but never present a historical title as an idle task.
-    static func quickViewTaskTitle(_ snapshot: MonitorRuntimeSnapshot?) -> String {
-        guard let snapshot else { return L10n.tr("activity.noSession") }
-        if snapshot.currentState != .completed,
-           (snapshot.currentState == .idle || snapshot.currentThread?.activeTurnID == nil) {
-            return L10n.tr("activity.currentTask")
+    /// The sole user-facing Conversation Display Title resolver. Both Usage
+    /// and Quick View intentionally delegate here so they cannot acquire
+    /// different fallback rules or accidentally surface runtime provenance.
+    static func resolvedConversationDisplayTitle(_ snapshot: MonitorRuntimeSnapshot?) -> String {
+        guard let currentThread = snapshot?.currentThread else {
+            return L10n.tr("activity.noSession")
         }
-        return taskTitle(snapshot)
+        return trustedConversationDisplayTitle(currentThread.taskTitle)
+            ?? L10n.tr("activity.currentTask")
     }
 
-    /// Desktop-provided titles are presentation data, not trusted source text.
-    /// Reject known transcript/prompt fragments rather than displaying internal
-    /// agent history in a user-facing surface.
-    static func taskTitleForPresentation(_ rawTitle: String?) -> String {
-        guard let rawTitle else { return L10n.tr("activity.noSession") }
-        let title = rawTitle
-            .split(whereSeparator: \.isNewline)
-            .first
-            .map(String.init)?
-            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        guard !title.isEmpty else { return L10n.tr("activity.noSession") }
+    static func taskTitle(_ snapshot: MonitorRuntimeSnapshot?) -> String {
+        resolvedConversationDisplayTitle(snapshot)
+    }
+
+    static func sessionInfo(_ snapshot: MonitorRuntimeSnapshot?) -> String {
+        resolvedConversationDisplayTitle(snapshot)
+    }
+
+    static func quickViewTaskTitle(_ snapshot: MonitorRuntimeSnapshot?) -> String {
+        resolvedConversationDisplayTitle(snapshot)
+    }
+
+    /// A state-DB title is the only admitted title source. This predicate is a
+    /// narrow presentation safeguard for values that unmistakably look like
+    /// internal source material, identifiers, or filesystem locations. It
+    /// deliberately does not reject a slash by itself: titles such as
+    /// "UI/UX redesign" are valid Conversation Display Titles.
+    private static func trustedConversationDisplayTitle(_ rawTitle: String?) -> String? {
+        guard let rawTitle else { return nil }
+        let title = rawTitle.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !title.isEmpty else { return nil }
 
         let lowered = title.lowercased()
         let internalMarkers = [
@@ -546,12 +545,32 @@ enum MonitorDisplayValue {
             "developer prompt",
             "internal transcript",
             "tool instruction",
-            "you are codex"
+            "tool metadata",
+            "you are codex",
+            "# files mentioned by the user"
         ]
-        guard !internalMarkers.contains(where: lowered.contains) else {
-            return L10n.tr("activity.currentTask")
+        guard !internalMarkers.contains(where: lowered.contains),
+              !isFilesystemLike(title),
+              !isUUIDLike(title) else {
+            return nil
         }
         return String(title.prefix(120))
+    }
+
+    private static func isFilesystemLike(_ value: String) -> Bool {
+        let patterns = [
+            "(?i)^file://",
+            "^/(?:Users|Volumes|Applications|Library|System|private|tmp)(?:/|$)",
+            "^\\\\?~/(?:Desktop|\\.codex)(?:/|$)"
+        ]
+        return patterns.contains { value.range(of: $0, options: .regularExpression) != nil }
+    }
+
+    private static func isUUIDLike(_ value: String) -> Bool {
+        value.range(
+            of: "(?i)^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+            options: .regularExpression
+        ) != nil
     }
 
     static func modelRuntime(_ snapshot: MonitorRuntimeSnapshot?) -> String {
