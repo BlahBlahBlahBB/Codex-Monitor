@@ -3,8 +3,22 @@
 ## Current
 
 ```text
-INTERNAL / DEVELOPER ONLY
+PREVIEW-ONLY
 ```
+
+Version 1.0.1 Preview may be Developer ID signed, notarized, stapled, and
+distributed to ordinary macOS users. It must not be represented as a stable,
+production-supported Codex integration: the app-server/WebSocket transport is
+experimental/unsupported for production workloads and desktop-runtime
+observation relies on undocumented local SQLite and rollout formats.
+
+## 1.0.1 Preview distribution disclosure
+
+Codex Monitor 1.0.1 Preview supports macOS 13 or later on Apple Silicon. It
+requires Codex Desktop to be installed and the user to be signed in. It depends
+on Codex local interfaces, so Codex updates can temporarily affect some
+capabilities. Codex Monitor is not an official OpenAI product, is not a stable
+production-supported Codex integration, and does not support Intel Macs.
 
 ## Architecture readiness and release readiness are separate
 
@@ -38,4 +52,5 @@ support/disclosure wording
 
 A later Sol review must explicitly output a new release-maturity decision.
 
-Until then every packaging/release artifact must say Internal/Developer only.
+Until a later review changes this decision, every packaging/release artifact
+must identify itself as Preview-only and use the distribution disclosure above.
