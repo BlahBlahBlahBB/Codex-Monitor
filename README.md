@@ -3,7 +3,7 @@
 
 一个原生 macOS Codex 辅助工具，通过菜单栏状态胶囊、桌面悬浮球、Quick View、用量和设置等界面，为 Codex 提供轻量、快速、低打扰的桌面辅助体验。
 
-> **当前版本：Codex Monitor 1.0.1 Preview**
+> **当前版本：Codex Monitor 1.0.2 Preview**
 >
 > Codex Monitor 当前为 Preview，不是 Stable Public Release，也不是 OpenAI 官方产品。部分能力依赖 Codex 的本地接口与本地数据结构，Codex 更新可能暂时影响个别能力；当数据源不可用时，应用会优先显示 Unknown / Unavailable，而不是伪造状态。
 
@@ -13,10 +13,11 @@
 
 ### macOS · Apple Silicon
 
-[![下载 Codex Monitor 1.0.1 Preview](https://img.shields.io/badge/下载-1.0.1%20Preview-black?style=for-the-badge&logo=apple)](https://github.com/BlahBlahBlahBB/Codex-Monitor/releases/download/v1.0.1-preview/Codex-Monitor-1.0.1-Preview-macOS-arm64.dmg)
+[![下载 Codex Monitor 1.0.2 Preview](https://img.shields.io/badge/下载-1.0.2%20Preview-black?style=for-the-badge&logo=apple)](https://github.com/BlahBlahBlahBB/Codex-Monitor/releases/download/v1.0.2-preview/Codex-Monitor-1.0.2-Preview-macOS-arm64.dmg)
 
-- [查看 v1.0.1-preview Release](https://github.com/BlahBlahBlahBB/Codex-Monitor/releases/tag/v1.0.1-preview)
-- [SHA256SUMS.txt](https://github.com/BlahBlahBlahBB/Codex-Monitor/releases/download/v1.0.1-preview/SHA256SUMS.txt)
+- [查看 v1.0.2-preview Release](https://github.com/BlahBlahBlahBB/Codex-Monitor/releases/tag/v1.0.2-preview)
+- [SHA256SUMS.txt](https://github.com/BlahBlahBlahBB/Codex-Monitor/releases/download/v1.0.2-preview/SHA256SUMS.txt)
+- DMG SHA256：`ec7525fcdce8de951873e609aacc0220fd9e80eb3954b16a15f668c8005c3a43`
 
 > 当前 Preview 为 **arm64 / Apple Silicon only**，采用 ad-hoc 签名，尚未使用 Developer ID、Apple Notarization 或 Stapling。macOS Gatekeeper 可能阻止或警告该 Preview 包；它目前用于 Preview / testing，而不是无警告的正式公开发行。
 
@@ -26,7 +27,7 @@
 
 ### 首次安装
 
-1. 下载 `Codex-Monitor-1.0.1-Preview-macOS-arm64.dmg`
+1. 下载 `Codex-Monitor-1.0.2-Preview-macOS-arm64.dmg`
 2. 打开 DMG
 3. 将 `Codex Monitor.app` 拖入 `/Applications`
 4. 从“应用程序”启动 Codex Monitor
@@ -45,7 +46,13 @@
 
 <br>
 
-## ✨ 1.0.1 Preview 重点更新
+## ✨ 1.0.2 Preview 重点更新
+
+- 修复 1.0.1 的 Release build-chain regression，恢复冻结的 1.0.0 视觉表现
+- 保留全部 1.0.1 功能改进，不进行 UI source redesign
+- Release build 锁定已验证的 macOS SDK 26.5 环境
+- minimum deployment target 继续为 macOS 13.0
+- final LC_RPATH 保持可移植：`/usr/lib/swift`、`@loader_path`
 
 - 加强跨用户 / 跨电脑兼容，不依赖开发者用户名或固定 `/Users/...` 路径
 - 动态解析当前用户 HOME 与 Codex 本地环境
@@ -155,13 +162,13 @@ Codex Monitor 不会用推测值替代未知值；例如 Quota 无法确认时�
 
 ## ⚠️ Preview 数据源说明
 
-Codex Monitor 1.0.1 Preview 当前会读取本机 Codex 的本地集成数据面。
+Codex Monitor 1.0.2 Preview 当前会读取本机 Codex 的本地集成数据面。
 
 其中部分 Account 能力使用 Codex app-server / WebSocket 接口；该 transport 当前仍属于实验性接口。Desktop runtime / session observation 也依赖 Codex 的本地 SQLite / rollout 等实现细节，这些本地 schema 目前没有稳定 public contract。
 
 因此：
 
-- 1.0.1 定位为 **Preview-only**
+- 1.0.2 定位为 **Preview-only**
 - Codex 更新可能暂时影响某个单独 capability
 - capability 缺失时应用应安全降级
 - 当前不应被描述为 stable production-supported Codex integration
@@ -203,7 +210,7 @@ swift test
 Preview release packaging：
 
 ```bash
-VERSION=1.0.1 BUILD=101 ./Tools/package_release.sh
+VERSION=1.0.2 BUILD=102 ./Tools/package_release.sh
 ```
 
 在未提供 `SIGNING_IDENTITY` 时，脚本生成明确标记的 ad-hoc local Preview；Developer ID / notarization 流程当前尚未启用。
@@ -212,11 +219,11 @@ VERSION=1.0.1 BUILD=101 ./Tools/package_release.sh
 
 ## 📌 Release scope
 
-Codex Monitor 1.0.1 Preview 当前验证范围：
+Codex Monitor 1.0.2 Preview 当前验证范围：
 
 - macOS 13+
 - Apple Silicon / arm64
 - 中文 / English
 - 不同 HOME / username，包括空格与 Unicode
 
-Computer A 已完成完整 1.0.1 QA。Computer B 尚未完成 1.0.1 physical validation，因此不作已验证声明。
+Computer A 已完成 1.0.2 构建链与视觉 QA，并通过 Release smoke；Computer B 尚未完成 1.0.2 physical validation，因此不作已验证声明。
