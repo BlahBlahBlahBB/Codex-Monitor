@@ -226,4 +226,4 @@ Codex Monitor 1.0.2 Preview 当前验证范围：
 - 中文 / English
 - 不同 HOME / username，包括空格与 Unicode
 
-Computer A 已完成完整 1.0.2 QA。Computer B 尚未完成 1.0.2 physical validation，因此不作已验证声明。
+Computer A 已完成 1.0.2 构建链与视觉 QA，并通过 Release smoke；Computer B 尚未完成 1.0.2 physical validation，因此不作已验证声明。
