@@ -22,6 +22,29 @@
 
 <br>
 
+## 📥 安装与升级
+
+### 首次安装
+
+1. 下载 `Codex-Monitor-1.0.1-Preview-macOS-arm64.dmg`
+2. 打开 DMG
+3. 将 `Codex Monitor.app` 拖入 `/Applications`
+4. 从“应用程序”启动 Codex Monitor
+
+### 从旧版本升级
+
+1. 先完全退出正在运行的 Codex Monitor
+2. 打开新版 DMG
+3. 将新版 `Codex Monitor.app` 拖入 `/Applications`
+4. macOS 提示时选择“替换”
+5. 再从 `/Applications/Codex Monitor.app` 启动
+
+请避免同时在 `/Applications` 中保留多个正式版 Codex Monitor 副本。多个使用相同 Bundle ID 的副本可能造成 macOS LaunchServices 启动路径或版本识别混淆。
+
+当前 Preview 尚未 Developer ID 签名或 notarize，因此 Gatekeeper 仍可能警告或阻止启动。
+
+<br>
+
 ## ✨ 1.0.1 Preview 重点更新
 
 - 加强跨用户 / 跨电脑兼容，不依赖开发者用户名或固定 `/Users/...` 路径
