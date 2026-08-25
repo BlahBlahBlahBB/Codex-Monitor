@@ -6,13 +6,15 @@ set -euo pipefail
 
 project_root="$(cd "$(dirname "$0")/.." && pwd)"
 product_name="Codex Monitor"
-bundle_identifier="com.codexmonitor.app"
+bundle_identifier="${BUNDLE_IDENTIFIER:-com.codexmonitor.app}"
 marketing_version="${VERSION:-1.0.1}"
 build_number="${BUILD:-101}"
 preview_channel="Preview"
+frozen_sdk_version="26.5"
 icon_source="$project_root/icon/signal-capsule-mac.icns"
-release_root="$project_root/Release"
-app_path="$release_root/$product_name.app"
+release_root="${RELEASE_ROOT:-$project_root/Release}"
+app_bundle_name="${APP_BUNDLE_NAME:-$product_name.app}"
+app_path="$release_root/$app_bundle_name"
 dmg_name="Codex-Monitor-$marketing_version-Preview-macOS-arm64.dmg"
 dmg_path="$release_root/$dmg_name"
 dmg_staging="$release_root/dmg-root"
@@ -34,10 +36,25 @@ signing_identity="${SIGNING_IDENTITY:-${RELEASE_SIGNING_IDENTITY:-}}"
 
 swift_tool="$(xcrun --find swift)"
 swiftc_tool="$(xcrun --find swiftc)"
+otool_tool="$(xcrun --find otool)"
 install_name_tool="$(xcrun --find install_name_tool)"
 hdiutil_tool="$(xcrun --find hdiutil)"
 codesign_tool="$(xcrun --find codesign)"
 toolchain_root="${swiftc_tool%/usr/bin/swiftc}"
+sdk_path="$(xcrun --show-sdk-path)"
+sdk_version="$(xcrun --show-sdk-version)"
+
+# The frozen visual contract was verified with this exact macOS SDK. Refuse to
+# create an artifact when the selected Xcode environment cannot provide it.
+print "SWIFT_EXECUTABLE=$swift_tool"
+"$swift_tool" --version
+print "SDK_VERSION=$sdk_version"
+print "SDK_PATH=$sdk_path"
+[[ "$sdk_version" == "$frozen_sdk_version" ]] || {
+  print -u2 "Refusing to package Codex Monitor with non-frozen SDK."
+  print -u2 "Expected SDK $frozen_sdk_version; selected SDK is $sdk_version."
+  exit 1
+}
 
 # SwiftPM's generated resource accessor includes its build directory as a
 # fallback. Building outside the checkout prevents developer-specific workspace
@@ -61,8 +78,8 @@ build_args=(
   -Xswiftc -D -Xswiftc CODEX_MONITOR_RELEASE
   -Xswiftc -debug-prefix-map -Xswiftc "$project_root=/CodexMonitor"
 )
-"$swift_tool" "${build_args[@]}"
-bin_path="$("$swift_tool" "${build_args[@]}" --show-bin-path)"
+SDKROOT="$sdk_path" "$swift_tool" "${build_args[@]}"
+bin_path="$(SDKROOT="$sdk_path" "$swift_tool" "${build_args[@]}" --show-bin-path)"
 executable="$bin_path/CodexMonitorApp"
 resource_bundle="$bin_path/CodexMonitorContracts_CodexMonitorApp.bundle"
 
@@ -82,7 +99,7 @@ app_executable="$app_path/Contents/MacOS/CodexMonitorApp"
 toolchain_rpaths=()
 while IFS= read -r rpath; do
   [[ "$rpath" == "$toolchain_root"/* ]] && toolchain_rpaths+=("$rpath")
-done < <(otool -l "$app_executable" | awk '
+done < <("$otool_tool" -l "$app_executable" | awk '
   $1 == "cmd" && $2 == "LC_RPATH" { in_rpath = 1; next }
   in_rpath && $1 == "path" { print $2; in_rpath = 0 }
 ')
@@ -90,7 +107,7 @@ for rpath in "${toolchain_rpaths[@]}"; do
   "$install_name_tool" -delete_rpath "$rpath" "$app_executable"
 done
 
-if otool -l "$app_executable" | awk '
+if "$otool_tool" -l "$app_executable" | awk '
   $1 == "cmd" && $2 == "LC_RPATH" { in_rpath = 1; next }
   in_rpath && $1 == "path" { print $2; in_rpath = 0 }
 ' | grep -Eq '^/.*?/Toolchains/'; then
@@ -99,6 +116,30 @@ if otool -l "$app_executable" | awk '
 fi
 if grep -aFq "$project_root" "$app_executable"; then
   print -u2 "Refusing to package an executable containing the checkout path"
+  exit 1
+fi
+
+# Validate the final, post-RPATH-cleanup binary before signing or creating a
+# DMG. The SDK marker is part of the frozen visual-release contract.
+mach_platform="$("$otool_tool" -l "$app_executable" | awk '
+  $1 == "cmd" && $2 == "LC_BUILD_VERSION" { in_build_version = 1; next }
+  in_build_version && $1 == "platform" { print $2; exit }
+')"
+mach_minos="$("$otool_tool" -l "$app_executable" | awk '
+  $1 == "cmd" && $2 == "LC_BUILD_VERSION" { in_build_version = 1; next }
+  in_build_version && $1 == "minos" { print $2; exit }
+')"
+mach_sdk="$("$otool_tool" -l "$app_executable" | awk '
+  $1 == "cmd" && $2 == "LC_BUILD_VERSION" { in_build_version = 1; next }
+  in_build_version && $1 == "sdk" { print $2; exit }
+')"
+print "FINAL_LC_BUILD_VERSION_PLATFORM=$mach_platform"
+print "FINAL_LC_BUILD_VERSION_MINOS=$mach_minos"
+print "FINAL_LC_BUILD_VERSION_SDK=$mach_sdk"
+if [[ "$mach_platform" != "1" || "$mach_minos" != "13.0" || "$mach_sdk" != "$frozen_sdk_version" ]]; then
+  print -u2 "Refusing to package Codex Monitor with non-frozen SDK."
+  print -u2 "Expected SDK $frozen_sdk_version."
+  print -u2 "Observed platform=$mach_platform minOS=$mach_minos sdk=$mach_sdk."
   exit 1
 fi
 
