@@ -111,14 +111,22 @@ public actor AccountUsageProvider {
             await markRefreshDegradedIfCurrent(operationID)
         case .connected(let assembled):
             Self.record(assembled.diagnostics)
-            guard assembled.hasTransientTransportFailure else {
+            // A candidate is publishable only after every required Account /
+            // Rate Limits / Usage read has reached an authoritative result.
+            // In particular, a decoded partial candidate is not presentation
+            // state: replacing the published whole snapshot with it would
+            // turn a known quota into `--` while its replacement is still
+            // unresolved.
+            guard !assembled.isAuthoritativeCycle else {
                 await admit(assembled, operationID: operationID)
                 return
             }
 
-            // A channel fault invalidates this entire cycle: no Account or
+            // A failed candidate invalidates this entire cycle: no Account or
             // Usage component is ever joined to a quota from another cycle.
-            Self.recordRefreshEvent("transientCycleHeld")
+            // `MonitorRuntimeStore` continues publishing its previous whole
+            // snapshot; degradation is metadata only.
+            Self.recordRefreshEvent("incompleteCycleHeld")
             await markRefreshDegradedIfCurrent(operationID)
             guard lastCompleteSnapshot != nil else { return }
             guard isCurrent(operationID) else { return }
@@ -141,17 +149,16 @@ public actor AccountUsageProvider {
                 await markRefreshDegradedIfCurrent(operationID)
             case .connected(let retryAssembly):
                 Self.record(retryAssembly.diagnostics)
-                if retryAssembly.hasTransientTransportFailure {
+                if !retryAssembly.isAuthoritativeCycle {
                     // Preserve the prior coherent snapshot on a repeated
-                    // transport failure rather than publishing a partial one.
+                    // incomplete cycle rather than publishing a partial one.
                     Self.recordRefreshEvent("boundedRetryExhausted")
                     await markRefreshDegradedIfCurrent(operationID)
-                } else if retryAssembly.isComplete {
-                    Self.recordRefreshEvent("boundedRetrySucceeded")
-                    await admit(retryAssembly, operationID: operationID)
                 } else {
-                    // Authoritative absence is data, not a failed transport.
-                    Self.recordRefreshEvent("authoritativePartialAdmitted")
+                    // This includes an explicitly absent quota returned by a
+                    // fully successful cycle. It is authoritative data and
+                    // therefore atomically replaces the prior snapshot.
+                    Self.recordRefreshEvent("boundedRetrySucceeded")
                     await admit(retryAssembly, operationID: operationID)
                 }
             }
@@ -578,17 +585,16 @@ struct AccountRefreshAssembly: Sendable {
     let snapshot: AccountSnapshot?
     let diagnostics: AccountRefreshDiagnostics
 
-    /// A complete refresh means all three RPC components decoded correctly.
-    var isComplete: Bool {
-        diagnostics.account == .available
+    /// The only publication gate for an Account / Quota candidate. An
+    /// explicitly absent account object is still an authoritative response;
+    /// all other non-available diagnostics leave the candidate incomplete.
+    /// A successful rate-limits response with no quota is `.available`, so it
+    /// deliberately passes this gate and can fail closed to `Unknown`.
+    var isAuthoritativeCycle: Bool {
+        let accountIsAuthoritative = diagnostics.account == .available || diagnostics.account == .accountDataAbsent
+        return accountIsAuthoritative
             && diagnostics.rateLimits == .available
             && diagnostics.usage == .available
-    }
-
-    var hasTransientTransportFailure: Bool {
-        [diagnostics.account, diagnostics.rateLimits, diagnostics.usage].contains {
-            $0 == .transportUnavailable || $0 == .rpcUnavailable
-        }
     }
 
     /// Only an already visible, complete snapshot with an authoritative
@@ -596,7 +602,7 @@ struct AccountRefreshAssembly: Sendable {
     /// successful rate-limits RPC that contains no primary quota remains an
     /// authoritative absence and is admitted normally instead.
     var isCompleteQuotaSnapshot: Bool {
-        isComplete
+        isAuthoritativeCycle
             && snapshot?.primaryRateLimit != nil
     }
 }
