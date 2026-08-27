@@ -476,6 +476,11 @@ public actor MonitorRuntimeStore {
         publishSnapshot()
     }
 
+    public func clearDesktopConversationNames() {
+        engine.clearConversationNames()
+        publishSnapshot()
+    }
+
     public func markSourceUnavailable(_ source: MonitorRuntimeSource, observedAt: Date? = nil) {
         let state = SourceState(availability: .unavailable, observedAt: observedAt ?? clock.now(), reason: .sourceUnavailable)
         switch source {

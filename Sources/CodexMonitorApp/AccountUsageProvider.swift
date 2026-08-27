@@ -111,16 +111,24 @@ public actor AccountUsageProvider {
             await markRefreshDegradedIfCurrent(operationID)
         case .connected(let assembled):
             Self.record(assembled.diagnostics)
-            guard shouldHoldTransientQuotaPartial(assembled) else {
+            // A candidate is publishable only after every required Account /
+            // Rate Limits / Usage read has reached an authoritative result.
+            // In particular, a decoded partial candidate is not presentation
+            // state: replacing the published whole snapshot with it would
+            // turn a known quota into `--` while its replacement is still
+            // unresolved.
+            guard !assembled.isAuthoritativeCycle else {
                 await admit(assembled, operationID: operationID)
                 return
             }
 
-            // Hold the *entire* previous coherent snapshot. In particular,
-            // do not admit the current account metadata with prior-cycle
-            // quota while the one permitted replacement cycle is pending.
-            Self.recordRefreshEvent("transientQuotaPartialHeld")
+            // A failed candidate invalidates this entire cycle: no Account or
+            // Usage component is ever joined to a quota from another cycle.
+            // `MonitorRuntimeStore` continues publishing its previous whole
+            // snapshot; degradation is metadata only.
+            Self.recordRefreshEvent("incompleteCycleHeld")
             await markRefreshDegradedIfCurrent(operationID)
+            guard lastCompleteSnapshot != nil else { return }
             guard isCurrent(operationID) else { return }
             Self.recordRefreshEvent("boundedRetryStarted")
             do {
@@ -141,23 +149,20 @@ public actor AccountUsageProvider {
                 await markRefreshDegradedIfCurrent(operationID)
             case .connected(let retryAssembly):
                 Self.record(retryAssembly.diagnostics)
-                if retryAssembly.isComplete {
-                    Self.recordRefreshEvent("boundedRetrySucceeded")
-                } else {
+                if !retryAssembly.isAuthoritativeCycle {
+                    // Preserve the prior coherent snapshot on a repeated
+                    // incomplete cycle rather than publishing a partial one.
                     Self.recordRefreshEvent("boundedRetryExhausted")
+                    await markRefreshDegradedIfCurrent(operationID)
+                } else {
+                    // This includes an explicitly absent quota returned by a
+                    // fully successful cycle. It is authoritative data and
+                    // therefore atomically replaces the prior snapshot.
+                    Self.recordRefreshEvent("boundedRetrySucceeded")
+                    await admit(retryAssembly, operationID: operationID)
                 }
-                // Retry exhaustion is intentionally fail-closed: this admits
-                // only the retry cycle's components, never a component merged
-                // from the held snapshot.
-                await admit(retryAssembly, operationID: operationID)
             }
         }
-    }
-
-    private func shouldHoldTransientQuotaPartial(_ assembled: AccountRefreshAssembly) -> Bool {
-        assembled.snapshot != nil
-            && assembled.diagnostics.rateLimits != .available
-            && lastCompleteSnapshot != nil
     }
 
     private func admit(_ assembled: AccountRefreshAssembly, operationID: UUID) async {
@@ -196,31 +201,76 @@ public actor AccountUsageProvider {
     }
 
     private static func productionRefreshCycle() async -> AccountRefreshCycleResult {
+        let descriptor = Self.descriptor
         do {
             let resolver = OfficialSocketResolver()
             let endpoint = try UnixSocketWebSocketEndpoint(capability: resolver.resolve())
-            let descriptor = Self.descriptor
             let client = JSONRPCClient(
                 channel: UnixSocketWebSocketChannel(endpoint: endpoint),
                 binding: try JSONRPCClientBinding(descriptor: descriptor),
                 clientInfo: JSONRPCClientInfo(name: "codex_monitor_account", title: "Codex Monitor Account", version: "v1")
             )
-            _ = try await client.connect()
-            // The validated local read shape requires an explicit empty
-            // params object; omission is a different request shape.
-            async let account = Self.read(client, method: "account/read", params: .object([:]))
-            async let limits = Self.read(client, method: "account/rateLimits/read")
-            async let usage = Self.read(client, method: "account/usage/read")
-            let assembled = Self.assemble(
-                account: await account,
-                rateLimits: await limits,
-                usage: await usage,
-                observedAt: Date()
+            do {
+                let assembled = try await wholeCycle(client: client)
+                await client.close()
+                return .connected(assembled)
+            } catch {
+                await client.close()
+                throw error
+            }
+        } catch {
+            guard !Task.isCancelled, isFallbackEligible(error) else {
+                return .connectionFailure(.wholeConnectionFailure(error))
+            }
+            return await bundledStdioRefreshCycle(descriptor: descriptor)
+        }
+    }
+
+    /// Every RPC in one refresh comes from a single initialized transport.
+    /// Sequential reads ensure an interrupted socket cycle is never assembled
+    /// and then mixed with the stdio fallback.
+    private static func wholeCycle(client: JSONRPCClient) async throws -> AccountRefreshAssembly {
+        _ = try await client.connect()
+        let account = try await client.request(method: "account/read", params: .object([:]))
+        let limits = try await client.request(method: "account/rateLimits/read")
+        let usage = try await client.request(method: "account/usage/read")
+        return assemble(account: .success(account), rateLimits: .success(limits), usage: .success(usage), observedAt: Date())
+    }
+
+    private static func bundledStdioRefreshCycle(descriptor: AdapterDescriptor) async -> AccountRefreshCycleResult {
+        do {
+            let executable = try TrustedCodexBundledExecutableResolver().resolve()
+            let client = JSONRPCClient(
+                channel: BundledCodexStdioChannel(executableURL: executable),
+                binding: try JSONRPCClientBinding(descriptor: descriptor),
+                clientInfo: JSONRPCClientInfo(name: "codex_monitor_account", title: "Codex Monitor Account", version: "v1")
             )
-            await client.close()
-            return .connected(assembled)
+            do {
+                let assembled = try await wholeCycle(client: client)
+                await client.close()
+                return .connected(assembled)
+            } catch {
+                await client.close()
+                return .connectionFailure(.wholeConnectionFailure(error))
+            }
         } catch {
             return .connectionFailure(.wholeConnectionFailure(error))
+        }
+    }
+
+    static func isFallbackEligible(_ error: Error) -> Bool {
+        switch error {
+        case is UnixSocketValidationError:
+            true
+        case let error as JSONRPCTransportError:
+            switch error {
+            case .endpointRejected, .connectionClosed, .requestTimedOut, .lifecycleUnavailable, .transportFailure, .webSocketClosed:
+                true
+            case .requestCancelled, .sourceBindingRejected, .protocolError, .malformedMessage:
+                false
+            }
+        default:
+            false
         }
     }
 
@@ -339,11 +389,6 @@ public actor AccountUsageProvider {
             resetCreditCount: limitsValue?.resetCreditCount
         )
         return AccountRefreshAssembly(snapshot: snapshot, diagnostics: diagnostics)
-    }
-
-    private static func read(_ client: JSONRPCClient, method: String, params: JSONValue? = nil) async -> AccountRPCRead {
-        do { return .success(try await client.request(method: method, params: params)) }
-        catch { return .failure(AccountRefreshDiagnosticCategory(error: error)) }
     }
 
     private static func accountMetadata(from response: JSONValue) throws -> AccountMetadata {
@@ -540,9 +585,14 @@ struct AccountRefreshAssembly: Sendable {
     let snapshot: AccountSnapshot?
     let diagnostics: AccountRefreshDiagnostics
 
-    /// A complete refresh means all three RPC components decoded correctly.
-    var isComplete: Bool {
-        diagnostics.account == .available
+    /// The only publication gate for an Account / Quota candidate. An
+    /// explicitly absent account object is still an authoritative response;
+    /// all other non-available diagnostics leave the candidate incomplete.
+    /// A successful rate-limits response with no quota is `.available`, so it
+    /// deliberately passes this gate and can fail closed to `Unknown`.
+    var isAuthoritativeCycle: Bool {
+        let accountIsAuthoritative = diagnostics.account == .available || diagnostics.account == .accountDataAbsent
+        return accountIsAuthoritative
             && diagnostics.rateLimits == .available
             && diagnostics.usage == .available
     }
@@ -552,7 +602,7 @@ struct AccountRefreshAssembly: Sendable {
     /// successful rate-limits RPC that contains no primary quota remains an
     /// authoritative absence and is admitted normally instead.
     var isCompleteQuotaSnapshot: Bool {
-        isComplete
+        isAuthoritativeCycle
             && snapshot?.primaryRateLimit != nil
     }
 }

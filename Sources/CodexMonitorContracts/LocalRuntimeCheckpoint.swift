@@ -127,10 +127,17 @@ public final class ApprovalLifecycleCheckpointStore: @unchecked Sendable {
 /// Converts the exact checkpoint-hydration result emitted by the rollout
 /// reader into the sole reducer reconciliation input.  In particular a State
 /// DB token seed cannot replace its rollout-authoritative cumulative value.
+public enum RuntimeActivityReconciliationAdmission: Sendable, Equatable {
+    case establishedProcess
+    case requireFreshLiveEvidence
+}
+
 public enum LocalRuntimeReconciliationOwner {
-    public static func thread(snapshot: DesktopThreadSnapshot, hydration: RolloutCheckpointHydration, approval: ApprovalLifecycleCheckpoint, approvalHealth: ApprovalCapabilityHealth, runtimeSourceAvailable: Bool, observedAt: Date) -> RuntimeReconciliationThread {
-        let pending = approval.unresolved.filter { $0.threadID == snapshot.threadID && $0.turnID == hydration.activeTurnID }
-        let activity: RuntimeActivityCategory? = switch hydration.activeItemCategory {
+    public static func thread(snapshot: DesktopThreadSnapshot, hydration: RolloutCheckpointHydration, approval: ApprovalLifecycleCheckpoint, approvalHealth: ApprovalCapabilityHealth, runtimeSourceAvailable: Bool, observedAt: Date, activityAdmission: RuntimeActivityReconciliationAdmission = .establishedProcess) -> RuntimeReconciliationThread {
+        let activeTurnID = activityAdmission == .establishedProcess ? hydration.activeTurnID : nil
+        let activeItemCategory = activityAdmission == .establishedProcess ? hydration.activeItemCategory : nil
+        let pending = approval.unresolved.filter { $0.threadID == snapshot.threadID && $0.turnID == activeTurnID }
+        let activity: RuntimeActivityCategory? = switch activeItemCategory {
         case .tool?: .tool
         case .fileChange?: .fileChange
         case .thinking?, .agentResponse?, nil: nil
@@ -139,7 +146,7 @@ public enum LocalRuntimeReconciliationOwner {
             ?? hydration.terminal?.authoritativeEventAt
             ?? hydration.latestActiveStateAt
             ?? hydration.turnStartedAt
-        return RuntimeReconciliationThread(threadID: snapshot.threadID, conversationName: snapshot.conversationName, model: snapshot.model, activeTurnID: hydration.activeTurnID, turnStartedAt: hydration.turnStartedAt, latestActiveState: hydration.latestActiveState, latestActiveStateAt: hydration.latestActiveStateAt, activeItemID: hydration.activeItemID, activeItemCategory: activity, terminal: hydration.terminal, sessionTokenCumulative: hydration.authoritativeTokenTotal ?? snapshot.tokensUsed, sessionTokenProvenance: hydration.authoritativeTokenTotal == nil ? (snapshot.tokensUsed == nil ? nil : .stateDBSeedOrCrosscheck) : .rolloutCumulativeAuthoritative, approvalHealth: approvalHealth, unresolvedApprovals: pending, runtimeSourceAvailable: runtimeSourceAvailable, runtimeObservedAt: observedAt, approvalObservedAt: observedAt, lastMeaningfulActivityAt: meaningfulAt)
+        return RuntimeReconciliationThread(threadID: snapshot.threadID, conversationName: snapshot.conversationName, model: snapshot.model, activeTurnID: activeTurnID, turnStartedAt: activityAdmission == .establishedProcess ? hydration.turnStartedAt : nil, latestActiveState: activityAdmission == .establishedProcess ? hydration.latestActiveState : nil, latestActiveStateAt: activityAdmission == .establishedProcess ? hydration.latestActiveStateAt : nil, activeItemID: activityAdmission == .establishedProcess ? hydration.activeItemID : nil, activeItemCategory: activity, terminal: hydration.terminal, sessionTokenCumulative: hydration.authoritativeTokenTotal ?? snapshot.tokensUsed, sessionTokenProvenance: hydration.authoritativeTokenTotal == nil ? (snapshot.tokensUsed == nil ? nil : .stateDBSeedOrCrosscheck) : .rolloutCumulativeAuthoritative, approvalHealth: approvalHealth, unresolvedApprovals: pending, runtimeSourceAvailable: runtimeSourceAvailable, runtimeObservedAt: observedAt, approvalObservedAt: observedAt, lastMeaningfulActivityAt: meaningfulAt)
     }
 
     /// Startup/pause owners call this exactly once after all selected local
@@ -201,7 +208,7 @@ public final class LocalRuntimeReconciliationInstaller: @unchecked Sendable {
                 if case .sourceHealth(let health) = observation { return health.state == .available }
                 return false
             }
-            rebuilt.append(LocalRuntimeReconciliationOwner.thread(snapshot: snapshot, hydration: hydration, approval: approvalCheckpoint, approvalHealth: approvalHealth, runtimeSourceAvailable: runtimeAvailable, observedAt: now))
+            rebuilt.append(LocalRuntimeReconciliationOwner.thread(snapshot: snapshot, hydration: hydration, approval: approvalCheckpoint, approvalHealth: approvalHealth, runtimeSourceAvailable: runtimeAvailable, observedAt: now, activityAdmission: .requireFreshLiveEvidence))
         }
         engine.installReconciliation(rebuilt)
         return rebuilt

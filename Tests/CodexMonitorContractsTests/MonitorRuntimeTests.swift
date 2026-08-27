@@ -390,6 +390,38 @@ final class MonitorRuntimeTests: XCTestCase {
         XCTAssertEqual(snapshot.sourceHealth[.desktopLocal]?.availability, .available)
     }
 
+    func testRestartHydrationDoesNotRestoreHistoricalActiveStateWithoutFreshEvidence() async {
+        let clock = RuntimeSnapshotTestClock()
+        let store = makeStore(clock: clock)
+        let thread = id(.thread, "freshness-thread")
+        let turn = id(.turn, "historical-turn")
+        let hydrated = RolloutCheckpointHydration(activeTurnID: turn, turnStartedAt: clock.now(), activeItemID: nil, activeItemCategory: nil, latestActiveState: .thinking, latestActiveStateAt: clock.now(), terminal: nil, authoritativeTokenTotal: 10)
+        let rebuilt = LocalRuntimeReconciliationOwner.thread(snapshot: DesktopThreadSnapshot(threadID: thread, conversationName: "Fresh title", model: nil, reasoningEffort: nil, updatedAtMilliseconds: nil, tokensUsed: nil), hydration: hydrated, approval: ApprovalLifecycleCheckpoint(cursor: nil, unresolved: []), approvalHealth: .availableKnownNotWaiting, runtimeSourceAvailable: true, observedAt: clock.now(), activityAdmission: .requireFreshLiveEvidence)
+
+        await store.beginReconciliation()
+        await store.installReconciliation([rebuilt], desktopHealth: DesktopCycleHealth(processRunning: true, stateDBReadable: true))
+        var snapshot = await store.snapshot()
+        XCTAssertEqual(snapshot.currentState, .idle)
+        XCTAssertNil(snapshot.currentThread?.activeTurnID)
+
+        await store.ingest(event(thread, turn, .taskStarted, clock: clock))
+        snapshot = await store.snapshot()
+        XCTAssertEqual(snapshot.currentState, .thinking)
+    }
+
+    func testUnfreshMetadataCannotSupplyConversationPresentationTitle() async {
+        let clock = RuntimeSnapshotTestClock()
+        let store = makeStore(clock: clock)
+        let thread = id(.thread, "title-safety")
+        let turn = id(.turn, "title-turn")
+        await store.registerDesktopThread(DesktopThreadSnapshot(threadID: thread, conversationName: "Authoritative title", model: nil, reasoningEffort: nil, updatedAtMilliseconds: nil, tokensUsed: nil))
+        await store.ingest(event(thread, turn, .taskStarted, clock: clock))
+        await store.clearDesktopConversationNames()
+        let snapshot = await store.snapshot()
+        XCTAssertNil(snapshot.currentThread?.conversationName)
+        XCTAssertEqual(MonitorDisplayValue.resolvedConversationDisplayTitle(snapshot), L10n.tr("activity.currentTask"))
+    }
+
     func testTerminalRetentionPublishesIdleWithoutAnotherExternalMutation() async throws {
         let store = MonitorRuntimeStore(
             engine: RuntimeStateEngine(initialPhase: .live),

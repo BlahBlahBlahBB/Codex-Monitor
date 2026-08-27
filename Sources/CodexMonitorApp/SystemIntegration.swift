@@ -102,8 +102,15 @@ final class MonitorNotificationController {
     func requestPermissionThenEnable(_ kind: NotificationPreference, preferences: MonitorPreferences) {
         Task {
             let center = UNUserNotificationCenter.current()
-            let granted = (try? await center.requestAuthorization(options: [.alert, .sound])) ?? false
-            guard granted else { return }
+            let settings = await center.notificationSettings()
+            switch notificationAuthorizationDisposition(for: settings.authorizationStatus) {
+            case .enableImmediately:
+                break
+            case .requestThenEnable:
+                guard (try? await center.requestAuthorization(options: [.alert, .sound])) == true else { return }
+            case .doNotEnable:
+                return
+            }
             switch kind {
             case .waitingApproval: preferences.waitingApprovalNotifications = true
             case .taskCompleted: preferences.taskCompletedNotifications = true
@@ -137,4 +144,23 @@ final class MonitorNotificationController {
 enum NotificationPreference {
     case waitingApproval
     case taskCompleted
+}
+
+enum NotificationAuthorizationDisposition: Equatable {
+    case requestThenEnable
+    case enableImmediately
+    case doNotEnable
+}
+
+func notificationAuthorizationDisposition(for status: UNAuthorizationStatus) -> NotificationAuthorizationDisposition {
+    switch status {
+    case .notDetermined:
+        .requestThenEnable
+    case .authorized:
+        .enableImmediately
+    case .denied, .provisional, .ephemeral:
+        .doNotEnable
+    @unknown default:
+        .doNotEnable
+    }
 }

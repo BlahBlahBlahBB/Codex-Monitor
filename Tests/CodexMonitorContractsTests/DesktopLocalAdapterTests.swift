@@ -276,7 +276,8 @@ final class DesktopLocalAdapterTests: XCTestCase {
         XCTAssertEqual(approvals.adapter.checkpoint()?.lastLogID, 3, "installer must catch up beyond the first approval page before entering live")
         XCTAssertGreaterThan(try XCTUnwrap(installer.lastApprovalCatchUp).polls, 2)
         let snapshot = try XCTUnwrap(engine.snapshot().threads.first)
-        XCTAssertEqual(snapshot.state, .thinking)
+        XCTAssertEqual(snapshot.state, .idle)
+        XCTAssertNil(snapshot.activeTurnID)
         XCTAssertEqual(snapshot.sessionTokenCumulative, 100)
         XCTAssertEqual(snapshot.sessionTokenProvenance, .rolloutCumulativeAuthoritative)
     }

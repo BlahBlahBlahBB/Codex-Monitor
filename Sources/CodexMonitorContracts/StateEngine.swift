@@ -171,6 +171,16 @@ public final class RuntimeStateEngine: @unchecked Sendable {
         records[snapshot.threadID] = record
     }
 
+    /// A conversation title may be presented only when the current desktop
+    /// metadata cycle could authoritatively read it.
+    public func clearConversationNames() {
+        for id in records.keys {
+            var record = records[id]!
+            record.conversationName = nil
+            records[id] = record
+        }
+    }
+
     public func ingest(_ observation: DesktopObservation) {
         guard pausePhase == .live else { return }
         switch observation {
