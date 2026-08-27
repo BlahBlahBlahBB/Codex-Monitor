@@ -71,6 +71,8 @@ public actor CodexLocalMonitorDriver {
     private var didRecordProcessObservation = false
     private var suspended = false
     private var needsBootstrap = true
+    /// A prior process's hydrated state is context, not current activity.
+    private var requiresFreshActivityEvidenceAfterProcessBoundary = true
     /// This becomes true only after the same production reader has completed
     /// an exact `recentThreads()` read. It prevents a first-launch lock from
     /// being reported as a healthy desktop source.
@@ -171,6 +173,7 @@ public actor CodexLocalMonitorDriver {
         // cycle publishes exactly one reduced semantic snapshot below.
         await runtime.beginReconciliation(publish: false)
         guard CodexProcessLiveness.isRunning() else {
+            requiresFreshActivityEvidenceAfterProcessBoundary = true
             let health = DesktopCycleHealth(processRunning: false, stateDBReadable: false, removedThreadIDs: Array(trackedThreads))
             for threadID in trackedThreads { desktop.forget(threadID: threadID) }
             trackedThreads.removeAll()
@@ -196,7 +199,8 @@ public actor CodexLocalMonitorDriver {
                 admitted.insert(snapshot.threadID)
                 usageObservations.append(contentsOf: poll.observations)
                 let hydration = poll.hydration ?? RolloutCheckpointHydration(activeTurnID: nil, turnStartedAt: nil, activeItemID: nil, activeItemCategory: nil, latestActiveState: nil, latestActiveStateAt: nil, terminal: nil, authoritativeTokenTotal: nil)
-                rebuilt.append(LocalRuntimeReconciliationOwner.thread(snapshot: snapshot, hydration: hydration, approval: approvalCheckpoint, approvalHealth: approvalHealth, runtimeSourceAvailable: true, observedAt: Date()))
+                let admission: RuntimeActivityReconciliationAdmission = requiresFreshActivityEvidenceAfterProcessBoundary ? .requireFreshLiveEvidence : .establishedProcess
+                rebuilt.append(LocalRuntimeReconciliationOwner.thread(snapshot: snapshot, hydration: hydration, approval: approvalCheckpoint, approvalHealth: approvalHealth, runtimeSourceAvailable: true, observedAt: Date(), activityAdmission: admission))
             }
             trackedThreads = admitted
             await installReconciliation(rebuilt, health: DesktopCycleHealth(processRunning: true, stateDBReadable: true), caller: "bootstrap.stateDBRead")
@@ -217,6 +221,7 @@ public actor CodexLocalMonitorDriver {
 
     private func pollIncrementally() async {
         guard CodexProcessLiveness.isRunning() else {
+            requiresFreshActivityEvidenceAfterProcessBoundary = true
             let removed = Array(trackedThreads)
             for threadID in trackedThreads { desktop.forget(threadID: threadID) }
             trackedThreads.removeAll()
@@ -257,10 +262,19 @@ public actor CodexLocalMonitorDriver {
             trackedThreads.subtract(failed)
             let completeFromSessionStart = completeFromSessionStartSessions(in: observations)
             await applyDesktopCycle(registrations: registrations.values.sorted(by: { $0.threadID.rawID < $1.threadID.rawID }), observations: observations, health: DesktopCycleHealth(processRunning: true, stateDBReadable: true, failedThreadIDs: Array(failed), removedThreadIDs: Array(archived)), caller: "pollIncrementally.stateDBRead", completeFromSessionStartSessions: completeFromSessionStart)
+            if observations.contains(where: { observation in
+                guard case let .rollout(record) = observation else { return false }
+                return record.kind == .taskStarted
+            }) {
+                requiresFreshActivityEvidenceAfterProcessBoundary = false
+            }
             await applyApprovalPoll(approval)
         } catch {
             let disposition = DesktopPrimarySourceReadDisposition(error: error, hasSuccessfulStateDBRead: hasSuccessfulStateDBRead)
             recordStateDBReadFailure(error, disposition: disposition, caller: "pollIncrementally.stateDBRead")
+            // A retained runtime snapshot is safe during a short DB lock, but
+            // its title cannot be freshly proved in the failed metadata cycle.
+            await runtime.clearDesktopConversationNames()
             await applyDesktopCycle(registrations: [], observations: [], health: DesktopCycleHealth(processRunning: true, stateDBReadable: disposition == .retainLastKnownHealthy), caller: "pollIncrementally.stateDBReadFailure")
             await applyApprovalPoll(pollApproval())
             needsBootstrap = disposition == .fatal

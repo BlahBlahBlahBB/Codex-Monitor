@@ -111,16 +111,16 @@ public actor AccountUsageProvider {
             await markRefreshDegradedIfCurrent(operationID)
         case .connected(let assembled):
             Self.record(assembled.diagnostics)
-            guard shouldHoldTransientQuotaPartial(assembled) else {
+            guard assembled.hasTransientTransportFailure else {
                 await admit(assembled, operationID: operationID)
                 return
             }
 
-            // Hold the *entire* previous coherent snapshot. In particular,
-            // do not admit the current account metadata with prior-cycle
-            // quota while the one permitted replacement cycle is pending.
-            Self.recordRefreshEvent("transientQuotaPartialHeld")
+            // A channel fault invalidates this entire cycle: no Account or
+            // Usage component is ever joined to a quota from another cycle.
+            Self.recordRefreshEvent("transientCycleHeld")
             await markRefreshDegradedIfCurrent(operationID)
+            guard lastCompleteSnapshot != nil else { return }
             guard isCurrent(operationID) else { return }
             Self.recordRefreshEvent("boundedRetryStarted")
             do {
@@ -141,23 +141,21 @@ public actor AccountUsageProvider {
                 await markRefreshDegradedIfCurrent(operationID)
             case .connected(let retryAssembly):
                 Self.record(retryAssembly.diagnostics)
-                if retryAssembly.isComplete {
-                    Self.recordRefreshEvent("boundedRetrySucceeded")
-                } else {
+                if retryAssembly.hasTransientTransportFailure {
+                    // Preserve the prior coherent snapshot on a repeated
+                    // transport failure rather than publishing a partial one.
                     Self.recordRefreshEvent("boundedRetryExhausted")
+                    await markRefreshDegradedIfCurrent(operationID)
+                } else if retryAssembly.isComplete {
+                    Self.recordRefreshEvent("boundedRetrySucceeded")
+                    await admit(retryAssembly, operationID: operationID)
+                } else {
+                    // Authoritative absence is data, not a failed transport.
+                    Self.recordRefreshEvent("authoritativePartialAdmitted")
+                    await admit(retryAssembly, operationID: operationID)
                 }
-                // Retry exhaustion is intentionally fail-closed: this admits
-                // only the retry cycle's components, never a component merged
-                // from the held snapshot.
-                await admit(retryAssembly, operationID: operationID)
             }
         }
-    }
-
-    private func shouldHoldTransientQuotaPartial(_ assembled: AccountRefreshAssembly) -> Bool {
-        assembled.snapshot != nil
-            && assembled.diagnostics.rateLimits != .available
-            && lastCompleteSnapshot != nil
     }
 
     private func admit(_ assembled: AccountRefreshAssembly, operationID: UUID) async {
@@ -196,31 +194,76 @@ public actor AccountUsageProvider {
     }
 
     private static func productionRefreshCycle() async -> AccountRefreshCycleResult {
+        let descriptor = Self.descriptor
         do {
             let resolver = OfficialSocketResolver()
             let endpoint = try UnixSocketWebSocketEndpoint(capability: resolver.resolve())
-            let descriptor = Self.descriptor
             let client = JSONRPCClient(
                 channel: UnixSocketWebSocketChannel(endpoint: endpoint),
                 binding: try JSONRPCClientBinding(descriptor: descriptor),
                 clientInfo: JSONRPCClientInfo(name: "codex_monitor_account", title: "Codex Monitor Account", version: "v1")
             )
-            _ = try await client.connect()
-            // The validated local read shape requires an explicit empty
-            // params object; omission is a different request shape.
-            async let account = Self.read(client, method: "account/read", params: .object([:]))
-            async let limits = Self.read(client, method: "account/rateLimits/read")
-            async let usage = Self.read(client, method: "account/usage/read")
-            let assembled = Self.assemble(
-                account: await account,
-                rateLimits: await limits,
-                usage: await usage,
-                observedAt: Date()
+            do {
+                let assembled = try await wholeCycle(client: client)
+                await client.close()
+                return .connected(assembled)
+            } catch {
+                await client.close()
+                throw error
+            }
+        } catch {
+            guard !Task.isCancelled, isFallbackEligible(error) else {
+                return .connectionFailure(.wholeConnectionFailure(error))
+            }
+            return await bundledStdioRefreshCycle(descriptor: descriptor)
+        }
+    }
+
+    /// Every RPC in one refresh comes from a single initialized transport.
+    /// Sequential reads ensure an interrupted socket cycle is never assembled
+    /// and then mixed with the stdio fallback.
+    private static func wholeCycle(client: JSONRPCClient) async throws -> AccountRefreshAssembly {
+        _ = try await client.connect()
+        let account = try await client.request(method: "account/read", params: .object([:]))
+        let limits = try await client.request(method: "account/rateLimits/read")
+        let usage = try await client.request(method: "account/usage/read")
+        return assemble(account: .success(account), rateLimits: .success(limits), usage: .success(usage), observedAt: Date())
+    }
+
+    private static func bundledStdioRefreshCycle(descriptor: AdapterDescriptor) async -> AccountRefreshCycleResult {
+        do {
+            let executable = try TrustedCodexBundledExecutableResolver().resolve()
+            let client = JSONRPCClient(
+                channel: BundledCodexStdioChannel(executableURL: executable),
+                binding: try JSONRPCClientBinding(descriptor: descriptor),
+                clientInfo: JSONRPCClientInfo(name: "codex_monitor_account", title: "Codex Monitor Account", version: "v1")
             )
-            await client.close()
-            return .connected(assembled)
+            do {
+                let assembled = try await wholeCycle(client: client)
+                await client.close()
+                return .connected(assembled)
+            } catch {
+                await client.close()
+                return .connectionFailure(.wholeConnectionFailure(error))
+            }
         } catch {
             return .connectionFailure(.wholeConnectionFailure(error))
+        }
+    }
+
+    static func isFallbackEligible(_ error: Error) -> Bool {
+        switch error {
+        case is UnixSocketValidationError:
+            true
+        case let error as JSONRPCTransportError:
+            switch error {
+            case .endpointRejected, .connectionClosed, .requestTimedOut, .lifecycleUnavailable, .transportFailure, .webSocketClosed:
+                true
+            case .requestCancelled, .sourceBindingRejected, .protocolError, .malformedMessage:
+                false
+            }
+        default:
+            false
         }
     }
 
@@ -339,11 +382,6 @@ public actor AccountUsageProvider {
             resetCreditCount: limitsValue?.resetCreditCount
         )
         return AccountRefreshAssembly(snapshot: snapshot, diagnostics: diagnostics)
-    }
-
-    private static func read(_ client: JSONRPCClient, method: String, params: JSONValue? = nil) async -> AccountRPCRead {
-        do { return .success(try await client.request(method: method, params: params)) }
-        catch { return .failure(AccountRefreshDiagnosticCategory(error: error)) }
     }
 
     private static func accountMetadata(from response: JSONValue) throws -> AccountMetadata {
@@ -545,6 +583,12 @@ struct AccountRefreshAssembly: Sendable {
         diagnostics.account == .available
             && diagnostics.rateLimits == .available
             && diagnostics.usage == .available
+    }
+
+    var hasTransientTransportFailure: Bool {
+        [diagnostics.account, diagnostics.rateLimits, diagnostics.usage].contains {
+            $0 == .transportUnavailable || $0 == .rpcUnavailable
+        }
     }
 
     /// Only an already visible, complete snapshot with an authoritative

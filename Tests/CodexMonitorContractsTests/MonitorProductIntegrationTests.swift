@@ -1142,7 +1142,7 @@ final class MonitorProductIntegrationTests: XCTestCase {
         XCTAssertEqual(retained.sourceHealth[.account]?.freshness.state, .stale)
     }
 
-    func testTransientQuotaPartialHoldsWholeSnapshotUntilFullRetrySucceeds() async throws {
+    func testTransientTransportFailureRetainsWholeSnapshotUntilAFullReplacementSucceeds() async throws {
         let cycles = AccountRefreshCycleSequence([
             .connected(fullRefreshAssembly(email: "account-a@example.test", usedPercent: 40, tokens: 45)),
             .connected(partialQuotaRefreshAssembly(email: "account-b@example.test", planType: "plus", tokens: 99)),
@@ -1184,7 +1184,7 @@ final class MonitorProductIntegrationTests: XCTestCase {
         XCTAssertEqual(calls, 3)
     }
 
-    func testTransientQuotaRetryExhaustionPublishesOnlyRetryCyclePartial() async throws {
+    func testRepeatedTransientTransportFailureRetainsThePriorCoherentSnapshot() async throws {
         let cycles = AccountRefreshCycleSequence([
             .connected(fullRefreshAssembly(email: "account-a@example.test", usedPercent: 40, tokens: 45)),
             .connected(partialQuotaRefreshAssembly(email: "account-b@example.test", planType: "plus", tokens: 99)),
@@ -1213,14 +1213,39 @@ final class MonitorProductIntegrationTests: XCTestCase {
         await refresh.value
 
         let exhausted = await runtime.snapshot()
-        XCTAssertEqual(exhausted.account.plan, "plus")
-        XCTAssertNil(exhausted.quota.primary)
-        XCTAssertEqual(MonitorDisplayValue.orbQuota(exhausted), "--")
-        XCTAssertEqual(exhausted.usage.usage?.dailyBuckets?.last?.authoritativeTokens, 101)
+        XCTAssertEqual(exhausted.account.plan, "pro")
+        XCTAssertEqual(exhausted.quota.primary?.usedPercent, 40)
+        XCTAssertEqual(MonitorDisplayValue.orbQuota(exhausted), "60%")
+        XCTAssertEqual(exhausted.usage.usage?.dailyBuckets?.last?.authoritativeTokens, 45)
         XCTAssertEqual(exhausted.sourceHealth[.account]?.freshness.state, .stale)
-        await waitForObservedAccountSnapshot(observer.collector, quotaUsedPercent: nil, tokens: 101, freshness: .stale)
+        await waitForObservedAccountSnapshot(observer.collector, quotaUsedPercent: 40, tokens: 45, freshness: .stale)
         let calls = await cycles.callCount()
         XCTAssertEqual(calls, 3)
+    }
+
+    func testAuthoritativeFieldAbsenceAdmitsWithoutStartingTransportFallback() async throws {
+        let absence = AccountUsageProvider.assemble(
+            account: .success(accountRPC(email: "account-b@example.test", planType: "plus")),
+            rateLimits: .success(.object([:])),
+            usage: .success(usageRPC(tokens: 99)),
+            observedAt: Date()
+        )
+        let cycles = AccountRefreshCycleSequence([
+            .connected(fullRefreshAssembly(email: "account-a@example.test", usedPercent: 40, tokens: 45)),
+            .connected(absence)
+        ])
+        let runtime = MonitorRuntimeStore(initialPhase: .live)
+        let provider = AccountUsageProvider(runtime: runtime, refreshCycle: { await cycles.next() })
+
+        await provider.refreshOnce()
+        await provider.refreshOnce()
+
+        let snapshot = await runtime.snapshot()
+        XCTAssertEqual(snapshot.account.plan, "plus")
+        XCTAssertNil(snapshot.quota.primary)
+        XCTAssertEqual(MonitorDisplayValue.orbQuota(snapshot), "--")
+        let calls = await cycles.callCount()
+        XCTAssertEqual(calls, 2)
     }
 
     func testConcurrentAccountRefreshesCoalesceToOneCycle() async throws {

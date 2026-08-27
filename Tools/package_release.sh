@@ -9,13 +9,15 @@ product_name="Codex Monitor"
 bundle_identifier="${BUNDLE_IDENTIFIER:-com.codexmonitor.app}"
 marketing_version="${VERSION:-1.0.1}"
 build_number="${BUILD:-101}"
-preview_channel="Preview"
+# Defaults preserve the 1.0.2 preview artifact convention. RC/release builds
+# use the same pipeline and set RELEASE_LABEL (for example, RC1).
+release_label="${RELEASE_LABEL:-Preview}"
 frozen_sdk_version="26.5"
 icon_source="$project_root/icon/signal-capsule-mac.icns"
 release_root="${RELEASE_ROOT:-$project_root/Release}"
 app_bundle_name="${APP_BUNDLE_NAME:-$product_name.app}"
 app_path="$release_root/$app_bundle_name"
-dmg_name="Codex-Monitor-$marketing_version-Preview-macOS-arm64.dmg"
+dmg_name="Codex-Monitor-$marketing_version-$release_label-macOS-arm64.dmg"
 dmg_path="$release_root/$dmg_name"
 dmg_staging="$release_root/dmg-root"
 
@@ -30,6 +32,10 @@ signing_identity="${SIGNING_IDENTITY:-${RELEASE_SIGNING_IDENTITY:-}}"
 }
 [[ "$build_number" == <-> ]] || {
   print -u2 "BUILD must contain only digits: $build_number"
+  exit 1
+}
+[[ "$release_label" =~ '^[0-9A-Za-z.]+$' ]] || {
+  print -u2 "RELEASE_LABEL must contain only letters, digits, and dots"
   exit 1
 }
 [[ -f "$icon_source" ]] || { print -u2 "Missing final icon: $icon_source"; exit 1; }
@@ -157,13 +163,13 @@ plutil -create xml1 "$info_plist"
 /usr/libexec/PlistBuddy -c "Add :CFBundleVersion string $build_number" "$info_plist"
 /usr/libexec/PlistBuddy -c "Add :LSUIElement bool true" "$info_plist"
 /usr/libexec/PlistBuddy -c "Add :NSHighResolutionCapable bool true" "$info_plist"
-/usr/libexec/PlistBuddy -c "Add :CodexMonitorReleaseChannel string $preview_channel" "$info_plist"
+/usr/libexec/PlistBuddy -c "Add :CodexMonitorReleaseChannel string $release_label" "$info_plist"
 
 if [[ -n "$signing_identity" ]]; then
   signing_status="Developer ID signing requested"
 else
   signing_identity="-"
-  signing_status="UNSIGNED / AD-HOC LOCAL PREVIEW"
+  signing_status="UNSIGNED / AD-HOC LOCAL $release_label"
 fi
 /usr/libexec/PlistBuddy -c "Add :CodexMonitorSigningStatus string $signing_status" "$info_plist"
 
@@ -194,7 +200,7 @@ sign_code "$app_path"
 mkdir -p "$dmg_staging"
 ditto "$app_path" "$dmg_staging/$product_name.app"
 ln -s /Applications "$dmg_staging/Applications"
-"$hdiutil_tool" create -quiet -ov -volname "$product_name $marketing_version $preview_channel" \
+"$hdiutil_tool" create -quiet -ov -volname "$product_name $marketing_version $release_label" \
   -srcfolder "$dmg_staging" -format UDZO "$dmg_path"
 
 print "APP=$app_path"
