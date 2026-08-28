@@ -5,20 +5,13 @@ import CodexMonitorContracts
 /// the concrete rate-limit windows returned by Codex rather than account-plan
 /// names, so a future window cadence is presented without a plan mapping.
 struct QuotaWindowPresentation: Equatable, Identifiable {
-    enum Slot: Int, Hashable {
-        case primary
-        case secondary
-    }
-
-    let slot: Slot
+    let id: String
     let durationMinutes: Int?
     let remainingPercent: Double?
     let resetsAt: Date?
     let availability: MonitorDataAvailability
     let displayLabel: String
     let languageCode: String
-
-    var id: Slot { slot }
 
     static func quickViewHeight(for windowCount: Int) -> CGFloat {
         214 + CGFloat(max(windowCount - 1, 0)) * 20
@@ -62,11 +55,17 @@ struct QuotaWindowPresentation: Equatable, Identifiable {
     }
 
     static func windows(from snapshot: MonitorRuntimeSnapshot?, languageCode: String? = nil) -> [Self] {
-        windows(
-            primary: snapshot?.quota.primary,
-            primaryAvailability: snapshot?.quota.primaryAvailability ?? .unknown,
-            secondary: snapshot?.quota.secondary,
-            secondaryAvailability: snapshot?.quota.secondaryAvailability ?? .unknown,
+        guard let quota = snapshot?.quota else { return [] }
+        if quota.windowsAvailability == .available {
+            return windows(quota.windows, languageCode: languageCode)
+        }
+        // Compatibility fallback for snapshots constructed by pre-1.0.4
+        // callers. Production account snapshots always use the full array.
+        return windows(
+            primary: quota.primary,
+            primaryAvailability: quota.primaryAvailability,
+            secondary: quota.secondary,
+            secondaryAvailability: quota.secondaryAvailability,
             languageCode: languageCode
         )
     }
@@ -78,20 +77,23 @@ struct QuotaWindowPresentation: Equatable, Identifiable {
         secondaryAvailability: MonitorDataAvailability = .available,
         languageCode: String? = nil
     ) -> [Self] {
+        let candidates = [
+            primaryAvailability == .available ? primary : nil,
+            secondaryAvailability == .available ? secondary : nil
+        ].compactMap { $0 }
+        return windows(candidates, languageCode: languageCode)
+    }
+
+    static func windows(_ authoritativeWindows: [RateLimitWindow], languageCode: String? = nil) -> [Self] {
         let language = languageCode ?? L10n.resolvedLanguage
-        let candidates: [(Slot, RateLimitWindow?, MonitorDataAvailability)] = [
-            (.primary, primary, primaryAvailability),
-            (.secondary, secondary, secondaryAvailability)
-        ]
-        return candidates.compactMap { slot, window, availability in
-            guard availability == .available, let window else { return nil }
+        return authoritativeWindows.enumerated().map { index, window in
             let remaining = window.usedPercent.map { min(max(100 - $0, 0), 100) }
             return Self(
-                slot: slot,
+                id: identifier(for: window, index: index),
                 durationMinutes: window.windowDurationMinutes,
                 remainingPercent: remaining,
                 resetsAt: window.resetsAt,
-                availability: availability,
+                availability: .available,
                 displayLabel: durationLabel(minutes: window.windowDurationMinutes, languageCode: language),
                 languageCode: language
             )
@@ -99,7 +101,7 @@ struct QuotaWindowPresentation: Equatable, Identifiable {
         .sorted {
             let lhsDuration = $0.durationMinutes ?? Int.max
             let rhsDuration = $1.durationMinutes ?? Int.max
-            return lhsDuration == rhsDuration ? $0.slot.rawValue < $1.slot.rawValue : lhsDuration < rhsDuration
+            return lhsDuration == rhsDuration ? $0.id < $1.id : lhsDuration < rhsDuration
         }
     }
 
@@ -122,6 +124,10 @@ struct QuotaWindowPresentation: Equatable, Identifiable {
     }
 
     private static let earliestValidReset = Date(timeIntervalSince1970: 1_577_836_800) // 2020-01-01 UTC
+
+    private static func identifier(for window: RateLimitWindow, index: Int) -> String {
+        "\(index)-\(window.windowDurationMinutes.map(String.init) ?? "unknown")-\(window.resetsAt?.timeIntervalSince1970.description ?? "unknown")-\(window.usedPercent?.description ?? "unknown")"
+    }
 
     private static func quantity(_ value: Int, singularKey: String, pluralKey: String, languageCode: String) -> String {
         let unit = L10n.tr(value == 1 ? singularKey : pluralKey, languageCode: languageCode)

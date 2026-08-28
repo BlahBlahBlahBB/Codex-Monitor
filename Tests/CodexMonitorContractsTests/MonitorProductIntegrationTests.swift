@@ -1110,6 +1110,7 @@ final class MonitorProductIntegrationTests: XCTestCase {
         XCTAssertEqual(mapped.authMode, "chatgpt")
         XCTAssertEqual(mapped.planType, "pro")
         XCTAssertEqual(mapped.primaryRateLimit?.usedPercent, 70)
+        XCTAssertEqual(mapped.rateLimitWindows.map(\.windowDurationMinutes), [60, 300])
         let resetAt = try XCTUnwrap(mapped.primaryRateLimit?.resetsAt)
         XCTAssertEqual(resetAt.timeIntervalSince1970, 1_725_000_500, accuracy: 0.001)
         XCTAssertGreaterThan(resetAt.timeIntervalSince1970, 1_700_000_000)
@@ -1122,6 +1123,96 @@ final class MonitorProductIntegrationTests: XCTestCase {
         let snapshot = await runtime.snapshot()
         XCTAssertEqual(MonitorDisplayValue.orbQuota(snapshot), "30%")
         XCTAssertEqual(MonitorDisplayValue.todayUsage(snapshot), "45 Token")
+    }
+
+    func testMW1TwoKeyedPrimaryWindowsArePreservedForPresentation() async throws {
+        let limits = authoritativeRateLimits(entries: [
+            (rateLimitJSON(usedPercent: 24, minutes: 300, reset: 1_800_000_000), nil),
+            (rateLimitJSON(usedPercent: 2, minutes: 10_080, reset: 1_800_604_800), nil)
+        ])
+        let mapped = try AccountUsageProvider.snapshot(accountResponse: accountRPC(), rateLimitsResponse: limits, usageResponse: usageRPC(tokens: 1), observedAt: Date())
+        XCTAssertEqual(mapped.rateLimitWindows.map(\.windowDurationMinutes), [300, 10_080])
+
+        let runtime = MonitorRuntimeStore(initialPhase: .live)
+        await runtime.ingest(account: mapped)
+        let windows = QuotaWindowPresentation.windows(from: await runtime.snapshot(), languageCode: "en")
+        XCTAssertEqual(windows.map(\.displayLabel), ["5 hours", "1 week"])
+        XCTAssertEqual(windows.map(\.remainingText), ["76%", "98%"])
+    }
+
+    func testMW2KeyedPrimaryAndSecondaryAreBothPreserved() throws {
+        let limits = authoritativeRateLimits(entries: [
+            (rateLimitJSON(usedPercent: 24, minutes: 300, reset: 1_800_000_000), rateLimitJSON(usedPercent: 2, minutes: 10_080, reset: 1_800_604_800))
+        ])
+        let mapped = try AccountUsageProvider.snapshot(accountResponse: accountRPC(), rateLimitsResponse: limits, usageResponse: usageRPC(tokens: 1), observedAt: Date())
+        XCTAssertEqual(mapped.rateLimitWindows.map(\.windowDurationMinutes), [300, 10_080])
+    }
+
+    func testMW3RootMirrorDeduplicatesAgainstMatchingKeyedWindow() throws {
+        let short = rateLimitJSON(usedPercent: 24, minutes: 300, reset: 1_800_000_000)
+        let week = rateLimitJSON(usedPercent: 2, minutes: 10_080, reset: 1_800_604_800)
+        let limits = authoritativeRateLimits(entries: [(short, week)], root: (short, week))
+        let mapped = try AccountUsageProvider.snapshot(accountResponse: accountRPC(), rateLimitsResponse: limits, usageResponse: usageRPC(tokens: 1), observedAt: Date())
+        XCTAssertEqual(mapped.rateLimitWindows.map(\.windowDurationMinutes), [300, 10_080])
+    }
+
+    func testMW4DifferentKeyedWindowsWithSamePercentageAreNotDeduplicated() throws {
+        let limits = authoritativeRateLimits(entries: [
+            (rateLimitJSON(usedPercent: 50, minutes: 300, reset: 1_800_000_000), nil),
+            (rateLimitJSON(usedPercent: 50, minutes: 10_080, reset: 1_800_604_800), nil)
+        ])
+        let mapped = try AccountUsageProvider.snapshot(accountResponse: accountRPC(), rateLimitsResponse: limits, usageResponse: usageRPC(tokens: 1), observedAt: Date())
+        XCTAssertEqual(mapped.rateLimitWindows.count, 2)
+        XCTAssertEqual(mapped.rateLimitWindows.map(\.windowDurationMinutes), [300, 10_080])
+    }
+
+    func testMW5TransientRefreshRetainsWholeWindowCollectionAndMW6AuthoritativeRemovalReplacesIt() async throws {
+        let both = AccountUsageProvider.assemble(
+            account: .success(accountRPC()),
+            rateLimits: .success(authoritativeRateLimits(entries: [
+                (rateLimitJSON(usedPercent: 24, minutes: 300, reset: 1_800_000_000), nil),
+                (rateLimitJSON(usedPercent: 2, minutes: 10_080, reset: 1_800_604_800), nil)
+            ])),
+            usage: .success(usageRPC(tokens: 1)),
+            observedAt: Date()
+        )
+        let weeklyOnly = AccountUsageProvider.assemble(
+            account: .success(accountRPC()),
+            rateLimits: .success(authoritativeRateLimits(entries: [
+                (rateLimitJSON(usedPercent: 2, minutes: 10_080, reset: 1_800_604_800), nil)
+            ])),
+            usage: .success(usageRPC(tokens: 2)),
+            observedAt: Date().addingTimeInterval(60)
+        )
+        let cycles = AccountRefreshCycleSequence([
+            .connected(both),
+            .connectionFailure(.wholeConnectionFailure(JSONRPCTransportError.requestTimedOut)),
+            .connected(weeklyOnly)
+        ])
+        let runtime = MonitorRuntimeStore(initialPhase: .live)
+        let provider = AccountUsageProvider(runtime: runtime, refreshCycle: { await cycles.next() })
+
+        await provider.refreshOnce()
+        await provider.refreshOnce()
+        let retained = await runtime.snapshot()
+        XCTAssertEqual(QuotaWindowPresentation.windows(from: retained, languageCode: "en").map(\.displayLabel), ["5 hours", "1 week"])
+
+        await provider.refreshOnce()
+        let replacement = await runtime.snapshot()
+        XCTAssertEqual(QuotaWindowPresentation.windows(from: replacement, languageCode: "en").map(\.displayLabel), ["1 week"])
+    }
+
+    func testMW7MW8MW9ZeroOwnResetAndShortToLongPresentation() {
+        let windows = QuotaWindowPresentation.windows([
+            RateLimitWindow(usedPercent: 0, windowDurationMinutes: 43_200, resetsAt: quotaPresentationDate("2026-09-28T10:00:00Z")),
+            RateLimitWindow(usedPercent: 100, windowDurationMinutes: 300, resetsAt: quotaPresentationDate("2026-08-28T14:59:00Z")),
+            RateLimitWindow(usedPercent: 2, windowDurationMinutes: 10_080, resetsAt: quotaPresentationDate("2026-09-04T14:59:00Z"))
+        ], languageCode: "zh-Hans")
+        XCTAssertEqual(windows.map(\.displayLabel), ["5 小时", "1 周", "1 月"])
+        XCTAssertEqual(windows.map(\.remainingText), ["0%", "98%", "100%"])
+        XCTAssertEqual(windows[0].resetDateTime(timeZone: TimeZone(secondsFromGMT: 0)!, languageCode: "zh-Hans"), "8月28日 · 14:59")
+        XCTAssertEqual(windows[1].resetDateTime(timeZone: TimeZone(secondsFromGMT: 0)!, languageCode: "zh-Hans"), "9月4日 · 14:59")
+        XCTAssertEqual(windows[2].resetDateTime(timeZone: TimeZone(secondsFromGMT: 0)!, languageCode: "zh-Hans"), "9月28日 · 10:00")
     }
 
     func testPartialAuthoritativeRefreshLetsUsageFailureDegradeOnlyUsage() async throws {
@@ -1974,6 +2065,35 @@ final class MonitorProductIntegrationTests: XCTestCase {
             ]),
             "rateLimitResetCredits": .object(["availableCount": .number(2)])
         ])
+    }
+
+    private func rateLimitJSON(usedPercent: Double, minutes: Int, reset: Double) -> JSONValue {
+        .object([
+            "usedPercent": .number(usedPercent),
+            "windowDurationMins": .number(Double(minutes)),
+            "resetsAt": .number(reset)
+        ])
+    }
+
+    private func authoritativeRateLimits(
+        entries: [(JSONValue?, JSONValue?)],
+        root: (JSONValue?, JSONValue?)? = nil
+    ) -> JSONValue {
+        var keyed: [String: JSONValue] = [:]
+        for (index, entry) in entries.enumerated() {
+            var value: [String: JSONValue] = [:]
+            if let primary = entry.0 { value["primary"] = primary }
+            if let secondary = entry.1 { value["secondary"] = secondary }
+            keyed["limit-\(index)"] = .object(value)
+        }
+        var response: [String: JSONValue] = ["rateLimitsByLimitId": .object(keyed)]
+        if let root {
+            var value: [String: JSONValue] = [:]
+            if let primary = root.0 { value["primary"] = primary }
+            if let secondary = root.1 { value["secondary"] = secondary }
+            response["rateLimits"] = .object(value)
+        }
+        return .object(response)
     }
 
     private func usageRPC(tokens: Int) -> JSONValue {

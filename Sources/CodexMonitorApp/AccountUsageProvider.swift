@@ -385,6 +385,7 @@ public actor AccountUsageProvider {
             authMode: accountValue?.authMode,
             primaryRateLimit: limitsValue?.primary,
             secondaryRateLimit: limitsValue?.secondary,
+            rateLimitWindows: limitsValue?.windows ?? [],
             usage: usageValue,
             resetCreditCount: limitsValue?.resetCreditCount
         )
@@ -399,10 +400,11 @@ public actor AccountUsageProvider {
 
     private static func rateLimitMetadata(from response: JSONValue) throws -> RateLimitMetadata {
         guard let root = response.objectValue else { throw AccountUsageProviderError.malformedResponse }
-        let snapshots = rateLimitSnapshots(from: root)
+        let candidates = rateLimitCandidates(from: root)
         return RateLimitMetadata(
-            primary: mostRestricted(snapshots.compactMap { rateLimitWindow($0["primary"]) }),
-            secondary: mostRestricted(snapshots.compactMap { rateLimitWindow($0["secondary"]) }),
+            primary: mostRestricted(candidates.filter { $0.slot == .primary }.map(\.window)),
+            secondary: mostRestricted(candidates.filter { $0.slot == .secondary }.map(\.window)),
+            windows: deduplicatedWindows(from: candidates),
             resetCreditCount: integer(root["rateLimitResetCredits"]?.objectValue?["availableCount"])
         )
     }
@@ -426,19 +428,34 @@ public actor AccountUsageProvider {
         DiagnosticEvent.record(.state, ["event": event])
     }
 
-    private static func rateLimitSnapshots(from root: [String: JSONValue]) -> [[String: JSONValue]] {
-        var values: [[String: JSONValue]] = []
-        if let primary = root["rateLimits"]?.objectValue { values.append(primary) }
-        if let keyed = root["rateLimitsByLimitId"]?.objectValue {
-            values.append(contentsOf: keyed.values.compactMap(\.objectValue))
+    private static func rateLimitCandidates(from root: [String: JSONValue]) -> [RateLimitCandidate] {
+        let rootCandidates = candidates(in: root["rateLimits"]?.objectValue, origin: .root)
+        let keyedCandidates = (root["rateLimitsByLimitId"]?.objectValue ?? [:])
+            .sorted { $0.key < $1.key }
+            .flatMap { key, value in candidates(in: value.objectValue, origin: .keyed(key)) }
+
+        // `rateLimits` is a mirror of one keyed limit on the live Computer A
+        // payload. Keep keyed limits as structurally distinct authoritative
+        // entries; discard a root value only when its slot + full window
+        // signature proves it is that mirror. This never deduplicates two
+        // different keyed limit IDs merely because their percentages match.
+        let keyedSignatures = Set(keyedCandidates.map(\.signature))
+        return keyedCandidates + rootCandidates.filter { !keyedSignatures.contains($0.signature) }
+    }
+
+    private static func candidates(in snapshot: [String: JSONValue]?, origin: RateLimitCandidate.Origin) -> [RateLimitCandidate] {
+        guard let snapshot else { return [] }
+        return RateLimitCandidate.Slot.allCases.compactMap { slot in
+            guard let window = rateLimitWindow(snapshot[slot.rawValue]) else { return nil }
+            return RateLimitCandidate(origin: origin, slot: slot, window: window)
         }
-        return values
     }
 
     private static func rateLimitWindow(_ value: JSONValue?) -> RateLimitWindow? {
-        guard let value = value?.objectValue, let used = number(value["usedPercent"]), used.isFinite else { return nil }
+        guard let value = value?.objectValue else { return nil }
+        let used = number(value["usedPercent"]).flatMap { $0.isFinite ? min(max($0, 0), 100) : nil }
         let reset = number(value["resetsAt"]).flatMap(normalizedUnixDate)
-        return RateLimitWindow(usedPercent: min(max(used, 0), 100), windowDurationMinutes: integer(value["windowDurationMins"]), resetsAt: reset)
+        return RateLimitWindow(usedPercent: used, windowDurationMinutes: integer(value["windowDurationMins"]), resetsAt: reset)
     }
 
     /// The validated account route has emitted Unix seconds (10 digits).
@@ -452,6 +469,16 @@ public actor AccountUsageProvider {
 
     private static func mostRestricted(_ windows: [RateLimitWindow]) -> RateLimitWindow? {
         windows.max { ($0.usedPercent ?? -1) < ($1.usedPercent ?? -1) }
+    }
+
+    private static func deduplicatedWindows(from candidates: [RateLimitCandidate]) -> [RateLimitWindow] {
+        candidates
+            .sorted { lhs, rhs in
+                let lhsDuration = lhs.window.windowDurationMinutes ?? Int.max
+                let rhsDuration = rhs.window.windowDurationMinutes ?? Int.max
+                return lhsDuration == rhsDuration ? lhs.stableOrder < rhs.stableOrder : lhsDuration < rhsDuration
+            }
+            .map(\.window)
     }
 
     private static func dailyBuckets(from value: JSONValue?, observedAt: Date, calendar: Calendar) -> [AccountUsageDailyBucket]? {
@@ -603,7 +630,7 @@ struct AccountRefreshAssembly: Sendable {
     /// authoritative absence and is admitted normally instead.
     var isCompleteQuotaSnapshot: Bool {
         isAuthoritativeCycle
-            && snapshot?.primaryRateLimit != nil
+            && !(snapshot?.rateLimitWindows.isEmpty ?? true)
     }
 }
 
@@ -635,12 +662,48 @@ private struct AccountMetadata: Sendable {
 private struct RateLimitMetadata: Sendable {
     let primary: RateLimitWindow?
     let secondary: RateLimitWindow?
+    let windows: [RateLimitWindow]
     let resetCreditCount: Int?
 
-    init(primary: RateLimitWindow?, secondary: RateLimitWindow?, resetCreditCount: Int?) {
+    init(primary: RateLimitWindow?, secondary: RateLimitWindow?, windows: [RateLimitWindow], resetCreditCount: Int?) {
         self.primary = primary
         self.secondary = secondary
+        self.windows = windows
         self.resetCreditCount = resetCreditCount
     }
 
+}
+
+private struct RateLimitCandidate: Sendable {
+    enum Origin: Sendable {
+        case root
+        case keyed(String)
+    }
+
+    enum Slot: String, CaseIterable, Sendable {
+        case primary
+        case secondary
+    }
+
+    struct Signature: Hashable {
+        let slot: Slot
+        let usedPercent: Double?
+        let windowDurationMinutes: Int?
+        let resetsAt: Date?
+    }
+
+    let origin: Origin
+    let slot: Slot
+    let window: RateLimitWindow
+
+    var signature: Signature {
+        Signature(slot: slot, usedPercent: window.usedPercent, windowDurationMinutes: window.windowDurationMinutes, resetsAt: window.resetsAt)
+    }
+
+    var stableOrder: String {
+        switch origin {
+        case .root: "0"
+        case .keyed(let identifier): "1\(identifier)"
+        }
+    }
 }
