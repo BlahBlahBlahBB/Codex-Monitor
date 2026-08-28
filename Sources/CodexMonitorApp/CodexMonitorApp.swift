@@ -19,7 +19,9 @@ final class CodexMonitorApplication: NSObject {
 
 @MainActor
 final class CodexMonitorAppDelegate: NSObject, NSApplicationDelegate {
-    private let runtime = MonitorRuntimeStore()
+    private let runtime = MonitorRuntimeStore(
+        accountCapabilities: .init(secondaryQuota: .snapshot)
+    )
     private let usageLedger = LocalUsageLedgerProvider()
     private lazy var driver = CodexLocalMonitorDriver(runtime: runtime, usageLedger: usageLedger)
     private lazy var accountProvider = AccountUsageProvider(runtime: runtime)

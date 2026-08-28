@@ -60,8 +60,10 @@ struct MenuBarPopoverView: View {
                 VStack(alignment: .leading, spacing: 9) {
                     MonitorPopoverRow(label: L10n.tr("label.account"), value: MonitorDisplayValue.account(snapshot, hidden: preferences.hideAccountInfo))
                     MonitorPopoverRow(label: L10n.tr("label.plan"), value: MonitorDisplayValue.plan(snapshot))
-                    MonitorPopoverRow(label: L10n.tr("label.quota"), value: MonitorDisplayValue.remainingQuota(snapshot))
-                    MonitorPopoverRow(label: L10n.tr("label.resetDate"), value: MonitorDisplayValue.quotaResetDate(snapshot))
+                    ForEach(QuotaWindowPresentation.windows(from: snapshot)) { window in
+                        MonitorPopoverRow(label: window.quotaRowLabel, value: window.remainingText)
+                        MonitorPopoverRow(label: window.resetRowLabel, value: window.resetDateTime())
+                    }
                     MonitorPopoverRow(label: L10n.tr("label.resetCredit"), value: MonitorDisplayValue.reset(snapshot))
                     if let quotaNotice = quotaNotice(snapshot) {
                         Text(quotaNotice)

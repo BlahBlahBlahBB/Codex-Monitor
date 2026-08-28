@@ -227,16 +227,56 @@ public struct AccountSnapshot: Codable, Sendable, Equatable {
     public let authMode: String?
     public let primaryRateLimit: RateLimitWindow?
     public let secondaryRateLimit: RateLimitWindow?
+    /// Complete, deduplicated collection from the authoritative
+    /// `account/rateLimits/read` response. The two legacy fields above remain
+    /// compatibility projections for the Orb and quota-warning contracts.
+    public let rateLimitWindows: [RateLimitWindow]
     public let usage: UsagePresence?
     public let resetCreditCount: Int?
     public let resetCreditDetails: [String]?
-    public init?(provenance: Provenance, email: String? = nil, planType: String? = nil, authMode: String? = nil, primaryRateLimit: RateLimitWindow? = nil, secondaryRateLimit: RateLimitWindow? = nil, usage: UsagePresence? = nil, resetCreditCount: Int? = nil, resetCreditDetails: [String]? = nil) {
+    public init?(provenance: Provenance, email: String? = nil, planType: String? = nil, authMode: String? = nil, primaryRateLimit: RateLimitWindow? = nil, secondaryRateLimit: RateLimitWindow? = nil, rateLimitWindows: [RateLimitWindow] = [], usage: UsagePresence? = nil, resetCreditCount: Int? = nil, resetCreditDetails: [String]? = nil) {
         guard provenance.sourceKind == .account,
               provenance.observationMode == .snapshot,
               provenance.capability.isCompatible(with: .account) else { return nil }
         self.provenance = provenance; self.email = email; self.planType = planType; self.authMode = authMode
-        self.primaryRateLimit = primaryRateLimit; self.secondaryRateLimit = secondaryRateLimit; self.usage = usage
+        self.primaryRateLimit = primaryRateLimit; self.secondaryRateLimit = secondaryRateLimit; self.rateLimitWindows = rateLimitWindows; self.usage = usage
         self.resetCreditCount = resetCreditCount; self.resetCreditDetails = resetCreditDetails
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case provenance, email, planType, authMode, primaryRateLimit, secondaryRateLimit
+        case rateLimitWindows, usage, resetCreditCount, resetCreditDetails
+    }
+
+    public init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        provenance = try values.decode(Provenance.self, forKey: .provenance)
+        email = try values.decodeIfPresent(String.self, forKey: .email)
+        planType = try values.decodeIfPresent(String.self, forKey: .planType)
+        authMode = try values.decodeIfPresent(String.self, forKey: .authMode)
+        primaryRateLimit = try values.decodeIfPresent(RateLimitWindow.self, forKey: .primaryRateLimit)
+        secondaryRateLimit = try values.decodeIfPresent(RateLimitWindow.self, forKey: .secondaryRateLimit)
+        // 1.0.3 persisted snapshots predate the full collection. Decode them
+        // as an empty collection so they remain readable; live refreshes then
+        // atomically replace them with the authoritative collection.
+        rateLimitWindows = try values.decodeIfPresent([RateLimitWindow].self, forKey: .rateLimitWindows) ?? []
+        usage = try values.decodeIfPresent(UsagePresence.self, forKey: .usage)
+        resetCreditCount = try values.decodeIfPresent(Int.self, forKey: .resetCreditCount)
+        resetCreditDetails = try values.decodeIfPresent([String].self, forKey: .resetCreditDetails)
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var values = encoder.container(keyedBy: CodingKeys.self)
+        try values.encode(provenance, forKey: .provenance)
+        try values.encodeIfPresent(email, forKey: .email)
+        try values.encodeIfPresent(planType, forKey: .planType)
+        try values.encodeIfPresent(authMode, forKey: .authMode)
+        try values.encodeIfPresent(primaryRateLimit, forKey: .primaryRateLimit)
+        try values.encodeIfPresent(secondaryRateLimit, forKey: .secondaryRateLimit)
+        try values.encode(rateLimitWindows, forKey: .rateLimitWindows)
+        try values.encodeIfPresent(usage, forKey: .usage)
+        try values.encodeIfPresent(resetCreditCount, forKey: .resetCreditCount)
+        try values.encodeIfPresent(resetCreditDetails, forKey: .resetCreditDetails)
     }
 }
 

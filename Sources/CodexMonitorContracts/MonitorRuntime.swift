@@ -129,6 +129,8 @@ public struct MonitorQuotaViewModel: Sendable, Equatable {
     public let primary: RateLimitWindow?
     public let secondaryAvailability: MonitorDataAvailability
     public let secondary: RateLimitWindow?
+    public let windowsAvailability: MonitorDataAvailability
+    public let windows: [RateLimitWindow]
 }
 
 public struct MonitorResetInformationViewModel: Sendable, Equatable {
@@ -831,7 +833,15 @@ private enum MonitorRuntimeSnapshotBuilder {
     static func quota(_ account: AccountSnapshot?, source: MonitorSourceHealth, primaryCapability: CapabilityState, secondaryCapability: CapabilityState) -> MonitorQuotaViewModel {
         let primary = valueAvailability(account?.primaryRateLimit, source: source, capability: primaryCapability)
         let secondary = valueAvailability(account?.secondaryRateLimit, source: source, capability: secondaryCapability)
-        return MonitorQuotaViewModel(primaryAvailability: primary, primary: primary == .available ? account?.primaryRateLimit : nil, secondaryAvailability: secondary, secondary: secondary == .available ? account?.secondaryRateLimit : nil)
+        let windows = valueAvailability(account?.rateLimitWindows, source: source, capability: primaryCapability)
+        return MonitorQuotaViewModel(
+            primaryAvailability: primary,
+            primary: primary == .available ? account?.primaryRateLimit : nil,
+            secondaryAvailability: secondary,
+            secondary: secondary == .available ? account?.secondaryRateLimit : nil,
+            windowsAvailability: windows,
+            windows: windows == .available ? account?.rateLimitWindows ?? [] : []
+        )
     }
 
     static func reset(_ account: AccountSnapshot?, source: MonitorSourceHealth, countCapability: CapabilityState, detailsCapability: CapabilityState) -> MonitorResetInformationViewModel {

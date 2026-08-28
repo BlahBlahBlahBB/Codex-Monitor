@@ -585,16 +585,19 @@ final class MonitorProductIntegrationTests: XCTestCase {
         XCTAssertEqual(MonitorDisplayValue.last30DaysUsage(missingSnapshot, languageCode: "zh-Hans"), "1.23万 Token")
     }
 
-    func testSelectedQuotaWindowKeepsOrbPopoverAndQuickViewResetConsistent() async throws {
+    func testMostRestrictedWarningSelectionDoesNotOverrideShortestOrbHeadline() async throws {
         let calendar = Calendar.current
         let resetAt = try XCTUnwrap(calendar.date(from: DateComponents(year: 2030, month: 8, day: 16, hour: 15, minute: 30)))
         let now = try XCTUnwrap(calendar.date(from: DateComponents(year: 2030, month: 8, day: 1, hour: 12)))
+        let short = RateLimitWindow(usedPercent: 20, windowDurationMinutes: 300, resetsAt: resetAt.addingTimeInterval(-3_600))
+        let weekly = RateLimitWindow(usedPercent: 81, windowDurationMinutes: 10_080, resetsAt: resetAt)
         let snapshot = await quotaSnapshot(
-            primary: RateLimitWindow(usedPercent: 20, windowDurationMinutes: 300, resetsAt: resetAt.addingTimeInterval(-3_600)),
-            secondary: RateLimitWindow(usedPercent: 81, windowDurationMinutes: 10_080, resetsAt: resetAt)
+            primary: short,
+            secondary: weekly,
+            windows: [short, weekly]
         )
 
-        XCTAssertEqual(MonitorDisplayValue.orbQuota(snapshot), "19%")
+        XCTAssertEqual(MonitorDisplayValue.orbQuota(snapshot), "80%")
         XCTAssertEqual(MonitorDisplayValue.remainingQuota(snapshot), "19%")
         XCTAssertEqual(MonitorDisplayValue.selectedQuotaWindow(snapshot)?.window, snapshot.quota.secondary)
         XCTAssertEqual(MonitorDisplayValue.quotaResetDate(snapshot, now: now, languageCode: "zh-Hans"), "一周 · 08.16")
@@ -611,6 +614,100 @@ final class MonitorProductIntegrationTests: XCTestCase {
         XCTAssertEqual(MonitorDisplayValue.remainingQuota(snapshot), "80%")
         XCTAssertEqual(MonitorDisplayValue.quotaResetDate(snapshot, languageCode: "zh-Hans"), "--")
         XCTAssertEqual(MonitorDisplayValue.quotaResetDate(snapshot, languageCode: "en"), "--")
+    }
+
+    func testQW1PrimaryFiveHourWindowBuildsTwoDisplayRowsWithFullResetDateTime() {
+        let reset = quotaPresentationDate("2026-08-28T14:59:00Z")
+        let windows = QuotaWindowPresentation.windows(
+            primary: RateLimitWindow(usedPercent: 11, windowDurationMinutes: 300, resetsAt: reset),
+            secondary: nil,
+            languageCode: "zh-Hans"
+        )
+
+        let window = try! XCTUnwrap(windows.first)
+        XCTAssertEqual(windows.count, 1)
+        XCTAssertEqual(window.quotaRowLabel, "5 小时额度")
+        XCTAssertEqual(window.resetRowLabel, "5 小时重置")
+        XCTAssertEqual(window.remainingText, "89%")
+        XCTAssertEqual(window.resetDateTime(timeZone: TimeZone(secondsFromGMT: 0)!, languageCode: "zh-Hans"), "8月28日 · 14:59")
+    }
+
+    func testQW2QW3QW7QW8NormalizeAndSortOnlyAuthoritativeWindows() {
+        let shortReset = quotaPresentationDate("2026-08-28T14:59:00Z")
+        let weekReset = quotaPresentationDate("2026-09-04T14:59:00Z")
+        let windows = QuotaWindowPresentation.windows(
+            primary: RateLimitWindow(usedPercent: 11, windowDurationMinutes: 300, resetsAt: shortReset),
+            secondary: RateLimitWindow(usedPercent: 2, windowDurationMinutes: 10_080, resetsAt: weekReset),
+            languageCode: "en"
+        )
+
+        XCTAssertEqual(windows.map(\.displayLabel), ["5 hours", "1 week"])
+        XCTAssertEqual(windows.map(\.remainingText), ["89%", "98%"])
+        let resetTexts = windows.map { $0.resetDateTime(timeZone: TimeZone(secondsFromGMT: 0)!, languageCode: "en") }
+        XCTAssertTrue(resetTexts[0].contains("Aug 28") && resetTexts[0].contains("2:59"))
+        XCTAssertTrue(resetTexts[1].contains("Sep 4") && resetTexts[1].contains("2:59"))
+
+        let weeklyOnly = QuotaWindowPresentation.windows(
+            primary: RateLimitWindow(usedPercent: 2, windowDurationMinutes: 10_080, resetsAt: weekReset),
+            secondary: nil,
+            languageCode: "en"
+        )
+        XCTAssertEqual(weeklyOnly.map(\.displayLabel), ["1 week"])
+    }
+
+    func testQW4QW5DurationLabelsUseAuthoritativeDurationWithoutPlanInference() {
+        XCTAssertEqual(QuotaWindowPresentation.durationLabel(minutes: 43_200, languageCode: "zh-Hans"), "1 月")
+        XCTAssertEqual(QuotaWindowPresentation.durationLabel(minutes: 43_200, languageCode: "en"), "1 month")
+        XCTAssertEqual(QuotaWindowPresentation.durationLabel(minutes: 4_320, languageCode: "zh-Hans"), "3 天")
+        XCTAssertEqual(QuotaWindowPresentation.durationLabel(minutes: 4_320, languageCode: "en"), "3 days")
+        XCTAssertEqual(QuotaWindowPresentation.durationLabel(minutes: 90, languageCode: "en"), "90 minutes")
+    }
+
+    func testQW6QW10QW14TodayRetainsDateTimeZeroIsKnownAndLocalesDiffer() {
+        let reset = quotaPresentationDate("2026-08-28T14:59:00Z")
+        let zh = QuotaWindowPresentation.windows(
+            primary: RateLimitWindow(usedPercent: 100, windowDurationMinutes: 1_440, resetsAt: reset),
+            secondary: nil,
+            languageCode: "zh-Hans"
+        )
+        let en = QuotaWindowPresentation.windows(
+            primary: RateLimitWindow(usedPercent: 100, windowDurationMinutes: 1_440, resetsAt: reset),
+            secondary: nil,
+            languageCode: "en"
+        )
+
+        XCTAssertEqual(zh.first?.remainingText, "0%")
+        XCTAssertEqual(zh.first?.displayLabel, "24 小时")
+        XCTAssertEqual(en.first?.displayLabel, "24 hours")
+        XCTAssertEqual(zh.first?.resetDateTime(timeZone: TimeZone(secondsFromGMT: 0)!, languageCode: "zh-Hans"), "8月28日 · 14:59")
+        let englishReset = try! XCTUnwrap(en.first?.resetDateTime(timeZone: TimeZone(secondsFromGMT: 0)!, languageCode: "en"))
+        XCTAssertTrue(englishReset.contains("Aug 28") && englishReset.contains("2:59"))
+    }
+
+    func testQW9MissingAndUnavailableSecondaryDoNotCreatePlaceholder() {
+        let present = RateLimitWindow(usedPercent: 50, windowDurationMinutes: 300, resetsAt: nil)
+        XCTAssertEqual(
+            QuotaWindowPresentation.windows(primary: present, secondary: nil, languageCode: "en").count,
+            1
+        )
+        XCTAssertTrue(
+            QuotaWindowPresentation.windows(
+                primary: present,
+                secondary: RateLimitWindow(usedPercent: 50, windowDurationMinutes: 10_080, resetsAt: nil),
+                secondaryAvailability: .unavailable,
+                languageCode: "en"
+            ).map(\.displayLabel) == ["5 hours"]
+        )
+    }
+
+    func testQuotaWindowPreservesUnknownFieldsWithoutTreatingThemAsZero() {
+        let windows = QuotaWindowPresentation.windows(
+            primary: RateLimitWindow(usedPercent: nil, windowDurationMinutes: 300, resetsAt: nil),
+            secondary: nil,
+            languageCode: "en"
+        )
+        XCTAssertEqual(windows.first?.remainingText, "--")
+        XCTAssertEqual(windows.first?.resetDateTime(languageCode: "en"), "--")
     }
 
     func testSettingsControllerRetainsOneRootForThirtyCloseReopenCycles() {
@@ -1016,6 +1113,7 @@ final class MonitorProductIntegrationTests: XCTestCase {
         XCTAssertEqual(mapped.authMode, "chatgpt")
         XCTAssertEqual(mapped.planType, "pro")
         XCTAssertEqual(mapped.primaryRateLimit?.usedPercent, 70)
+        XCTAssertEqual(mapped.rateLimitWindows.map(\.windowDurationMinutes), [60, 300])
         let resetAt = try XCTUnwrap(mapped.primaryRateLimit?.resetsAt)
         XCTAssertEqual(resetAt.timeIntervalSince1970, 1_725_000_500, accuracy: 0.001)
         XCTAssertGreaterThan(resetAt.timeIntervalSince1970, 1_700_000_000)
@@ -1028,6 +1126,156 @@ final class MonitorProductIntegrationTests: XCTestCase {
         let snapshot = await runtime.snapshot()
         XCTAssertEqual(MonitorDisplayValue.orbQuota(snapshot), "30%")
         XCTAssertEqual(MonitorDisplayValue.todayUsage(snapshot), "45 Token")
+    }
+
+    func testMW1TwoKeyedPrimaryWindowsArePreservedForPresentation() async throws {
+        let limits = authoritativeRateLimits(entries: [
+            (rateLimitJSON(usedPercent: 24, minutes: 300, reset: 1_800_000_000), nil),
+            (rateLimitJSON(usedPercent: 2, minutes: 10_080, reset: 1_800_604_800), nil)
+        ])
+        let mapped = try AccountUsageProvider.snapshot(accountResponse: accountRPC(), rateLimitsResponse: limits, usageResponse: usageRPC(tokens: 1), observedAt: Date())
+        XCTAssertEqual(mapped.rateLimitWindows.map(\.windowDurationMinutes), [300, 10_080])
+
+        let runtime = MonitorRuntimeStore(initialPhase: .live)
+        await runtime.ingest(account: mapped)
+        let windows = QuotaWindowPresentation.windows(from: await runtime.snapshot(), languageCode: "en")
+        XCTAssertEqual(windows.map(\.displayLabel), ["5 hours", "1 week"])
+        XCTAssertEqual(windows.map(\.remainingText), ["76%", "98%"])
+    }
+
+    func testMW2KeyedPrimaryAndSecondaryAreBothPreserved() throws {
+        let limits = authoritativeRateLimits(entries: [
+            (rateLimitJSON(usedPercent: 24, minutes: 300, reset: 1_800_000_000), rateLimitJSON(usedPercent: 2, minutes: 10_080, reset: 1_800_604_800))
+        ])
+        let mapped = try AccountUsageProvider.snapshot(accountResponse: accountRPC(), rateLimitsResponse: limits, usageResponse: usageRPC(tokens: 1), observedAt: Date())
+        XCTAssertEqual(mapped.rateLimitWindows.map(\.windowDurationMinutes), [300, 10_080])
+    }
+
+    func testMW3RootMirrorDeduplicatesAgainstMatchingKeyedWindow() throws {
+        let short = rateLimitJSON(usedPercent: 24, minutes: 300, reset: 1_800_000_000)
+        let week = rateLimitJSON(usedPercent: 2, minutes: 10_080, reset: 1_800_604_800)
+        let limits = authoritativeRateLimits(entries: [(short, week)], root: (short, week))
+        let mapped = try AccountUsageProvider.snapshot(accountResponse: accountRPC(), rateLimitsResponse: limits, usageResponse: usageRPC(tokens: 1), observedAt: Date())
+        XCTAssertEqual(mapped.rateLimitWindows.map(\.windowDurationMinutes), [300, 10_080])
+    }
+
+    func testMW4DifferentKeyedWindowsWithSamePercentageAreNotDeduplicated() throws {
+        let limits = authoritativeRateLimits(entries: [
+            (rateLimitJSON(usedPercent: 50, minutes: 300, reset: 1_800_000_000), nil),
+            (rateLimitJSON(usedPercent: 50, minutes: 10_080, reset: 1_800_604_800), nil)
+        ])
+        let mapped = try AccountUsageProvider.snapshot(accountResponse: accountRPC(), rateLimitsResponse: limits, usageResponse: usageRPC(tokens: 1), observedAt: Date())
+        XCTAssertEqual(mapped.rateLimitWindows.count, 2)
+        XCTAssertEqual(mapped.rateLimitWindows.map(\.windowDurationMinutes), [300, 10_080])
+    }
+
+    func testMW5TransientRefreshRetainsWholeWindowCollectionAndMW6AuthoritativeRemovalReplacesIt() async throws {
+        let both = AccountUsageProvider.assemble(
+            account: .success(accountRPC()),
+            rateLimits: .success(authoritativeRateLimits(entries: [
+                (rateLimitJSON(usedPercent: 24, minutes: 300, reset: 1_800_000_000), nil),
+                (rateLimitJSON(usedPercent: 2, minutes: 10_080, reset: 1_800_604_800), nil)
+            ])),
+            usage: .success(usageRPC(tokens: 1)),
+            observedAt: Date()
+        )
+        let weeklyOnly = AccountUsageProvider.assemble(
+            account: .success(accountRPC()),
+            rateLimits: .success(authoritativeRateLimits(entries: [
+                (rateLimitJSON(usedPercent: 2, minutes: 10_080, reset: 1_800_604_800), nil)
+            ])),
+            usage: .success(usageRPC(tokens: 2)),
+            observedAt: Date().addingTimeInterval(60)
+        )
+        let cycles = AccountRefreshCycleSequence([
+            .connected(both),
+            .connectionFailure(.wholeConnectionFailure(JSONRPCTransportError.requestTimedOut)),
+            .connected(weeklyOnly)
+        ])
+        let runtime = MonitorRuntimeStore(initialPhase: .live)
+        let provider = AccountUsageProvider(runtime: runtime, refreshCycle: { await cycles.next() })
+
+        await provider.refreshOnce()
+        await provider.refreshOnce()
+        let retained = await runtime.snapshot()
+        XCTAssertEqual(QuotaWindowPresentation.windows(from: retained, languageCode: "en").map(\.displayLabel), ["5 hours", "1 week"])
+
+        await provider.refreshOnce()
+        let replacement = await runtime.snapshot()
+        XCTAssertEqual(QuotaWindowPresentation.windows(from: replacement, languageCode: "en").map(\.displayLabel), ["1 week"])
+    }
+
+    func testMW7MW8MW9ZeroOwnResetAndShortToLongPresentation() {
+        let windows = QuotaWindowPresentation.windows([
+            RateLimitWindow(usedPercent: 0, windowDurationMinutes: 43_200, resetsAt: quotaPresentationDate("2026-09-28T10:00:00Z")),
+            RateLimitWindow(usedPercent: 100, windowDurationMinutes: 300, resetsAt: quotaPresentationDate("2026-08-28T14:59:00Z")),
+            RateLimitWindow(usedPercent: 2, windowDurationMinutes: 10_080, resetsAt: quotaPresentationDate("2026-09-04T14:59:00Z"))
+        ], languageCode: "zh-Hans")
+        XCTAssertEqual(windows.map(\.displayLabel), ["5 小时", "1 周", "1 月"])
+        XCTAssertEqual(windows.map(\.remainingText), ["0%", "98%", "100%"])
+        XCTAssertEqual(windows[0].resetDateTime(timeZone: TimeZone(secondsFromGMT: 0)!, languageCode: "zh-Hans"), "8月28日 · 14:59")
+        XCTAssertEqual(windows[1].resetDateTime(timeZone: TimeZone(secondsFromGMT: 0)!, languageCode: "zh-Hans"), "9月4日 · 14:59")
+        XCTAssertEqual(windows[2].resetDateTime(timeZone: TimeZone(secondsFromGMT: 0)!, languageCode: "zh-Hans"), "9月28日 · 10:00")
+    }
+
+    func testO1O2O3O4OrbUsesShortestWindowWhileWarningUsesMostRestrictedWindow() async {
+        let shortReset = quotaPresentationDate("2026-08-28T14:59:00Z")
+        let weekReset = quotaPresentationDate("2026-09-04T09:59:00Z")
+
+        let fullShort = RateLimitWindow(usedPercent: 0, windowDurationMinutes: 300, resetsAt: shortReset)
+        let weekAtEleven = RateLimitWindow(usedPercent: 11, windowDurationMinutes: 10_080, resetsAt: weekReset)
+        let o1 = await quotaSnapshot(primary: fullShort, secondary: weekAtEleven, windows: [fullShort, weekAtEleven])
+        XCTAssertEqual(MonitorDisplayValue.orbQuota(o1), "100%")
+
+        let shortAtTwenty = RateLimitWindow(usedPercent: 80, windowDurationMinutes: 300, resetsAt: shortReset)
+        let weekAtNinety = RateLimitWindow(usedPercent: 10, windowDurationMinutes: 10_080, resetsAt: weekReset)
+        let o2 = await quotaSnapshot(primary: shortAtTwenty, secondary: weekAtNinety, windows: [shortAtTwenty, weekAtNinety])
+        XCTAssertEqual(MonitorDisplayValue.orbQuota(o2), "20%")
+
+        let weekAtTen = RateLimitWindow(usedPercent: 90, windowDurationMinutes: 10_080, resetsAt: weekReset)
+        let o3 = await quotaSnapshot(primary: fullShort, secondary: weekAtTen, windows: [fullShort, weekAtTen])
+        XCTAssertEqual(MonitorDisplayValue.orbQuota(o3), "100%")
+        XCTAssertEqual(QuotaCapsuleHealth.resolve(snapshot: o3, warningEnabled: true, threshold: 20), .warning)
+
+        let shortAtNinety = RateLimitWindow(usedPercent: 10, windowDurationMinutes: 300, resetsAt: shortReset)
+        let weekAtThree = RateLimitWindow(usedPercent: 97, windowDurationMinutes: 10_080, resetsAt: weekReset)
+        let o4 = await quotaSnapshot(primary: shortAtNinety, secondary: weekAtThree, windows: [shortAtNinety, weekAtThree])
+        XCTAssertEqual(MonitorDisplayValue.orbQuota(o4), "90%")
+        XCTAssertEqual(QuotaCapsuleHealth.resolve(snapshot: o4, warningEnabled: true, threshold: 20), .warning)
+    }
+
+    func testO5O6O7ShortestDurationOrbSelectionHandlesSingleLongWindowOrderAndUnknown() async {
+        let shortReset = quotaPresentationDate("2026-08-28T14:59:00Z")
+        let weekReset = quotaPresentationDate("2026-09-04T09:59:00Z")
+        let monthReset = quotaPresentationDate("2026-09-28T09:59:00Z")
+        let weekly = RateLimitWindow(usedPercent: 11, windowDurationMinutes: 10_080, resetsAt: weekReset)
+        let onlyWeekly = await quotaSnapshot(primary: weekly, secondary: nil, windows: [weekly])
+        XCTAssertEqual(MonitorDisplayValue.orbQuota(onlyWeekly), "89%")
+
+        let day = RateLimitWindow(usedPercent: 31, windowDurationMinutes: 1_440, resetsAt: shortReset)
+        let month = RateLimitWindow(usedPercent: 1, windowDurationMinutes: 43_200, resetsAt: monthReset)
+        let reordered = await quotaSnapshot(primary: weekly, secondary: month, windows: [month, weekly, day])
+        XCTAssertEqual(MonitorDisplayValue.orbQuota(reordered), "69%")
+
+        let unknownShort = RateLimitWindow(usedPercent: nil, windowDurationMinutes: 300, resetsAt: shortReset)
+        let unknown = await quotaSnapshot(primary: unknownShort, secondary: weekly, windows: [weekly, unknownShort])
+        XCTAssertEqual(MonitorDisplayValue.orbQuota(unknown), "--")
+        XCTAssertEqual(QuotaWindowPresentation.orbHeadlineWindow(from: unknown), unknownShort)
+    }
+
+    func testO8O9PopoverAndQuickViewKeepEveryWindowAndOwnResetAfterOrbSelectionChanges() async {
+        let shortReset = quotaPresentationDate("2026-08-28T14:59:00Z")
+        let weekReset = quotaPresentationDate("2026-09-04T09:59:00Z")
+        let short = RateLimitWindow(usedPercent: 0, windowDurationMinutes: 300, resetsAt: shortReset)
+        let weekly = RateLimitWindow(usedPercent: 11, windowDurationMinutes: 10_080, resetsAt: weekReset)
+        let snapshot = await quotaSnapshot(primary: short, secondary: weekly, windows: [weekly, short])
+        let windows = QuotaWindowPresentation.windows(from: snapshot, languageCode: "en")
+
+        XCTAssertEqual(windows.map(\.remainingText), ["100%", "89%"])
+        let resetTexts = windows.map { $0.resetDateTime(timeZone: TimeZone(secondsFromGMT: 0)!, languageCode: "en") }
+        XCTAssertTrue(resetTexts[0].contains("Aug 28") && resetTexts[0].contains("2:59"))
+        XCTAssertTrue(resetTexts[1].contains("Sep 4") && resetTexts[1].contains("9:59"))
+        XCTAssertEqual(windows.map { $0.quickViewLine(timeZone: TimeZone(secondsFromGMT: 0)!, languageCode: "en") }.count, 2)
     }
 
     func testPartialAuthoritativeRefreshLetsUsageFailureDegradeOnlyUsage() async throws {
@@ -1882,6 +2130,35 @@ final class MonitorProductIntegrationTests: XCTestCase {
         ])
     }
 
+    private func rateLimitJSON(usedPercent: Double, minutes: Int, reset: Double) -> JSONValue {
+        .object([
+            "usedPercent": .number(usedPercent),
+            "windowDurationMins": .number(Double(minutes)),
+            "resetsAt": .number(reset)
+        ])
+    }
+
+    private func authoritativeRateLimits(
+        entries: [(JSONValue?, JSONValue?)],
+        root: (JSONValue?, JSONValue?)? = nil
+    ) -> JSONValue {
+        var keyed: [String: JSONValue] = [:]
+        for (index, entry) in entries.enumerated() {
+            var value: [String: JSONValue] = [:]
+            if let primary = entry.0 { value["primary"] = primary }
+            if let secondary = entry.1 { value["secondary"] = secondary }
+            keyed["limit-\(index)"] = .object(value)
+        }
+        var response: [String: JSONValue] = ["rateLimitsByLimitId": .object(keyed)]
+        if let root {
+            var value: [String: JSONValue] = [:]
+            if let primary = root.0 { value["primary"] = primary }
+            if let secondary = root.1 { value["secondary"] = secondary }
+            response["rateLimits"] = .object(value)
+        }
+        return .object(response)
+    }
+
     private func usageRPC(tokens: Int) -> JSONValue {
         let formatter = DateFormatter()
         formatter.calendar = .autoupdatingCurrent
@@ -1902,7 +2179,12 @@ final class MonitorProductIntegrationTests: XCTestCase {
         )
     }
 
-    private func quotaSnapshot(primary: RateLimitWindow, secondary: RateLimitWindow?) async -> MonitorRuntimeSnapshot {
+    private func quotaPresentationDate(_ value: String) -> Date {
+        let formatter = ISO8601DateFormatter()
+        return try! XCTUnwrap(formatter.date(from: value))
+    }
+
+    private func quotaSnapshot(primary: RateLimitWindow, secondary: RateLimitWindow?, windows: [RateLimitWindow] = []) async -> MonitorRuntimeSnapshot {
         let now = Date(timeIntervalSince1970: 1_900_000_000)
         let provenance = Provenance(
             sourceID: SourceID("quota-presentation")!, sourceKind: .account,
@@ -1913,7 +2195,7 @@ final class MonitorProductIntegrationTests: XCTestCase {
             evidence: EvidenceMetadata(evidenceRun: "test", cliVersion: "test", historicalTransportEvidenceLabel: "test", probeOrHarnessAvailability: "test", sanitizerAvailability: "test", sanitizerVersion: "test", confidence: "test", limitations: "test"),
             origin: .adapter
         )!
-        let account = AccountSnapshot(provenance: provenance, primaryRateLimit: primary, secondaryRateLimit: secondary)!
+        let account = AccountSnapshot(provenance: provenance, primaryRateLimit: primary, secondaryRateLimit: secondary, rateLimitWindows: windows)!
         let runtime = MonitorRuntimeStore(
             accountCapabilities: .init(secondaryQuota: .snapshot),
             initialPhase: .live
