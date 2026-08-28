@@ -448,8 +448,10 @@ enum MonitorDisplayValue {
     }
 
     static func orbQuota(_ snapshot: MonitorRuntimeSnapshot?) -> String {
-        let value = remainingQuota(snapshot)
-        return value.hasSuffix("%") ? value : "--"
+        guard let remaining = QuotaWindowPresentation.orbHeadlineRemainingPercent(from: snapshot) else {
+            return "--"
+        }
+        return String(format: "%.0f%%", remaining)
     }
 
     static func reset(_ snapshot: MonitorRuntimeSnapshot?) -> String {

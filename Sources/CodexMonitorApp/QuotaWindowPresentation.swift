@@ -70,6 +70,51 @@ struct QuotaWindowPresentation: Equatable, Identifiable {
         )
     }
 
+    /// The Orb reports the shortest authoritative usage period, not the
+    /// window with the least remaining allowance. A missing remaining value
+    /// on that shortest period remains unknown; it must not silently turn the
+    /// Orb into a value for a longer period.
+    static func orbHeadlineRemainingPercent(from snapshot: MonitorRuntimeSnapshot?) -> Double? {
+        guard let window = orbHeadlineWindow(from: snapshot),
+              let used = window.usedPercent else {
+            return nil
+        }
+        return min(max(100 - used, 0), 100)
+    }
+
+    static func orbHeadlineWindow(from snapshot: MonitorRuntimeSnapshot?) -> RateLimitWindow? {
+        guard let quota = snapshot?.quota else { return nil }
+
+        let candidates: [RateLimitWindow]
+        if quota.windowsAvailability == .available, !quota.windows.isEmpty {
+            candidates = quota.windows
+        } else {
+            // Compatibility fallback for snapshots created before the
+            // canonical collection existed. Production snapshots use the
+            // authoritative collection above.
+            candidates = [
+                quota.primaryAvailability == .available ? quota.primary : nil,
+                quota.secondaryAvailability == .available ? quota.secondary : nil
+            ].compactMap { $0 }
+        }
+
+        let durationCandidates = candidates.filter { ($0.windowDurationMinutes ?? 0) > 0 }
+        guard !durationCandidates.isEmpty else {
+            // Older synthetic snapshots did not carry a duration. Retain
+            // their primary-first behavior without inventing a plan mapping.
+            return candidates.first
+        }
+        return durationCandidates.min { lhs, rhs in
+            let lhsDuration = lhs.windowDurationMinutes ?? .max
+            let rhsDuration = rhs.windowDurationMinutes ?? .max
+            if lhsDuration != rhsDuration { return lhsDuration < rhsDuration }
+            let lhsReset = lhs.resetsAt?.timeIntervalSince1970 ?? .greatestFiniteMagnitude
+            let rhsReset = rhs.resetsAt?.timeIntervalSince1970 ?? .greatestFiniteMagnitude
+            if lhsReset != rhsReset { return lhsReset < rhsReset }
+            return (lhs.usedPercent ?? .greatestFiniteMagnitude) < (rhs.usedPercent ?? .greatestFiniteMagnitude)
+        }
+    }
+
     static func windows(
         primary: RateLimitWindow?,
         primaryAvailability: MonitorDataAvailability = .available,
