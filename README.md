@@ -3,7 +3,7 @@
 
 一个原生 macOS Codex 辅助工具，通过菜单栏状态胶囊、桌面悬浮球、Quick View、用量和设置等界面，为 Codex 提供轻量、快速、低打扰的桌面辅助体验。
 
-> **当前版本：Codex Monitor 1.0.3 Preview**
+> **当前版本：Codex Monitor 1.0.4 Preview**
 >
 > Codex Monitor 当前为 Preview，不是 Stable Public Release，也不是 OpenAI 官方产品。部分能力依赖 Codex 的本地接口与本地数据结构，Codex 更新可能暂时影响个别能力；当数据源不可用时，应用会优先显示 Unknown / Unavailable，而不是伪造状态。
 
@@ -13,10 +13,10 @@
 
 ### macOS · Apple Silicon
 
-[![下载 Codex Monitor 1.0.3 Preview](https://img.shields.io/badge/下载-1.0.3%20Preview-black?style=for-the-badge&logo=apple)](https://github.com/BlahBlahBlahBB/Codex-Monitor/releases/download/v1.0.3-preview/Codex-Monitor-1.0.3-RC2-macOS-arm64.dmg)
+[![下载 Codex Monitor 1.0.4 Preview](https://img.shields.io/badge/下载-1.0.4%20Preview-black?style=for-the-badge&logo=apple)](https://github.com/BlahBlahBlahBB/Codex-Monitor/releases/download/v1.0.4-preview/Codex-Monitor-1.0.4-RC3-macOS-arm64.dmg)
 
-- [查看 v1.0.3-preview Release](https://github.com/BlahBlahBlahBB/Codex-Monitor/releases/tag/v1.0.3-preview)
-- DMG SHA256：`5b7dc48bda1ee8380c04f937e43a31c9a83d978dd45866b90814686afe4e8e19`
+- [查看 v1.0.4-preview Release](https://github.com/BlahBlahBlahBB/Codex-Monitor/releases/tag/v1.0.4-preview)
+- DMG SHA256：`2f060bd0df1b32bbc64988b35a851cd56a69d14e5f71f0d6a757b20bc73ad1d2`
 
 > 当前 Preview 为 **arm64 / Apple Silicon only**，采用 ad-hoc 签名，尚未使用 Developer ID、Apple Notarization 或 Stapling。macOS Gatekeeper 可能阻止或警告该 Preview 包；它目前用于 Preview / testing，而不是无警告的正式公开发行。
 
@@ -26,7 +26,7 @@
 
 ### 首次安装
 
-1. 下载 `Codex-Monitor-1.0.3-RC2-macOS-arm64.dmg`
+1. 下载 `Codex-Monitor-1.0.4-RC3-macOS-arm64.dmg`
 2. 打开 DMG
 3. 将 `Codex Monitor.app` 拖入 `/Applications`
 4. 从“应用程序”启动 Codex Monitor
@@ -45,19 +45,16 @@
 
 <br>
 
-## ✨ 1.0.3 Preview 重点更新
+## ✨ 1.0.4 Preview 重点更新
 
-- 在 1.0.2 Golden 产品表现基础上增加 Universal Compatibility Layer，UI、Settings、Usage、Orb 与窗口行为保持不变
-- Account / Quota 支持不同 Codex Desktop 本地 transport：优先使用 control socket，不可用时自动回退到受信任的 bundled Codex app-server stdio
-- 单次 Account refresh 保持单一 transport provenance，不混合 socket / stdio 数据
-- transient 或 incomplete refresh 不再把已有完整 Quota 快照短暂替换为 `-- / 不可用`
-- Codex 退出并重新打开后，历史 runtime activity 不再错误恢复为 Thinking / Working
-- stale conversation title 无法重新验证时回退到既有 `Current task / 当前任务`，不使用 transcript / prompt / path 正文作为标题
-- macOS 通知权限按 `notDetermined / authorized / denied` 系统状态进行一致性处理，不改变原有通知 UX
+- 显示当前账户返回的全部 authoritative Codex quota windows，分别保留剩余额度与完整重置日期/时间
+- Popover 与 Quick View 同时展示短、长周期 quota，不硬编码 ChatGPT plan 名称
+- Orb headline 选择周期最短的 authoritative window；quota warning 继续基于最受限的 window
+- transient 或 incomplete refresh 期间保持 coherent、完整的 quota snapshot
+- 延续 1.0.3 的 Universal Account transport、runtime-state、task-title 与 notification 行为
 - Release build 继续锁定已验证的 macOS SDK 26.5、macOS 13.0 minimum deployment target 与可移植 RPATH
-- 同一个 1.0.3 RC2 二进制已在三台独立 Mac 上验证通过
 
-自动化回归：**285 tests / 4 expected skips / 0 failures**。
+自动化回归：**300 tests / 4 expected skips / 0 failures**。
 
 <br>
 
@@ -152,13 +149,13 @@ Codex Monitor 不会用推测值替代未知值；例如 Quota 无法确认时�
 
 ## ⚠️ Preview 数据源说明
 
-Codex Monitor 1.0.3 Preview 当前会读取本机 Codex 的本地集成数据面。
+Codex Monitor 1.0.4 Preview 当前会读取本机 Codex 的本地集成数据面。
 
 其中部分 Account 能力使用 Codex app-server 的本地 transport；Desktop runtime / session observation 也依赖 Codex 的本地 SQLite / rollout 等实现细节，这些本地 schema 目前没有稳定 public contract。
 
 因此：
 
-- 1.0.3 定位为 **Preview-only**
+- 1.0.4 定位为 **Preview-only**
 - Codex 更新可能暂时影响某个单独 capability
 - capability 缺失时应用应安全降级
 - 当前不应被描述为 stable production-supported Codex integration
@@ -201,7 +198,7 @@ swift test
 Preview release packaging：
 
 ```bash
-VERSION=1.0.3 BUILD=103 ./Tools/package_release.sh
+VERSION=1.0.4 BUILD=104 ./Tools/package_release.sh
 ```
 
 在未提供 `SIGNING_IDENTITY` 时，脚本生成明确标记的 ad-hoc local Preview；Developer ID / notarization 流程当前尚未启用。
@@ -210,11 +207,11 @@ VERSION=1.0.3 BUILD=103 ./Tools/package_release.sh
 
 ## 📌 Release scope
 
-Codex Monitor 1.0.3 Preview 当前验证范围：
+Codex Monitor 1.0.4 Preview 当前验证范围：
 
 - macOS 13+
 - Apple Silicon / arm64
 - 中文 / English
 - 不同 HOME / username，包括空格与 Unicode
 - 不同 Codex Desktop 本地 Account transport topology
-- 同一 RC2 二进制已在 Computer A、Computer B 与第三台独立 Mac 上完成验证
+- 同一 RC3 二进制已在 Computer A 上完成 multi-window quota 验证
