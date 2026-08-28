@@ -47,9 +47,14 @@ final class FloatingStatusPanelController: NSObject, ObservableObject, NSWindowD
         guard let panel, let preferences else { return }
 
         let screen = panel.screen?.visibleFrame ?? NSScreen.main?.visibleFrame ?? .zero
+        let quotaWindowCount = QuotaWindowPresentation.windows(from: model.snapshot).count
+        let desiredSize = CGSize(
+            width: FloatingOrbSurfaceConfiguration.quickViewSize.width,
+            height: QuotaWindowPresentation.quickViewHeight(for: quotaWindowCount)
+        )
         let frame = FloatingPanelLayout.quickViewFrame(
             orbFrame: visibleOrbFrame(for: panel),
-            desiredSize: FloatingOrbSurfaceConfiguration.quickViewSize,
+            desiredSize: desiredSize,
             visibleFrame: screen
         )
         if let quickView {
@@ -308,6 +313,7 @@ private struct QuickView: View {
     var body: some View {
         let snapshot = model.snapshot
         let presentation = model.presentation(using: preferences)
+        let quotaWindows = QuotaWindowPresentation.windows(from: snapshot)
         GlassSurface(cornerRadius: 18, shadow: false) {
             VStack(alignment: .leading, spacing: 0) {
                 HStack(alignment: .firstTextBaseline, spacing: 7) {
@@ -341,23 +347,25 @@ private struct QuickView: View {
                     .font(.system(size: 11, weight: .medium))
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
-                Text(String(format: L10n.tr("session.tokenQuota"), MonitorDisplayValue.token(snapshot), MonitorDisplayValue.orbQuota(snapshot)))
+                Text("\(L10n.tr("label.sessionToken"))  \(MonitorDisplayValue.token(snapshot))")
                     .font(.system(size: 11, weight: .semibold))
                     .foregroundStyle(.secondary)
                     .monospacedDigit()
                     .lineLimit(1)
                     .padding(.top, 5)
-                Text("\(L10n.tr("label.quotaReset"))  \(MonitorDisplayValue.quotaResetDate(snapshot))")
-                    .font(.system(size: 11))
-                    .foregroundStyle(.secondary)
-                    .monospacedDigit()
-                    .lineLimit(1)
-                    .padding(.top, 5)
+                ForEach(quotaWindows) { window in
+                    Text(window.quickViewLine())
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                        .monospacedDigit()
+                        .lineLimit(1)
+                        .padding(.top, 5)
+                }
             }
             .padding(.horizontal, 14)
             .padding(.vertical, 14)
         }
-        .frame(width: 350, height: 214)
+        .frame(width: 350, height: QuotaWindowPresentation.quickViewHeight(for: quotaWindows.count))
         .accessibilityElement(children: .combine)
         .accessibilityLabel(String(format: L10n.tr("accessibility.quickView"), MonitorDisplayValue.state(presentation), MonitorDisplayValue.activity(snapshot)))
     }

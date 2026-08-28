@@ -613,6 +613,100 @@ final class MonitorProductIntegrationTests: XCTestCase {
         XCTAssertEqual(MonitorDisplayValue.quotaResetDate(snapshot, languageCode: "en"), "--")
     }
 
+    func testQW1PrimaryFiveHourWindowBuildsTwoDisplayRowsWithFullResetDateTime() {
+        let reset = quotaPresentationDate("2026-08-28T14:59:00Z")
+        let windows = QuotaWindowPresentation.windows(
+            primary: RateLimitWindow(usedPercent: 11, windowDurationMinutes: 300, resetsAt: reset),
+            secondary: nil,
+            languageCode: "zh-Hans"
+        )
+
+        let window = try! XCTUnwrap(windows.first)
+        XCTAssertEqual(windows.count, 1)
+        XCTAssertEqual(window.quotaRowLabel, "5 小时额度")
+        XCTAssertEqual(window.resetRowLabel, "5 小时重置")
+        XCTAssertEqual(window.remainingText, "89%")
+        XCTAssertEqual(window.resetDateTime(timeZone: TimeZone(secondsFromGMT: 0)!, languageCode: "zh-Hans"), "8月28日 · 14:59")
+    }
+
+    func testQW2QW3QW7QW8NormalizeAndSortOnlyAuthoritativeWindows() {
+        let shortReset = quotaPresentationDate("2026-08-28T14:59:00Z")
+        let weekReset = quotaPresentationDate("2026-09-04T14:59:00Z")
+        let windows = QuotaWindowPresentation.windows(
+            primary: RateLimitWindow(usedPercent: 11, windowDurationMinutes: 300, resetsAt: shortReset),
+            secondary: RateLimitWindow(usedPercent: 2, windowDurationMinutes: 10_080, resetsAt: weekReset),
+            languageCode: "en"
+        )
+
+        XCTAssertEqual(windows.map(\.displayLabel), ["5 hours", "1 week"])
+        XCTAssertEqual(windows.map(\.remainingText), ["89%", "98%"])
+        let resetTexts = windows.map { $0.resetDateTime(timeZone: TimeZone(secondsFromGMT: 0)!, languageCode: "en") }
+        XCTAssertTrue(resetTexts[0].contains("Aug 28") && resetTexts[0].contains("2:59"))
+        XCTAssertTrue(resetTexts[1].contains("Sep 4") && resetTexts[1].contains("2:59"))
+
+        let weeklyOnly = QuotaWindowPresentation.windows(
+            primary: RateLimitWindow(usedPercent: 2, windowDurationMinutes: 10_080, resetsAt: weekReset),
+            secondary: nil,
+            languageCode: "en"
+        )
+        XCTAssertEqual(weeklyOnly.map(\.displayLabel), ["1 week"])
+    }
+
+    func testQW4QW5DurationLabelsUseAuthoritativeDurationWithoutPlanInference() {
+        XCTAssertEqual(QuotaWindowPresentation.durationLabel(minutes: 43_200, languageCode: "zh-Hans"), "1 月")
+        XCTAssertEqual(QuotaWindowPresentation.durationLabel(minutes: 43_200, languageCode: "en"), "1 month")
+        XCTAssertEqual(QuotaWindowPresentation.durationLabel(minutes: 4_320, languageCode: "zh-Hans"), "3 天")
+        XCTAssertEqual(QuotaWindowPresentation.durationLabel(minutes: 4_320, languageCode: "en"), "3 days")
+        XCTAssertEqual(QuotaWindowPresentation.durationLabel(minutes: 90, languageCode: "en"), "90 minutes")
+    }
+
+    func testQW6QW10QW14TodayRetainsDateTimeZeroIsKnownAndLocalesDiffer() {
+        let reset = quotaPresentationDate("2026-08-28T14:59:00Z")
+        let zh = QuotaWindowPresentation.windows(
+            primary: RateLimitWindow(usedPercent: 100, windowDurationMinutes: 1_440, resetsAt: reset),
+            secondary: nil,
+            languageCode: "zh-Hans"
+        )
+        let en = QuotaWindowPresentation.windows(
+            primary: RateLimitWindow(usedPercent: 100, windowDurationMinutes: 1_440, resetsAt: reset),
+            secondary: nil,
+            languageCode: "en"
+        )
+
+        XCTAssertEqual(zh.first?.remainingText, "0%")
+        XCTAssertEqual(zh.first?.displayLabel, "24 小时")
+        XCTAssertEqual(en.first?.displayLabel, "24 hours")
+        XCTAssertEqual(zh.first?.resetDateTime(timeZone: TimeZone(secondsFromGMT: 0)!, languageCode: "zh-Hans"), "8月28日 · 14:59")
+        let englishReset = try! XCTUnwrap(en.first?.resetDateTime(timeZone: TimeZone(secondsFromGMT: 0)!, languageCode: "en"))
+        XCTAssertTrue(englishReset.contains("Aug 28") && englishReset.contains("2:59"))
+    }
+
+    func testQW9MissingAndUnavailableSecondaryDoNotCreatePlaceholder() {
+        let present = RateLimitWindow(usedPercent: 50, windowDurationMinutes: 300, resetsAt: nil)
+        XCTAssertEqual(
+            QuotaWindowPresentation.windows(primary: present, secondary: nil, languageCode: "en").count,
+            1
+        )
+        XCTAssertTrue(
+            QuotaWindowPresentation.windows(
+                primary: present,
+                secondary: RateLimitWindow(usedPercent: 50, windowDurationMinutes: 10_080, resetsAt: nil),
+                secondaryAvailability: .unavailable,
+                languageCode: "en"
+            ).map(\.displayLabel) == ["5 hours"]
+        )
+    }
+
+    func testQuotaWindowPreservesUnknownFieldsWithoutTreatingThemAsZero() {
+        let windows = QuotaWindowPresentation.windows(
+            primary: RateLimitWindow(usedPercent: nil, windowDurationMinutes: 300, resetsAt: nil),
+            secondary: nil,
+            languageCode: "en"
+        )
+        XCTAssertEqual(windows.first?.remainingText, "--")
+        XCTAssertEqual(windows.first?.resetDateTime(languageCode: "en"), "--")
+    }
+
     func testSettingsControllerRetainsOneRootForThirtyCloseReopenCycles() {
         let suite = "CodexMonitorTests.settings.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suite)!
@@ -1900,6 +1994,11 @@ final class MonitorProductIntegrationTests: XCTestCase {
         SettingsSystemActions(
             refresh: {}, openCodex: {}, openLogsFolder: {}, setMonitoringPaused: { _ in }, requestNotificationPermission: { _ in }, exportDiagnostics: {}, loginItem: LoginItemController(), showDiagnostics: {}
         )
+    }
+
+    private func quotaPresentationDate(_ value: String) -> Date {
+        let formatter = ISO8601DateFormatter()
+        return try! XCTUnwrap(formatter.date(from: value))
     }
 
     private func quotaSnapshot(primary: RateLimitWindow, secondary: RateLimitWindow?) async -> MonitorRuntimeSnapshot {
