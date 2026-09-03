@@ -572,7 +572,7 @@ enum UsagePresentation {
 }
 
 enum SettingsSection: CaseIterable, Identifiable {
-    case general, floating, notifications, privacy, advanced, about
+    case general, floating, notifications, privacy, advanced, maintenance, about
     var id: Self { self }
     var title: String {
         switch self {
@@ -581,6 +581,7 @@ enum SettingsSection: CaseIterable, Identifiable {
         case .notifications: L10n.tr("settings.notifications")
         case .privacy: L10n.tr("settings.privacy")
         case .advanced: L10n.tr("settings.advanced")
+        case .maintenance: L10n.tr("settings.maintenance")
         case .about: L10n.tr("settings.about")
         }
     }
@@ -591,6 +592,7 @@ enum SettingsSection: CaseIterable, Identifiable {
         case .notifications: "bell"
         case .privacy: "hand.raised"
         case .advanced: "slider.horizontal.3"
+        case .maintenance: "wrench.and.screwdriver"
         case .about: "info.circle"
         }
     }
@@ -602,13 +604,14 @@ final class SettingsPresentationModel: ObservableObject {
     @Published var selection: SettingsSection = .defaultSection
 }
 
+@MainActor
 struct SettingsSystemActions {
     let refresh: () -> Void
     let openCodex: () -> Void
     let openLogsFolder: () -> Void
     let setMonitoringPaused: (Bool) -> Void
     let requestNotificationPermission: (NotificationPreference) -> Void
-    let exportDiagnostics: () -> Void
+    let exportDiagnostics: (@escaping @MainActor (Result<URL, DiagnosticsExportFailure>) -> Void) -> Void
     let loginItem: LoginItemController
     let showDiagnostics: () -> Void
 }
@@ -651,6 +654,8 @@ struct NativeSettingsWindowView: View {
             PrivacySettingsDetail(preferences: preferences)
         case .advanced:
             AdvancedSettingsDetail(preferences: preferences, actions: actions)
+        case .maintenance:
+            MaintenanceSettingsDetail(actions: actions)
         case .about:
             AboutSettingsDetail()
         }
@@ -883,6 +888,58 @@ private struct AdvancedSettingsDetail: View {
             SettingsRow(title: L10n.tr("settings.openLogsFolder")) { Button(L10n.tr("settings.openLogsFolder"), action: actions.openLogsFolder).buttonStyle(.bordered) }
             SettingsRow(title: L10n.tr("settings.openDiagnostics")) { Button(L10n.tr("settings.openDiagnostics"), action: actions.showDiagnostics).buttonStyle(.bordered) }
 #endif
+        }
+    }
+}
+
+private struct MaintenanceSettingsDetail: View {
+    let actions: SettingsSystemActions
+    @State private var exportState: ExportState = .idle
+
+    var body: some View {
+        SettingsDetail(title: L10n.tr("settings.maintenance")) {
+            SettingsRow(title: L10n.tr("settings.exportDiagnostics")) {
+                Button(L10n.tr("settings.exportDiagnostics")) {
+                    exportState = .exporting
+                    actions.exportDiagnostics { result in
+                        exportState = switch result {
+                        case .success: .success
+                        case .failure(let failure): .failure(failure)
+                        }
+                    }
+                }
+                .buttonStyle(.bordered)
+                .disabled(exportState == .exporting)
+            }
+            if let message = exportState.message {
+                Text(message)
+                    .font(.system(size: 12))
+                    .foregroundStyle(exportState.isFailure ? .red : .secondary)
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 10)
+            }
+        }
+    }
+
+    private enum ExportState: Equatable {
+        case idle, exporting, success, failure(DiagnosticsExportFailure)
+
+        var isFailure: Bool {
+            if case .failure = self { return true }
+            return false
+        }
+
+        var message: String? {
+            switch self {
+            case .idle: nil
+            case .exporting: L10n.tr("settings.diagnosticsExporting")
+            case .success: L10n.tr("settings.diagnosticsExported")
+            case .failure(let failure):
+                switch failure {
+                case .downloadsUnavailable: L10n.tr("settings.diagnosticsDownloadsUnavailable")
+                case .writeFailed, .noAvailableFilename: L10n.tr("settings.diagnosticsExportFailed")
+                }
+            }
         }
     }
 }
