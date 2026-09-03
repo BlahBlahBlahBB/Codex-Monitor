@@ -3,7 +3,7 @@
 
 一个原生 macOS Codex 辅助工具，通过菜单栏状态胶囊、桌面悬浮球、Quick View、用量和设置等界面，为 Codex 提供轻量、快速、低打扰的桌面辅助体验。
 
-> **当前版本：Codex Monitor 1.0.4 Preview**
+> **当前版本：Codex Monitor 1.0.5 Preview**
 >
 > Codex Monitor 当前为 Preview，不是 Stable Public Release，也不是 OpenAI 官方产品。部分能力依赖 Codex 的本地接口与本地数据结构，Codex 更新可能暂时影响个别能力；当数据源不可用时，应用会优先显示 Unknown / Unavailable，而不是伪造状态。
 
@@ -13,10 +13,10 @@
 
 ### macOS · Apple Silicon
 
-[![下载 Codex Monitor 1.0.4 Preview](https://img.shields.io/badge/下载-1.0.4%20Preview-black?style=for-the-badge&logo=apple)](https://github.com/BlahBlahBlahBB/Codex-Monitor/releases/download/v1.0.4-preview/Codex-Monitor-1.0.4-RC3-macOS-arm64.dmg)
+[![下载 Codex Monitor 1.0.5 Preview](https://img.shields.io/badge/下载-1.0.5%20Preview-black?style=for-the-badge&logo=apple)](https://github.com/BlahBlahBlahBB/Codex-Monitor/releases/download/v1.0.5-preview/Codex-Monitor-1.0.5-Preview-macOS-arm64.dmg)
 
-- [查看 v1.0.4-preview Release](https://github.com/BlahBlahBlahBB/Codex-Monitor/releases/tag/v1.0.4-preview)
-- DMG SHA256：`2f060bd0df1b32bbc64988b35a851cd56a69d14e5f71f0d6a757b20bc73ad1d2`
+- [查看 v1.0.5-preview Release](https://github.com/BlahBlahBlahBB/Codex-Monitor/releases/tag/v1.0.5-preview)
+- DMG SHA256：`f9adc92defdbb95f3de6805593bf782e7436aa3b831402358df5b4b1faf606fc`
 
 > 当前 Preview 为 **arm64 / Apple Silicon only**，采用 ad-hoc 签名，尚未使用 Developer ID、Apple Notarization 或 Stapling。macOS Gatekeeper 可能阻止或警告该 Preview 包；它目前用于 Preview / testing，而不是无警告的正式公开发行。
 
@@ -26,7 +26,7 @@
 
 ### 首次安装
 
-1. 下载 `Codex-Monitor-1.0.4-RC3-macOS-arm64.dmg`
+1. 下载 `Codex-Monitor-1.0.5-Preview-macOS-arm64.dmg`
 2. 打开 DMG
 3. 将 `Codex Monitor.app` 拖入 `/Applications`
 4. 从“应用程序”启动 Codex Monitor
@@ -45,16 +45,19 @@
 
 <br>
 
-## ✨ 1.0.4 Preview 重点更新
+## ✨ 1.0.5 Preview 重点更新
 
-- 显示当前账户返回的全部 authoritative Codex quota windows，分别保留剩余额度与完整重置日期/时间
-- Popover 与 Quick View 同时展示短、长周期 quota，不硬编码 ChatGPT plan 名称
-- Orb headline 选择周期最短的 authoritative window；quota warning 继续基于最受限的 window
-- transient 或 incomplete refresh 期间保持 coherent、完整的 quota snapshot
-- 延续 1.0.3 的 Universal Account transport、runtime-state、task-title 与 notification 行为
-- Release build 继续锁定已验证的 macOS SDK 26.5、macOS 13.0 minimum deployment target 与可移植 RPATH
+- 设置新增 **维护 / Maintenance** 区域
+- 新增一键 **导出诊断 / Export Diagnostics**，用于生成可直接分享的问题排查 ZIP
+- 诊断 ZIP 使用时间戳命名，重复导出不会覆盖旧文件，并在成功后自动在 Finder 中定位
+- 导出内容仅包含 allowlisted、sanitized 的 runtime / presentation / settings 等诊断信息，不包含 transcript、prompt、账户身份、凭据、token、cookie、API key、任意 `~/.codex` 文件或 raw private quota payload
+- 诊断错误信息进一步收紧，不导出原始文件路径或 source payload description
+- 延续 1.0.4 的 multi-window quota、Universal Account transport、runtime-state、task-title 与 notification 行为；本次不改变 activity / quota / usage / account / approval / polling / reconciliation 语义
+- “检查更新”和“自动更新”暂未加入；当前 Preview 仍未具备 Developer ID、notarization 与安全签名 update feed 基础设施
 
-自动化回归：**300 tests / 4 expected skips / 0 failures**。
+自动化回归：**301 executed / 4 skipped / 0 failures**。
+
+Packaged App 启动与 Diagnostics Export QA：**PASS**。
 
 <br>
 
@@ -121,6 +124,7 @@ Codex Monitor 不会用推测值替代未知值；例如 Quota 无法确认时�
 - 用户偏好持久化
 - 悬浮球相关设置
 - 通知与显示设置
+- 维护 / Maintenance：一键导出 sanitized diagnostics ZIP
 
 <br>
 
@@ -149,13 +153,13 @@ Codex Monitor 不会用推测值替代未知值；例如 Quota 无法确认时�
 
 ## ⚠️ Preview 数据源说明
 
-Codex Monitor 1.0.4 Preview 当前会读取本机 Codex 的本地集成数据面。
+Codex Monitor 1.0.5 Preview 当前会读取本机 Codex 的本地集成数据面。
 
 其中部分 Account 能力使用 Codex app-server 的本地 transport；Desktop runtime / session observation 也依赖 Codex 的本地 SQLite / rollout 等实现细节，这些本地 schema 目前没有稳定 public contract。
 
 因此：
 
-- 1.0.4 定位为 **Preview-only**
+- 1.0.5 定位为 **Preview-only**
 - Codex 更新可能暂时影响某个单独 capability
 - capability 缺失时应用应安全降级
 - 当前不应被描述为 stable production-supported Codex integration
@@ -198,7 +202,7 @@ swift test
 Preview release packaging：
 
 ```bash
-VERSION=1.0.4 BUILD=104 ./Tools/package_release.sh
+VERSION=1.0.5 BUILD=105 RELEASE_LABEL=Preview ./Tools/package_release.sh
 ```
 
 在未提供 `SIGNING_IDENTITY` 时，脚本生成明确标记的 ad-hoc local Preview；Developer ID / notarization 流程当前尚未启用。
@@ -207,11 +211,12 @@ VERSION=1.0.4 BUILD=104 ./Tools/package_release.sh
 
 ## 📌 Release scope
 
-Codex Monitor 1.0.4 Preview 当前验证范围：
+Codex Monitor 1.0.5 Preview 当前验证范围：
 
 - macOS 13+
 - Apple Silicon / arm64
 - 中文 / English
 - 不同 HOME / username，包括空格与 Unicode
 - 不同 Codex Desktop 本地 Account transport topology
-- 同一 RC3 二进制已在 Computer A 上完成 multi-window quota 验证
+- 1.0.4 的 multi-window quota 行为保持不变
+- 1.0.5 packaged app 已完成启动与 Diagnostics Export QA
