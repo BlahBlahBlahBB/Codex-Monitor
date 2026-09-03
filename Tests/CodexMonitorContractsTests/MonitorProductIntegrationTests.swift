@@ -83,8 +83,9 @@ final class MonitorProductIntegrationTests: XCTestCase {
 
     func testSettingsAlwaysHasAStableDefaultDetailRoute() {
         XCTAssertEqual(SettingsSection.defaultSection, .floating)
-        XCTAssertEqual(SettingsSection.allCases.count, 6)
+        XCTAssertEqual(SettingsSection.allCases.count, 7)
         XCTAssertEqual(SettingsSection.defaultSection.title, L10n.tr("settings.floating"))
+        XCTAssertEqual(SettingsSection.maintenance.title, L10n.tr("settings.maintenance"))
     }
 
     func testActionRowAndBilingualLocalizationContracts() {
@@ -105,10 +106,47 @@ final class MonitorProductIntegrationTests: XCTestCase {
         ]
         let popoverKeys = ["label.account", "label.plan", "label.quota", "label.resetDate", "label.quotaReset", "label.resetCredit", "quota.window.daily", "quota.window.weekly", "quota.window.monthly"]
         let usageKeys = ["label.session", "label.currentSession", "label.sessionToken", "label.tokenUsage", "label.todayToken", "label.last30DaysToken"]
-        let settingsKeys = ["settings.general", "settings.floating", "settings.notifications", "settings.privacy", "settings.advanced", "settings.about"]
+        let settingsKeys = ["settings.general", "settings.floating", "settings.notifications", "settings.privacy", "settings.advanced", "settings.maintenance", "settings.about", "settings.exportDiagnostics", "settings.diagnosticsExported", "settings.diagnosticsExportFailed"]
         for key in contextMenuKeys + popoverKeys + usageKeys + settingsKeys {
             XCTAssertNotEqual(L10n.tr(key, languageCode: "zh-Hans"), key, "missing zh-Hans string: \(key)")
             XCTAssertNotEqual(L10n.tr(key, languageCode: "en"), key, "missing English string: \(key)")
+        }
+    }
+
+    func testDiagnosticsExportUsesTimestampedNonOverwritingSanitizedZIP() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("CodexMonitorDiagnosticsTests-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let diagnostics = MonitorDiagnostics()
+        await diagnostics.record(.settings, ["event": "maintenanceExport", "api_key": "must-not-appear", "tokens": "42"])
+        let preferences = MonitorPreferences(defaults: UserDefaults(suiteName: "CodexMonitorTests.diagnostics.\(UUID().uuidString)")!)
+        let timestamp = Date(timeIntervalSince1970: 1_790_000_000)
+
+        let first = try await diagnostics.export(preferences: DiagnosticPreferenceSnapshot(preferences), destinationDirectory: directory, now: timestamp)
+        let second = try await diagnostics.export(preferences: DiagnosticPreferenceSnapshot(preferences), destinationDirectory: directory, now: timestamp)
+        XCTAssertNotEqual(first.lastPathComponent, second.lastPathComponent)
+        XCTAssertTrue(first.lastPathComponent.hasPrefix("CodexMonitor-Diagnostics-"))
+        XCTAssertTrue(first.pathExtension == "zip")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: first.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: second.path))
+
+        let archiveText = String(decoding: try Data(contentsOf: first), as: UTF8.self)
+        for expected in ["runtime-state.jsonl", "presentation.jsonl", "localization.jsonl", "settings.jsonl", "popover.jsonl", "usage-chart.jsonl", "orb-host.jsonl", "orb-layer-tree.txt", "preferences-sanitized.json", "build.txt"] {
+            XCTAssertTrue(archiveText.contains(expected), "missing archive entry: \(expected)")
+        }
+        XCTAssertTrue(archiveText.contains("maintenanceExport"))
+        XCTAssertTrue(archiveText.contains("\"tokens\":\"42\""))
+        XCTAssertFalse(archiveText.contains("api_key"))
+        XCTAssertFalse(archiveText.contains("must-not-appear"))
+
+        let unavailableDirectory = directory.appendingPathComponent("not-a-directory")
+        try Data("file".utf8).write(to: unavailableDirectory)
+        do {
+            _ = try await diagnostics.export(preferences: DiagnosticPreferenceSnapshot(preferences), destinationDirectory: unavailableDirectory, now: timestamp)
+            XCTFail("Expected diagnostics export to report a sanitized write failure")
+        } catch {
+            XCTAssertEqual(DiagnosticsExportFailure.sanitizedCode(for: error), .writeFailed)
         }
     }
 
@@ -720,7 +758,7 @@ final class MonitorProductIntegrationTests: XCTestCase {
         XCTAssertNotNil(root)
         XCTAssertEqual(controller.presentation.selection, .floating)
 
-        let navigationPath: [SettingsSection] = [.general, .floating, .notifications, .privacy, .advanced, .about, .floating]
+        let navigationPath: [SettingsSection] = [.general, .floating, .notifications, .privacy, .advanced, .maintenance, .about, .floating]
         for index in 0..<30 {
             controller.show()
             XCTAssertTrue(controller.window?.isVisible == true, "open cycle \(index)")
@@ -2175,7 +2213,7 @@ final class MonitorProductIntegrationTests: XCTestCase {
 
     private func testSettingsActions() -> SettingsSystemActions {
         SettingsSystemActions(
-            refresh: {}, openCodex: {}, openLogsFolder: {}, setMonitoringPaused: { _ in }, requestNotificationPermission: { _ in }, exportDiagnostics: {}, loginItem: LoginItemController(), showDiagnostics: {}
+            refresh: {}, openCodex: {}, openLogsFolder: {}, setMonitoringPaused: { _ in }, requestNotificationPermission: { _ in }, exportDiagnostics: { _ in }, loginItem: LoginItemController(), showDiagnostics: {}
         )
     }
 

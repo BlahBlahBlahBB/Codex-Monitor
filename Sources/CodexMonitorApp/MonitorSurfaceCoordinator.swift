@@ -101,7 +101,7 @@ final class MonitorSurfaceCoordinator: NSObject {
                         guard let self else { return }
                         self.notifications.requestPermissionThenEnable(preference, preferences: self.preferences)
                     },
-                    exportDiagnostics: { [weak self] in self?.exportDiagnostics() },
+                    exportDiagnostics: { [weak self] completion in self?.exportDiagnostics(completion: completion) },
                     loginItem: loginItem,
                     showDiagnostics: { [weak self] in self?.showDiagnostics() }
                 )
@@ -134,15 +134,18 @@ final class MonitorSurfaceCoordinator: NSObject {
         NSWorkspace.shared.open(logs)
     }
 
-    private func exportDiagnostics() {
+    private func exportDiagnostics(completion: @escaping @MainActor (Result<URL, DiagnosticsExportFailure>) -> Void) {
         let snapshot = DiagnosticPreferenceSnapshot(preferences)
         Task {
             do {
                 let url = try await MonitorDiagnostics.shared.export(preferences: snapshot)
                 DiagnosticEvent.record(.settings, ["event": "diagnosticsExported", "file": url.lastPathComponent])
                 NSWorkspace.shared.activateFileViewerSelecting([url])
+                completion(.success(url))
             } catch {
-                DiagnosticEvent.record(.settings, ["event": "diagnosticsExportFailed", "reason": "fileWriteFailure"])
+                let failure = DiagnosticsExportFailure.sanitizedCode(for: error)
+                DiagnosticEvent.record(.settings, ["event": "diagnosticsExportFailed", "reason": failure.rawValue])
+                completion(.failure(failure))
             }
         }
     }

@@ -456,7 +456,9 @@ public actor CodexLocalMonitorDriver {
         recordTrace([
             "event": "STATE_DB_READ_FAILURE",
             "caller": caller,
-            "error": String(describing: error),
+            // An error description can contain a filesystem path or source
+            // payload. Diagnostics retain only its stable Swift type.
+            "error": String(describing: type(of: error)),
             "hasSuccessfulStateDBRead": String(hasSuccessfulStateDBRead),
             "disposition": disposition == .retainLastKnownHealthy ? "retainLastKnownHealthy" : "fatal"
         ])

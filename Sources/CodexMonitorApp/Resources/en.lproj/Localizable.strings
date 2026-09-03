@@ -130,6 +130,11 @@
 "settings.version" = "Version";
 "settings.build" = "Build";
 "settings.exportDiagnostics" = "Export Diagnostics";
+"settings.maintenance" = "Maintenance";
+"settings.diagnosticsExporting" = "Exporting diagnostics…";
+"settings.diagnosticsExported" = "Diagnostics exported";
+"settings.diagnosticsExportFailed" = "Diagnostics export failed";
+"settings.diagnosticsDownloadsUnavailable" = "Downloads folder is unavailable";
 "settings.quotaWarning" = "Quota Warning";
 "settings.quotaWarningDescription" = "Notify when remaining quota is below %d%%";
 "settings.experimentalApprovalYellow" = "Experimental Approval Yellow";

@@ -130,6 +130,11 @@
 "settings.version" = "版本";
 "settings.build" = "构建";
 "settings.exportDiagnostics" = "导出诊断";
+"settings.maintenance" = "维护";
+"settings.diagnosticsExporting" = "正在导出诊断…";
+"settings.diagnosticsExported" = "诊断已导出";
+"settings.diagnosticsExportFailed" = "诊断导出失败";
+"settings.diagnosticsDownloadsUnavailable" = "下载文件夹不可用";
 "settings.quotaWarning" = "额度预警";
 "settings.quotaWarningDescription" = "剩余额度低于 %d%% 时提醒";
 "settings.experimentalApprovalYellow" = "实验性审批黄灯";
