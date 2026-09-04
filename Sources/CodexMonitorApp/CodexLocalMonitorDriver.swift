@@ -64,6 +64,7 @@ public actor CodexLocalMonitorDriver {
     private let approvalCheckpointStore: ApprovalLifecycleCheckpointStore
     private let hookJournalSource: (any HookApprovalJournalSource)?
     private let hookIdentityResolver: (any HookApprovalIdentityResolving)?
+    private let hookApprovalSourceIsActive: @Sendable () -> Bool
     private let processIsRunning: @Sendable () -> Bool
     private let usageLedger: LocalUsageLedgerProvider?
     private let sessionRoots: [URL]
@@ -90,11 +91,12 @@ public actor CodexLocalMonitorDriver {
     private var knownLedgerSessionKeys = Set<String>()
     private var verifiedLiveSessionStartKeys = Set<String>()
 
-    public init(runtime: MonitorRuntimeStore, usageLedger: LocalUsageLedgerProvider? = nil, codexRoot: URL = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".codex", isDirectory: true), hookJournalSource: (any HookApprovalJournalSource)? = nil, hookIdentityResolver: (any HookApprovalIdentityResolving)? = nil, approvalCheckpointURL: URL? = nil, processIsRunning: (@Sendable () -> Bool)? = nil) {
+    public init(runtime: MonitorRuntimeStore, usageLedger: LocalUsageLedgerProvider? = nil, codexRoot: URL = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".codex", isDirectory: true), hookJournalSource: (any HookApprovalJournalSource)? = nil, hookIdentityResolver: (any HookApprovalIdentityResolving)? = nil, approvalCheckpointURL: URL? = nil, processIsRunning: (@Sendable () -> Bool)? = nil, hookApprovalSourceIsActive: @escaping @Sendable () -> Bool = { true }) {
         self.runtime = runtime
         self.usageLedger = usageLedger
         self.hookJournalSource = hookJournalSource
         self.hookIdentityResolver = hookIdentityResolver
+        self.hookApprovalSourceIsActive = hookApprovalSourceIsActive
         self.processIsRunning = processIsRunning ?? CodexProcessLiveness.isRunning
         sourceID = DesktopLocalSourceID("codex-desktop-local")!
         sessionRoots = [
@@ -204,7 +206,7 @@ public actor CodexLocalMonitorDriver {
             let records = try stateReader.recentThreads()
             hasSuccessfulStateDBRead = true
             let approval = try? Self.catchUpApproval(approvalReader).result
-            let hook = pollHookJournal()
+            let hook = hookApprovalSourceIsActive() ? pollHookJournal() : nil
             persistApprovalCheckpoint()
             let approvalCheckpoint = combinedApprovalCheckpoint()
             let approvalHealth = approvalHealth(for: approval)
@@ -219,8 +221,9 @@ public actor CodexLocalMonitorDriver {
                 usageObservations.append(contentsOf: poll.observations)
                 let hydration = poll.hydration ?? RolloutCheckpointHydration(activeTurnID: nil, turnStartedAt: nil, activeItemID: nil, activeItemCategory: nil, latestActiveState: nil, latestActiveStateAt: nil, terminal: nil, authoritativeTokenTotal: nil)
                 let admission: RuntimeActivityReconciliationAdmission = requiresFreshActivityEvidenceAfterProcessBoundary ? .requireFreshLiveEvidence : .establishedProcess
-                let hookOwner = LocalRuntimeReconciliationOwner.derivedHookOwner(snapshot: snapshot, hydration: hydration, resolver: hookIdentityResolver)
-                let hookHealth: HookApprovalSourceHealthState? = hookJournalSource == nil ? nil : (hookOwner == nil ? .unknown : (hook?.checkpoint.sourceHealth ?? hookJournalCheckpoint?.sourceHealth ?? .unknown))
+                let hookSourceActive = hookApprovalSourceIsActive()
+                let hookOwner = hookSourceActive ? LocalRuntimeReconciliationOwner.derivedHookOwner(snapshot: snapshot, hydration: hydration, resolver: hookIdentityResolver) : nil
+                let hookHealth: HookApprovalSourceHealthState? = !hookSourceActive ? nil : (hookOwner == nil ? .unknown : (hook?.checkpoint.sourceHealth ?? hookJournalCheckpoint?.sourceHealth ?? .unknown))
                 rebuilt.append(LocalRuntimeReconciliationOwner.thread(snapshot: snapshot, hydration: hydration, approval: approvalCheckpoint, approvalHealth: approvalHealth, runtimeSourceAvailable: true, observedAt: Date(), activityAdmission: admission, hookOwner: hookOwner, hookSourceHealth: hookHealth))
             }
             trackedThreads = admitted
@@ -255,7 +258,7 @@ public actor CodexLocalMonitorDriver {
             let records = try stateReader.recentThreads()
             hasSuccessfulStateDBRead = true
             let approval = pollApproval()
-            let hook = pollHookJournal()
+            let hook = hookApprovalSourceIsActive() ? pollHookJournal() : nil
             persistApprovalCheckpoint()
             let current = Set(records.map { $0.snapshot.threadID })
             let archived = trackedThreads.subtracting(current)
@@ -358,6 +361,7 @@ public actor CodexLocalMonitorDriver {
     }
 
     private func pollHookJournal() -> HookApprovalJournalReadResult? {
+        guard hookApprovalSourceIsActive() else { return nil }
         guard let source = hookJournalSource, let reader = hookJournalReader else { return nil }
         guard let records = try? source.readRecords() else {
             let result = reader.markUnavailable()

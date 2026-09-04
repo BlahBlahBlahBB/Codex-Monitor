@@ -11,6 +11,10 @@ final class CodexMonitorApplication: NSObject {
     private static let applicationDelegate = CodexMonitorAppDelegate()
 
     static func main() {
+        if CommandLine.arguments.dropFirst().contains(ApprovalObserverHookRunner.commandLineArgument) {
+            ApprovalObserverHookRunner.run()
+            return
+        }
         let application = NSApplication.shared
         application.delegate = applicationDelegate
         application.run()
@@ -23,7 +27,27 @@ final class CodexMonitorAppDelegate: NSObject, NSApplicationDelegate {
         accountCapabilities: .init(secondaryQuota: .snapshot)
     )
     private let usageLedger = LocalUsageLedgerProvider()
-    private lazy var driver = CodexLocalMonitorDriver(runtime: runtime, usageLedger: usageLedger)
+    private let approvalObserverPaths = AppOwnedApprovalObserverPaths.default
+    private lazy var approvalJournalSource = AppManagedHookApprovalJournalSource(journalURL: approvalObserverPaths.journalURL)
+    private lazy var approvalIdentityResolver = AppManagedHookApprovalIdentityResolver(identityKeyURL: approvalObserverPaths.identityKeyURL)
+    private lazy var approvalIntegration: ApprovalObserverIntegration = {
+        ApprovalObserverIntegration(
+            paths: approvalObserverPaths,
+            applicationExecutableURL: Bundle.main.executableURL,
+            journalSource: approvalJournalSource,
+            identityResolver: approvalIdentityResolver
+        )
+    }()
+    private lazy var driver: CodexLocalMonitorDriver = {
+        let source = approvalJournalSource
+        return CodexLocalMonitorDriver(
+            runtime: runtime,
+            usageLedger: usageLedger,
+            hookJournalSource: source,
+            hookIdentityResolver: approvalIdentityResolver,
+            hookApprovalSourceIsActive: { source.isActive }
+        )
+    }()
     private lazy var accountProvider = AccountUsageProvider(runtime: runtime)
     private let model = MonitorAppModel()
     let preferences = MonitorPreferences()
@@ -47,7 +71,8 @@ final class CodexMonitorAppDelegate: NSObject, NSApplicationDelegate {
             preferences: preferences,
             localization: localization,
             refreshMonitoring: { [weak self] in self?.restartObservation() },
-            setMonitoringPaused: { [weak self] in self?.setMonitoringPaused($0) }
+            setMonitoringPaused: { [weak self] in self?.setMonitoringPaused($0) },
+            reconcileApprovalObserver: { [weak self] enabled in self?.reconcileApprovalObserver(enabled) }
         )
         self.surfaces = surfaces
         model.startObserving(runtime)
@@ -89,6 +114,15 @@ final class CodexMonitorAppDelegate: NSObject, NSApplicationDelegate {
             guard let self else { return }
             await driver.setUserMonitoringPaused(paused)
             if !paused { await accountProvider.refreshOnce() }
+        }
+    }
+
+    private func reconcileApprovalObserver(_ enabled: Bool) {
+        Task { [weak self] in
+            guard let self else { return }
+            let succeeded = await approvalIntegration.reconcile(enabled: enabled)
+            guard enabled, !succeeded, preferences.waitingApprovalNotifications else { return }
+            preferences.waitingApprovalNotifications = false
         }
     }
 
