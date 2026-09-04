@@ -807,7 +807,7 @@ final class MonitorProductIntegrationTests: XCTestCase {
         XCTAssertEqual(VisualStatePresentation.unavailable.orbTone, .gray)
     }
 
-    func testPermissionRequestCreatesSecondaryEventWhileWorkRemainsBlue() async {
+    func testPermissionRequestCreatesWaitingStateWhileWaveAPresentationRemainsBlue() async {
         let clock = PermissionPresentationTestClock()
         let runtime = MonitorRuntimeStore(engine: RuntimeStateEngine(clock: clock, initialPhase: .live), clock: clock, initialPhase: .live)
         let thread = id(.thread, "permission-thread")
@@ -825,19 +825,19 @@ final class MonitorProductIntegrationTests: XCTestCase {
         await runtime.ingest(ApprovalObservation.requested(ApprovalRequested(threadID: thread, turnID: turn, requestID: request, observedAt: clock.now())))
 
         let waiting = await runtime.snapshot()
-        XCTAssertEqual(waiting.currentState, .working)
+        XCTAssertEqual(waiting.currentState, .waitingApproval)
         XCTAssertTrue(waiting.approvalRequestObserved)
         XCTAssertEqual(waiting.capabilities[MonitorRuntimeCapability.approvalResolution], MonitorCapabilityAvailability(availability: .unavailable, reason: .externalCodexDesktopCapability))
         XCTAssertEqual(VisualStatePresentation.forSnapshot(waiting).orbTone, .blue)
 
-        // The output is authoritative rollout evidence for the exact request;
-        // no Approved/Declined/Cancelled outcome is inferred or manufactured.
+        // A rollout output is not an exact PermissionRequest identity; the
+        // reducer remains waiting until Hook PostToolUse or Stop evidence.
         await runtime.ingest(event(thread, turn, .activity, activity: .agentResponse, item: request, clock: clock))
         await runtime.ingest(event(thread, turn, .activity, activity: .tool, item: resumedWork, clock: clock))
 
-        let working = await runtime.snapshot()
-        XCTAssertEqual(working.currentState, .working)
-        XCTAssertEqual(VisualStatePresentation.forSnapshot(working), .init(dots: [.init(tone: .green, breathes: true), .inactive, .inactive], orbTone: .blue, breathes: true, stateTextKey: "state.working"))
+        let waitingAfterOutput = await runtime.snapshot()
+        XCTAssertEqual(waitingAfterOutput.currentState, .waitingApproval)
+        XCTAssertEqual(VisualStatePresentation.forSnapshot(waitingAfterOutput).orbTone, .blue)
     }
 
     func testIdlePresentationCannotCarryBreathingFromWorkingOrTerminalState() {

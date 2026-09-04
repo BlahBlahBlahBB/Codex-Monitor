@@ -415,6 +415,16 @@ public actor MonitorRuntimeStore {
         publishSnapshot()
     }
 
+    public func bindHookApprovalOwner(_ owner: HookApprovalTurnOwner, to threadID: NamespacedID, turnID: NamespacedID, observedAt: Date) {
+        engine.bindHookApprovalOwner(owner, to: threadID, turnID: turnID, observedAt: observedAt)
+        publishSnapshot()
+    }
+
+    public func ingest(_ event: HookApprovalEvent) {
+        engine.ingest(event)
+        publishSnapshot()
+    }
+
     /// Accessibility health is independent of Desktop Local and the approval
     /// log lane. A missing permission never degrades runtime health.
     public func ingest(_ observation: ApprovalUIObservation) {
@@ -710,7 +720,7 @@ public actor MonitorRuntimeStore {
                 processRunning: desktopSource.availability == .available,
                 stateDBReadable: desktopSource.availability == .available,
                 monitorPaused: monitoringPhase == .paused,
-                activeTurnPresent: runtime.activeThreadCount > 0,
+                activeTurnPresent: runtime.activeThreadCount > 0 || runtime.waitingApprovalCount > 0,
                 fatalSourceError: desktopSource.availability == .unavailable
             )
         }
@@ -718,7 +728,7 @@ public actor MonitorRuntimeStore {
             processRunning: health.processRunning,
             stateDBReadable: health.stateDBReadable,
             monitorPaused: monitoringPhase == .paused,
-            activeTurnPresent: runtime.activeThreadCount > 0,
+            activeTurnPresent: runtime.activeThreadCount > 0 || runtime.waitingApprovalCount > 0,
             fatalSourceError: desktopCycleHasActiveThreadFailure
         )
     }
@@ -788,6 +798,7 @@ private enum MonitorRuntimeSnapshotBuilder {
     static func waitingApprovalAvailability(for thread: ThreadRuntimeSnapshot) -> MonitorCapabilityAvailability {
         switch thread.approvalHealth {
         case .availableKnownNotWaiting, .availableWaiting: return MonitorCapabilityAvailability(availability: .available)
+        case .unknown: return MonitorCapabilityAvailability(availability: .unknown, reason: .noObservedValue)
         case .unavailable: return MonitorCapabilityAvailability(availability: .unavailable, reason: .sourceUnavailable)
         case .stale: return MonitorCapabilityAvailability(availability: .stale, reason: .sourceStale)
         }

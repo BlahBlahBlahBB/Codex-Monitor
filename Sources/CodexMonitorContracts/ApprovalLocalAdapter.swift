@@ -90,8 +90,12 @@ public struct ApprovalResolved: Sendable, Equatable {
 public struct ApprovalLifecycleCheckpoint: Sendable, Equatable {
     public let cursor: ApprovalLogCursor?
     public let unresolved: [ApprovalRequested]
-    public init(cursor: ApprovalLogCursor?, unresolved: [ApprovalRequested]) {
+    /// This optional lane is deliberately opaque. It carries no Hook payload
+    /// or raw Hook identifier and shares the existing Monitor checkpoint file.
+    public let hookJournal: HookApprovalJournalCheckpoint?
+    public init(cursor: ApprovalLogCursor?, unresolved: [ApprovalRequested], hookJournal: HookApprovalJournalCheckpoint? = nil) {
         self.cursor = cursor
+        self.hookJournal = hookJournal
         self.unresolved = unresolved.sorted { lhs, rhs in
             let left = (lhs.threadID.rawID, lhs.turnID.rawID, lhs.requestID.rawID)
             let right = (rhs.threadID.rawID, rhs.turnID.rawID, rhs.requestID.rawID)

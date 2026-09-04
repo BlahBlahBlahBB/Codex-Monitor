@@ -58,17 +58,17 @@ final class V3StateEngineTests: XCTestCase {
         XCTAssertEqual(threadSnapshot(thread).stateSince, initial)
     }
 
-    func testApprovalRequestCreatesSecondaryObservedEvent() {
+    func testApprovalRequestCreatesWaitingLifecycleEvidence() {
         let a = id(.thread, "a"), b = id(.thread, "b"), turnA = id(.turn, "turn-a"), turnB = id(.turn, "turn-b")
         engine.ingest(event(a, turnA, .taskStarted)); engine.ingest(event(b, turnB, .taskStarted, activity: .tool))
         let request = id(.item, "request-a")
         engine.ingest(.requested(ApprovalRequested(threadID: a, turnID: turnA, requestID: request, observedAt: clock.now())))
-        XCTAssertEqual(state(a), .thinking); XCTAssertEqual(state(b), .thinking)
+        XCTAssertEqual(state(a), .waitingApproval); XCTAssertEqual(state(b), .thinking)
         XCTAssertTrue(threadSnapshot(a).approvalRequestObserved)
         engine.ingest(.resolved(ApprovalResolved(threadID: b, turnID: turnB, requestID: request, status: .approved, observedAt: clock.now())))
-        XCTAssertEqual(state(a), .thinking)
+        XCTAssertEqual(state(a), .waitingApproval)
         engine.ingest(.resolved(ApprovalResolved(threadID: a, turnID: turnA, requestID: request, status: .approved, observedAt: clock.now())))
-        XCTAssertEqual(state(a), .thinking)
+        XCTAssertEqual(state(a), .waitingApproval)
         XCTAssertTrue(threadSnapshot(a).approvalRequestObserved)
     }
 
@@ -134,12 +134,12 @@ final class V3StateEngineTests: XCTestCase {
         let working = id(.thread, "working"), failed = id(.thread, "failed"), approval = id(.thread, "approval")
         engine.ingest(event(working, id(.turn, "w"), .taskStarted)); engine.ingest(event(working, id(.turn, "w"), .activity, activity: .tool))
         engine.ingest(event(approval, id(.turn, "a"), .taskStarted)); engine.ingest(.requested(ApprovalRequested(threadID: approval, turnID: id(.turn, "a"), requestID: id(.item, "r"), observedAt: clock.now())))
-        XCTAssertEqual(engine.snapshot().state, .thinking)
+        XCTAssertEqual(engine.snapshot().state, .waitingApproval)
         engine.ingest(event(failed, id(.turn, "f"), .taskStarted)); engine.ingest(event(failed, id(.turn, "f"), .taskCompletedFailure))
         XCTAssertEqual(engine.snapshot().state, .failed)
         XCTAssertEqual(state(working), .working)
-        XCTAssertEqual(engine.snapshot().activeThreadCount, 2)
-        XCTAssertEqual(engine.snapshot().waitingApprovalCount, 0)
+        XCTAssertEqual(engine.snapshot().activeThreadCount, 1)
+        XCTAssertEqual(engine.snapshot().waitingApprovalCount, 1)
     }
 
     func testPauseResumeInstallsAuthoritativeTerminalAtomically() {
@@ -190,17 +190,17 @@ final class V3StateEngineTests: XCTestCase {
         XCTAssertEqual(state(thread), .thinking)
     }
 
-    func testApprovalSourceLossPreservesSecondaryEventWithoutChangingMainState() {
+    func testApprovalSourceLossPreservesPendingApprovalWithoutClaimingResolution() {
         let thread = id(.thread, "approval"), turn = id(.turn, "turn"), request = id(.item, "request")
         engine.ingest(event(thread, turn, .taskStarted)); engine.ingest(.requested(ApprovalRequested(threadID: thread, turnID: turn, requestID: request, observedAt: clock.now())))
         engine.ingest(.sourceUnavailable(ApprovalSourceHealth(state: .unavailable, observedAt: clock.now(), reason: .sourceMissing)))
-        XCTAssertEqual(state(thread), .thinking)
+        XCTAssertEqual(state(thread), .waitingApproval)
         XCTAssertTrue(threadSnapshot(thread).approvalRequestObserved)
         XCTAssertEqual(threadSnapshot(thread).approvalHealth, .unavailable)
         engine.ingest(.sourceHealth(ApprovalSourceHealth(state: .available, observedAt: clock.now())))
-        XCTAssertEqual(threadSnapshot(thread).approvalHealth, .availableKnownNotWaiting)
+        XCTAssertEqual(threadSnapshot(thread).approvalHealth, .availableWaiting)
         engine.ingest(.resolved(ApprovalResolved(threadID: thread, turnID: turn, requestID: request, status: .approved, observedAt: clock.now())))
-        XCTAssertEqual(threadSnapshot(thread).approvalHealth, .availableKnownNotWaiting)
+        XCTAssertEqual(threadSnapshot(thread).approvalHealth, .availableWaiting)
         XCTAssertTrue(threadSnapshot(thread).approvalRequestObserved)
     }
 
@@ -213,15 +213,15 @@ final class V3StateEngineTests: XCTestCase {
             reconciled(thread: a, turn: turnA, approval: .availableWaiting, pending: [requestA]),
             reconciled(thread: b, turn: turnB, approval: .availableWaiting, pending: [requestB])
         ])
-        XCTAssertEqual(state(a), .thinking); XCTAssertEqual(state(b), .thinking)
+        XCTAssertEqual(state(a), .waitingApproval); XCTAssertEqual(state(b), .waitingApproval)
         XCTAssertFalse(threadSnapshot(a).approvalRequestObserved); XCTAssertFalse(threadSnapshot(b).approvalRequestObserved)
         engine.ingest(event(a, turnA, .activity, activity: .agentResponse, item: id(.item, "wrong-output")))
-        XCTAssertEqual(state(a), .thinking)
+        XCTAssertEqual(state(a), .waitingApproval)
         engine.ingest(event(a, turnA, .activity, activity: .agentResponse, item: requestA.requestID))
-        XCTAssertEqual(state(a), .thinking); XCTAssertEqual(state(b), .thinking)
+        XCTAssertEqual(state(a), .waitingApproval); XCTAssertEqual(state(b), .waitingApproval)
     }
 
-    func testReconciliationDoesNotProjectHistoricalApprovalAsWaiting() {
+    func testReconciliationRestoresUnresolvedApprovalAsWaiting() {
         let thinking = id(.thread, "recon-thinking"), working = id(.thread, "recon-working"), waiting = id(.thread, "recon-waiting"), terminalThread = id(.thread, "recon-terminal"), idle = id(.thread, "recon-idle")
         let turnThinking = id(.turn, "thinking"), turnWorking = id(.turn, "working"), turnWaiting = id(.turn, "waiting"), turnTerminal = id(.turn, "terminal")
         let request = ApprovalRequested(threadID: waiting, turnID: turnWaiting, requestID: id(.item, "request"), observedAt: clock.now())
@@ -233,7 +233,7 @@ final class V3StateEngineTests: XCTestCase {
             reconciled(thread: terminalThread, turn: turnTerminal, terminal: terminal(turnTerminal, "historical", .completed, at: clock.now().addingTimeInterval(-6))),
             reconciled(thread: idle, turn: nil)
         ])
-        XCTAssertEqual(state(thinking), .thinking); XCTAssertEqual(state(working), .working); XCTAssertEqual(state(waiting), .thinking)
+        XCTAssertEqual(state(thinking), .thinking); XCTAssertEqual(state(working), .working); XCTAssertEqual(state(waiting), .waitingApproval)
         XCTAssertEqual(state(terminalThread), .idle); XCTAssertEqual(state(idle), .idle)
     }
 
@@ -323,13 +323,13 @@ final class ApprovalLocalAdapterTests: XCTestCase {
         XCTAssertEqual(request.requestID.rawID, "permission-call")
     }
 
-    func testApprovalRequestDoesNotOverrideWorkingVisualState() throws {
+    func testApprovalRequestEntersWaitingWhileWaveAPresentationRemainsBlue() throws {
         // Sanitized structural fixture of the real Desktop event observed in
         // production: it has no call/item field and is correlated by turn.
         try fixture.insert(id: 1, thread: "real-thread", target: fixture.realTarget, body: fixture.realDesktopApprovalWaitBody(thread: "real-thread", turn: "real-turn"))
         let observation = try XCTUnwrap(try fixture.adapter().poll().observations.first)
         guard case .requested(let request) = observation else {
-            return XCTFail("Expected the real Desktop waiting shape to be request-only evidence")
+            return XCTFail("Expected the real Desktop waiting shape")
         }
         XCTAssertEqual(request.requestID.rawID, ApprovalRequestCorrelation.turnScopedRequestID(for: "real-turn"))
 
@@ -339,13 +339,13 @@ final class ApprovalLocalAdapterTests: XCTestCase {
         let turn = NamespacedID(sourceID: fixture.source.value, entityKind: .turn, rawID: "real-turn")!
         stateEngine.ingest(RolloutRecordEnvelope(threadID: thread, turnID: turn, itemID: nil, kind: .taskStarted, activity: nil, tokenSnapshot: nil, model: nil, reasoningEffort: nil, observedAt: clock.now(), fileOffset: 0))
         stateEngine.ingest(observation)
-        XCTAssertEqual(stateEngine.snapshot().state, .thinking)
+        XCTAssertEqual(stateEngine.snapshot().state, .waitingApproval)
         XCTAssertTrue(stateEngine.snapshot().approvalRequestObserved)
 
         clock.advance(1)
         stateEngine.ingest(RolloutRecordEnvelope(threadID: thread, turnID: turn, itemID: nil, kind: .activity, activity: .tool, tokenSnapshot: nil, model: nil, reasoningEffort: nil, observedAt: clock.now(), fileOffset: 1))
-        XCTAssertEqual(stateEngine.snapshot().state, .working)
-        XCTAssertEqual(stateEngine.snapshot().waitingApprovalCount, 0)
+        XCTAssertEqual(stateEngine.snapshot().state, .waitingApproval)
+        XCTAssertEqual(stateEngine.snapshot().waitingApprovalCount, 1)
         XCTAssertTrue(stateEngine.snapshot().approvalRequestObserved)
         XCTAssertEqual(VisualStatePresentation.forState(stateEngine.snapshot().state).orbTone, .blue)
     }
@@ -360,13 +360,13 @@ final class ApprovalLocalAdapterTests: XCTestCase {
         engine.ingest(RolloutRecordEnvelope(threadID: thread, turnID: turn, itemID: nil, kind: .taskStarted, activity: nil, tokenSnapshot: nil, model: nil, reasoningEffort: nil, observedAt: clock.now(), fileOffset: 0))
         engine.ingest(.requested(ApprovalRequested(threadID: thread, turnID: turn, requestID: request, observedAt: clock.now())))
         engine.ingest(.resolved(ApprovalResolved(threadID: thread, turnID: turn, requestID: request, status: .approved, observedAt: clock.now())))
-        XCTAssertEqual(engine.snapshot().state, .thinking)
-        XCTAssertEqual(engine.snapshot().waitingApprovalCount, 0)
+        XCTAssertEqual(engine.snapshot().state, .waitingApproval)
+        XCTAssertEqual(engine.snapshot().waitingApprovalCount, 1)
         XCTAssertTrue(engine.snapshot().approvalRequestObserved)
 
         clock.advance(1)
         engine.ingest(.requested(ApprovalRequested(threadID: thread, turnID: turn, requestID: request, observedAt: clock.now())))
-        XCTAssertEqual(engine.snapshot().state, .thinking)
+        XCTAssertEqual(engine.snapshot().state, .waitingApproval)
         XCTAssertTrue(engine.snapshot().approvalRequestObserved)
         engine.ingest(RolloutRecordEnvelope(threadID: thread, turnID: turn, itemID: nil, kind: .taskCompletedSuccess, activity: nil, tokenSnapshot: nil, model: nil, reasoningEffort: nil, observedAt: clock.now(), fileOffset: 2))
         XCTAssertEqual(engine.snapshot().state, .completed)

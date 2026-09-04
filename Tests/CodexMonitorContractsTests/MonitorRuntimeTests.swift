@@ -71,7 +71,7 @@ final class MonitorRuntimeTests: XCTestCase {
         XCTAssertEqual(snapshot.currentSessionThread?.activeTurnID, turn)
     }
 
-    func testApprovalRequestCreatesSecondaryObservedEvent() async {
+    func testApprovalRequestCreatesWaitingLifecycleState() async {
         let clock = RuntimeSnapshotTestClock()
         let store = makeStore(clock: clock)
         let thread = id(.thread, "thread-a")
@@ -83,14 +83,14 @@ final class MonitorRuntimeTests: XCTestCase {
         await store.ingest(ApprovalObservation.resolved(ApprovalResolved(threadID: thread, turnID: turn, requestID: request, status: .approved, observedAt: clock.now())))
 
         var snapshot = await store.snapshot()
-        XCTAssertEqual(snapshot.currentState, .thinking)
+        XCTAssertEqual(snapshot.currentState, .waitingApproval)
         XCTAssertTrue(snapshot.approvalRequestObserved)
         XCTAssertEqual(snapshot.capabilities[.approvalResolution]?.availability, .unavailable)
 
         await store.ingest(event(thread, turn, .activity, activity: .agentResponse, item: request, clock: clock))
         snapshot = await store.snapshot()
-        XCTAssertEqual(snapshot.currentState, .thinking)
-        XCTAssertEqual(snapshot.waitingApprovalCount, 0)
+        XCTAssertEqual(snapshot.currentState, .waitingApproval)
+        XCTAssertEqual(snapshot.waitingApprovalCount, 1)
         XCTAssertTrue(snapshot.approvalRequestObserved)
     }
 
@@ -244,7 +244,7 @@ final class MonitorRuntimeTests: XCTestCase {
         let accepted = await MainActor.run { model.acceptedSnapshotCount }
         let snapshot = await store.snapshot()
         XCTAssertEqual(accepted, baseline + 1)
-        XCTAssertEqual(snapshot.currentState, .thinking)
+        XCTAssertEqual(snapshot.currentState, .waitingApproval)
         XCTAssertTrue(snapshot.approvalRequestObserved)
         XCTAssertEqual(snapshot.capabilities[.approvalResolution]?.availability, .unavailable)
         await MainActor.run { model.stopObserving() }
