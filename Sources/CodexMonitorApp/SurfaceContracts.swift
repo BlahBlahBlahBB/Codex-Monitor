@@ -166,11 +166,10 @@ struct VisualStatePresentation: Equatable {
             break
         }
 
-        // Approval Beta has no capsule effect. It is intentionally applied
-        // after quota rendering so the two dimensions cannot leak together.
-        if experimentalApprovalYellowEnabled && snapshot.approvalRequestObserved {
-            presentation = Self(dots: presentation.dots, orbTone: .yellow, breathes: true, stateTextKey: presentation.stateTextKey)
-        }
+        // Kept for source compatibility with the persisted beta preference.
+        // B1 makes the authoritative runtime state the only lifecycle-orb
+        // authority; request-only metadata must never recolor the Orb.
+        _ = experimentalApprovalYellowEnabled
         return presentation
     }
 
@@ -185,9 +184,7 @@ struct VisualStatePresentation: Equatable {
         case .working:
             return Self(dots: [.init(tone: .green, breathes: true), .inactive, .inactive], orbTone: .blue, breathes: true, stateTextKey: "state.working")
         case .waitingApproval:
-            // Compatibility-only enum case. V1 has no reliable waiting
-            // lifecycle, so presentation must never select a yellow orb.
-            return Self(dots: [.init(tone: .green, breathes: true), .inactive, .inactive], orbTone: .blue, breathes: true, stateTextKey: "state.thinking")
+            return Self(dots: [.init(tone: .green, breathes: true), .init(tone: .yellow, breathes: false), .inactive], orbTone: .yellow, breathes: true, stateTextKey: "state.waitingApproval")
         case .failed:
             return Self(dots: [.inactive, .inactive, .init(tone: .red, breathes: false)], orbTone: .red, breathes: false, stateTextKey: "state.failed")
         case .interrupted:

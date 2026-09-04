@@ -323,7 +323,7 @@ final class ApprovalLocalAdapterTests: XCTestCase {
         XCTAssertEqual(request.requestID.rawID, "permission-call")
     }
 
-    func testApprovalRequestEntersWaitingWhileWaveAPresentationRemainsBlue() throws {
+    func testApprovalRequestEntersWaitingWithYellowPresentation() throws {
         // Sanitized structural fixture of the real Desktop event observed in
         // production: it has no call/item field and is correlated by turn.
         try fixture.insert(id: 1, thread: "real-thread", target: fixture.realTarget, body: fixture.realDesktopApprovalWaitBody(thread: "real-thread", turn: "real-turn"))
@@ -347,7 +347,7 @@ final class ApprovalLocalAdapterTests: XCTestCase {
         XCTAssertEqual(stateEngine.snapshot().state, .waitingApproval)
         XCTAssertEqual(stateEngine.snapshot().waitingApprovalCount, 1)
         XCTAssertTrue(stateEngine.snapshot().approvalRequestObserved)
-        XCTAssertEqual(VisualStatePresentation.forState(stateEngine.snapshot().state).orbTone, .blue)
+        XCTAssertEqual(VisualStatePresentation.forState(stateEngine.snapshot().state).orbTone, .yellow)
     }
 
     func testTerminalLifecycleClearsApprovalObservedEvent() throws {

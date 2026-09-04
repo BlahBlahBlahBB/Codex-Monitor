@@ -7,7 +7,7 @@
 "state.codexUnavailable" = "Codex 不可用";
 "state.thinking" = "思考中";
 "state.working" = "工作中";
-"state.waitingApproval" = "等待授权";
+"state.waitingApproval" = "等待审批";
 "state.completed" = "已完成";
 "state.failed" = "失败";
 "state.interrupted" = "已中断";

@@ -797,7 +797,7 @@ final class MonitorProductIntegrationTests: XCTestCase {
         XCTAssertEqual(VisualStatePresentation.forState(.completed).orbTone, .green)
         XCTAssertEqual(VisualStatePresentation.forState(.working), .init(dots: [.init(tone: .green, breathes: true), .inactive, .inactive], orbTone: .blue, breathes: true, stateTextKey: "state.working"))
         XCTAssertEqual(VisualStatePresentation.forState(.thinking).orbTone, .blue)
-        XCTAssertEqual(VisualStatePresentation.forState(.waitingApproval).orbTone, .blue)
+        XCTAssertEqual(VisualStatePresentation.forState(.waitingApproval), .init(dots: [.init(tone: .green, breathes: true), .init(tone: .yellow, breathes: false), .inactive], orbTone: .yellow, breathes: true, stateTextKey: "state.waitingApproval"))
         for state in [MonitorRuntimeState.failed, .interrupted, .systemError] {
             XCTAssertEqual(VisualStatePresentation.forState(state).dots, [.inactive, .inactive, .init(tone: .red, breathes: false)])
             XCTAssertEqual(VisualStatePresentation.forState(state).orbTone, .red)
@@ -807,7 +807,12 @@ final class MonitorProductIntegrationTests: XCTestCase {
         XCTAssertEqual(VisualStatePresentation.unavailable.orbTone, .gray)
     }
 
-    func testPermissionRequestCreatesWaitingStateWhileWaveAPresentationRemainsBlue() async {
+    func testWaitingApprovalUsesDedicatedLocalizedStateText() {
+        XCTAssertEqual(L10n.tr("state.waitingApproval", languageCode: "en"), "Waiting for approval")
+        XCTAssertEqual(L10n.tr("state.waitingApproval", languageCode: "zh-Hans"), "等待审批")
+    }
+
+    func testPermissionRequestCreatesWaitingStateAndWaveB1PresentationIsYellow() async {
         let clock = PermissionPresentationTestClock()
         let runtime = MonitorRuntimeStore(engine: RuntimeStateEngine(clock: clock, initialPhase: .live), clock: clock, initialPhase: .live)
         let thread = id(.thread, "permission-thread")
@@ -828,7 +833,7 @@ final class MonitorProductIntegrationTests: XCTestCase {
         XCTAssertEqual(waiting.currentState, .waitingApproval)
         XCTAssertTrue(waiting.approvalRequestObserved)
         XCTAssertEqual(waiting.capabilities[MonitorRuntimeCapability.approvalResolution], MonitorCapabilityAvailability(availability: .unavailable, reason: .externalCodexDesktopCapability))
-        XCTAssertEqual(VisualStatePresentation.forSnapshot(waiting).orbTone, .blue)
+        XCTAssertEqual(VisualStatePresentation.forSnapshot(waiting), .init(dots: [.init(tone: .green, breathes: true), .init(tone: .yellow, breathes: false), .inactive], orbTone: .yellow, breathes: true, stateTextKey: "state.waitingApproval"))
 
         // A rollout output is not an exact PermissionRequest identity; the
         // reducer remains waiting until Hook PostToolUse or Stop evidence.
@@ -837,7 +842,44 @@ final class MonitorProductIntegrationTests: XCTestCase {
 
         let waitingAfterOutput = await runtime.snapshot()
         XCTAssertEqual(waitingAfterOutput.currentState, .waitingApproval)
-        XCTAssertEqual(VisualStatePresentation.forSnapshot(waitingAfterOutput).orbTone, .blue)
+        XCTAssertEqual(VisualStatePresentation.forSnapshot(waitingAfterOutput).orbTone, .yellow)
+    }
+
+    func testRequestOnlyApprovalMetadataCannotRecolorThinkingOrCompleted() {
+        let thinking = presentationSnapshot(state: .thinking, approvalRequestObserved: true)
+        XCTAssertEqual(VisualStatePresentation.forSnapshot(thinking, experimentalApprovalYellowEnabled: true).orbTone, .blue)
+
+        let completed = presentationSnapshot(state: .completed, approvalRequestObserved: true)
+        XCTAssertEqual(VisualStatePresentation.forSnapshot(completed, experimentalApprovalYellowEnabled: true).orbTone, .green)
+    }
+
+    func testWaitingApprovalQuotaWarningKeepsLifecycleOrbYellowAndQuotaSeparate() {
+        let snapshot = presentationSnapshot(state: .waitingApproval, remaining: 20)
+        let presentation = VisualStatePresentation.forSnapshot(snapshot, quotaWarningEnabled: true, quotaWarningThreshold: 20)
+
+        XCTAssertEqual(presentation.orbTone, .yellow)
+        XCTAssertTrue(presentation.breathes)
+        XCTAssertEqual(presentation.stateTextKey, "state.waitingApproval")
+        XCTAssertEqual(presentation.dots, [.init(tone: .green, breathes: true), .init(tone: .yellow, breathes: false), .inactive])
+        XCTAssertEqual(QuotaCapsuleHealth.resolve(snapshot: snapshot, warningEnabled: true, threshold: 20), .warning)
+    }
+
+    func testWaitingApprovalQuotaExhaustedKeepsLifecycleOrbYellow() {
+        let snapshot = presentationSnapshot(state: .waitingApproval, remaining: 0)
+        let presentation = VisualStatePresentation.forSnapshot(snapshot)
+
+        XCTAssertEqual(presentation.orbTone, .yellow)
+        XCTAssertTrue(presentation.breathes)
+        XCTAssertEqual(presentation.stateTextKey, "state.waitingApproval")
+        XCTAssertEqual(presentation.dots, [.inactive, .inactive, .init(tone: .red, breathes: false)])
+        XCTAssertEqual(QuotaCapsuleHealth.resolve(snapshot: snapshot, warningEnabled: true, threshold: 20), .exhausted)
+    }
+
+    func testWaitingApprovalCountDoesNotSelectYellowWithoutWaitingLifecycleState() {
+        let snapshot = presentationSnapshot(state: .failed, approvalRequestObserved: true, waitingApprovalCount: 1)
+        XCTAssertEqual(snapshot.waitingApprovalCount, 1)
+        XCTAssertNotEqual(snapshot.currentState, .waitingApproval)
+        XCTAssertEqual(VisualStatePresentation.forSnapshot(snapshot).orbTone, .red)
     }
 
     func testIdlePresentationCannotCarryBreathingFromWorkingOrTerminalState() {
@@ -959,37 +1001,23 @@ final class MonitorProductIntegrationTests: XCTestCase {
         XCTAssertEqual(MonitorPreferences(defaults: defaults).quotaWarningThreshold, 40)
     }
 
-    func testApprovalBetaDisabledDoesNotChangeOrb() async {
+    func testWaitingLifecycleStateControlsOrbRegardlessOfBetaPreference() async {
         let presentation = await quotaPresentation(remaining: 80, working: true, approvalObserved: true)
-        XCTAssertEqual(presentation.orbTone, .blue)
+        XCTAssertEqual(presentation.orbTone, .yellow)
+        XCTAssertEqual(presentation.stateTextKey, "state.waitingApproval")
     }
 
-    func testApprovalBetaEnabledObservedRequestMakesOrbYellow() async {
+    func testWaitingLifecycleStateRetainsYellowWhenBetaPreferenceIsEnabled() async {
         let presentation = await quotaPresentation(remaining: 80, working: true, approvalObserved: true, betaEnabled: true)
         XCTAssertEqual(presentation.orbTone, .yellow)
     }
 
-    func testApprovalBetaDoesNotChangeCapsule() async {
+    func testWaitingLifecycleStateHasDedicatedStatusDots() async {
         let presentation = await quotaPresentation(remaining: 80, working: true, approvalObserved: true, betaEnabled: true)
-        XCTAssertEqual(presentation.dots, [.init(tone: .green, breathes: true), .inactive, .inactive])
+        XCTAssertEqual(presentation.dots, [.init(tone: .green, breathes: true), .init(tone: .yellow, breathes: false), .inactive])
     }
 
-    func testCompletedExecDoesNotTriggerApprovalBeta() async {
-        let presentation = await quotaPresentation(remaining: 80, working: false, betaEnabled: true)
-        XCTAssertEqual(presentation.orbTone, .green)
-    }
-
-    func testOrdinaryTaskDoesNotTriggerApprovalBeta() async {
-        let presentation = await quotaPresentation(remaining: 80, working: true, betaEnabled: true)
-        XCTAssertEqual(presentation.orbTone, .blue)
-    }
-
-    func testHistoricalApprovalDoesNotResurrectBeta() async {
-        let presentation = await quotaPresentation(remaining: 80, working: false, betaEnabled: true)
-        XCTAssertEqual(presentation.orbTone, .green)
-    }
-
-    func testFatalRuntimeErrorOverridesApprovalBetaOrb() async {
+    func testFatalRuntimeErrorOverridesWaitingApprovalOrb() async {
         let presentation = await quotaPresentation(remaining: 80, working: true, approvalObserved: true, betaEnabled: true, fatal: true)
         XCTAssertEqual(presentation.orbTone, .red)
     }
@@ -2220,6 +2248,52 @@ final class MonitorProductIntegrationTests: XCTestCase {
     private func quotaPresentationDate(_ value: String) -> Date {
         let formatter = ISO8601DateFormatter()
         return try! XCTUnwrap(formatter.date(from: value))
+    }
+
+    private func presentationSnapshot(
+        state: MonitorRuntimeState,
+        approvalRequestObserved: Bool = false,
+        waitingApprovalCount: Int = 0,
+        remaining: Double? = nil
+    ) -> MonitorRuntimeSnapshot {
+        let now = Date(timeIntervalSince1970: 1_900_000_000)
+        let freshness = Freshness(state: .fresh, assessedAt: now, observedAt: now)
+        let desktop = MonitorSourceHealth(source: .desktopLocal, availability: .available, freshness: freshness)
+        let primary = remaining.map { RateLimitWindow(usedPercent: 100 - $0) }
+        let quotaAvailability: MonitorDataAvailability = primary == nil ? .unavailable : .available
+        let activity: RuntimeActivityCategory
+        switch state {
+        case .thinking: activity = .thinking
+        case .working: activity = .tool
+        case .waitingApproval: activity = .waitingApproval
+        case .completed: activity = .completed
+        case .failed: activity = .failed
+        case .interrupted: activity = .interrupted
+        case .systemError: activity = .systemError
+        case .disconnected: activity = .disconnected
+        case .paused, .idle: activity = .idle
+        }
+
+        return MonitorRuntimeSnapshot(
+            capturedAt: now,
+            monitoringPhase: .live,
+            currentState: state,
+            currentStateSince: now,
+            currentActivity: activity,
+            currentThread: nil,
+            currentSessionThread: nil,
+            activeThreadCount: [.thinking, .working].contains(state) ? 1 : 0,
+            waitingApprovalCount: waitingApprovalCount,
+            approvalRequestObserved: approvalRequestObserved,
+            threads: [],
+            sessionToken: nil,
+            account: MonitorAccountViewModel(availability: .unavailable, accountKind: nil, plan: nil),
+            usage: MonitorUsageViewModel(availability: .unavailable, usage: nil),
+            quota: MonitorQuotaViewModel(primaryAvailability: quotaAvailability, primary: primary, secondaryAvailability: .unavailable, secondary: nil, windowsAvailability: .unavailable, windows: []),
+            resetInformation: MonitorResetInformationViewModel(countAvailability: .unavailable, count: nil, detailsAvailability: .unavailable, details: nil),
+            sourceHealth: [.desktopLocal: desktop],
+            capabilities: [:]
+        )
     }
 
     private func quotaSnapshot(primary: RateLimitWindow, secondary: RateLimitWindow?, windows: [RateLimitWindow] = []) async -> MonitorRuntimeSnapshot {
