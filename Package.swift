@@ -7,7 +7,8 @@ let package = Package(
     platforms: [.macOS(.v13)],
     products: [
         .library(name: "CodexMonitorContracts", targets: ["CodexMonitorContracts"]),
-        .executable(name: "CodexMonitorApp", targets: ["CodexMonitorApp"])
+        .executable(name: "CodexMonitorApp", targets: ["CodexMonitorApp"]),
+        .executable(name: "ApprovalObserver", targets: ["ApprovalObserver"])
     ],
     targets: [
         .target(
@@ -22,6 +23,7 @@ let package = Package(
             dependencies: ["CodexMonitorContracts", "CSQLite"],
             resources: [.process("Resources")]
         ),
+        .executableTarget(name: "ApprovalObserver", dependencies: ["CodexMonitorContracts"]),
         .testTarget(
             name: "CodexMonitorContractsTests",
             dependencies: ["CodexMonitorContracts", "CodexMonitorApp", "CSQLite"],

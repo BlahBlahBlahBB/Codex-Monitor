@@ -17,7 +17,7 @@ final class ApprovalObserverIntegrationTests: XCTestCase {
         XCTAssertTrue(hooksEnabled)
 
         let hooks = try await fixture.fake.listHooks(cwds: [fixture.paths.codexHomeURL.path])
-        let owned = hooks.filter { $0.command.contains("observer.sh") }
+        let owned = hooks.filter { $0.command.contains("ApprovalObserver") }
         XCTAssertEqual(owned.count, 3)
         XCTAssertEqual(Set(owned.map(\.eventName)), Set(ApprovalObserverHookEvent.allCases.map(\.appServerName)))
         XCTAssertTrue(owned.allSatisfy { $0.enabled && $0.trustStatus == .trusted })
@@ -52,7 +52,7 @@ final class ApprovalObserverIntegrationTests: XCTestCase {
 
         let hooks = try await fixture.fake.listHooks(cwds: [fixture.paths.codexHomeURL.path])
         XCTAssertTrue(hooks.contains { $0.command == "/user/added-between-read-and-write" })
-        XCTAssertEqual(hooks.filter { $0.command.contains("observer.sh") }.count, 3)
+        XCTAssertEqual(hooks.filter { $0.command.contains("ApprovalObserver") }.count, 3)
         let externalRevision = await fixture.fake.externalRevision()
         XCTAssertEqual(externalRevision, "user-v2")
         let ownedCount = await fixture.fake.countOwnedHandlers()
@@ -74,7 +74,7 @@ final class ApprovalObserverIntegrationTests: XCTestCase {
 
         let hooks = try await fixture.fake.listHooks(cwds: [fixture.paths.codexHomeURL.path])
         XCTAssertEqual(hooks.first(where: { $0.command == "/user/untrusted" })?.trustStatus, .untrusted)
-        XCTAssertTrue(hooks.filter { $0.command.contains("observer.sh") }.allSatisfy { $0.trustStatus == .trusted })
+        XCTAssertTrue(hooks.filter { $0.command.contains("ApprovalObserver") }.allSatisfy { $0.trustStatus == .trusted })
     }
 
     func testRepeatedActivationIsIdempotentWithoutDuplicateOwnedHandlers() async throws {
@@ -107,7 +107,7 @@ final class ApprovalObserverIntegrationTests: XCTestCase {
         XCTAssertGreaterThan(rejectedWriteCount, 0)
 
         let hooks = try await fixture.fake.listHooks(cwds: [fixture.paths.codexHomeURL.path])
-        XCTAssertFalse(hooks.contains { $0.command.contains("observer.sh") })
+        XCTAssertFalse(hooks.contains { $0.command.contains("ApprovalObserver") })
         XCTAssertTrue(hooks.contains { $0.command == "/user/permission" })
         XCTAssertTrue(hooks.contains { $0.command == "/user/modified-during-deactivation" })
         let externalRevision = await fixture.fake.externalRevision()
@@ -138,7 +138,7 @@ final class ApprovalObserverIntegrationTests: XCTestCase {
     func testObserverPayloadUpdateUsesNewInlinePathAndRequiresNewTrust() async throws {
         let fixture = try makeFixture()
         defer { fixture.cleanup() }
-        let installer = AppOwnedApprovalObserverReleaseInstaller(paths: fixture.paths, applicationExecutableURL: fixture.executable)
+        let installer = AppOwnedApprovalObserverReleaseInstaller(paths: fixture.paths, helperExecutableURL: fixture.executable, signatureVerifier: { _ in true })
 
         let activated = await fixture.integration().activate()
         XCTAssertTrue(activated)
@@ -156,12 +156,38 @@ final class ApprovalObserverIntegrationTests: XCTestCase {
         let updated = await fixture.integration().activate()
         XCTAssertTrue(updated)
         let v2Hooks = try await fixture.fake.listHooks(cwds: [fixture.paths.codexHomeURL.path])
-        let v2Owned = v2Hooks.filter { $0.command.contains("observer.sh") }
+        let v2Owned = v2Hooks.filter { $0.command.contains("ApprovalObserver") }
         XCTAssertFalse(v2Owned.contains { $0.command == v1Command })
         XCTAssertEqual(v2Owned.count, 3)
         XCTAssertTrue(v2Owned.allSatisfy { $0.command == v2.command && $0.trustStatus == .trusted })
         let writesAfterV2 = await fixture.fake.successfulWrites().count
         XCTAssertGreaterThan(writesAfterV2, writesAfterV1)
+    }
+
+    func testReleaseInstallerCopiesDedicatedHelperDirectlyWithoutWrapper() throws {
+        let fixture = try makeFixture()
+        defer { fixture.cleanup() }
+        let helperBytes = try Data(contentsOf: fixture.executable)
+        let installer = AppOwnedApprovalObserverReleaseInstaller(paths: fixture.paths, helperExecutableURL: fixture.executable, signatureVerifier: { _ in true })
+
+        let release = try installer.ensureRelease()
+
+        XCTAssertEqual(release.executableURL, release.payloadURL)
+        XCTAssertEqual(try Data(contentsOf: release.payloadURL), helperBytes)
+        XCTAssertEqual(release.command, "'\(release.payloadURL.path)'")
+        XCTAssertFalse(release.command.contains(".sh"))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: release.directoryURL.appendingPathComponent("observer.sh").path))
+    }
+
+    func testReleaseInstallerRejectsHelperWithoutStrictSignature() throws {
+        let fixture = try makeFixture()
+        defer { fixture.cleanup() }
+        let installer = AppOwnedApprovalObserverReleaseInstaller(paths: fixture.paths, helperExecutableURL: fixture.executable, signatureVerifier: { _ in false })
+
+        XCTAssertThrowsError(try installer.ensureRelease()) { error in
+            XCTAssertEqual(error as? ApprovalObserverIntegrationError, .releaseSignatureInvalid)
+        }
+        XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.paths.versionsURL.path))
     }
 
     func testOnThenImmediateOffWhileActivationIsSuspendedLeavesObserverOff() async throws {
@@ -219,7 +245,7 @@ final class ApprovalObserverIntegrationTests: XCTestCase {
         let ownedCount = await fixture.fake.countOwnedHandlers()
         XCTAssertEqual(ownedCount, 3)
         let hooks = try await fixture.fake.listHooks(cwds: [fixture.paths.codexHomeURL.path])
-        XCTAssertTrue(hooks.filter { $0.command.contains("observer.sh") }.allSatisfy { $0.trustStatus == .trusted })
+        XCTAssertTrue(hooks.filter { $0.command.contains("ApprovalObserver") }.allSatisfy { $0.trustStatus == .trusted })
     }
 
     func testStaleStartupReconcileFollowedByOffCannotResurrectObserver() async throws {
@@ -294,6 +320,11 @@ final class ApprovalObserverIntegrationTests: XCTestCase {
         XCTAssertFalse(journalText.contains("raw-session-123"))
         XCTAssertFalse(journalText.contains("raw-turn-456"))
         XCTAssertFalse(journalText.contains("must-not-persist"))
+        let diagnostics = try String(contentsOf: fixture.paths.diagnosticURL)
+        XCTAssertTrue(diagnostics.contains("event_appended"))
+        XCTAssertFalse(diagnostics.contains("raw-session-123"))
+        XCTAssertFalse(diagnostics.contains("raw-turn-456"))
+        XCTAssertFalse(diagnostics.contains("must-not-persist"))
         XCTAssertEqual(HookApprovalJournalReader().ingest(records).events.count, 1)
     }
 
@@ -307,7 +338,8 @@ final class ApprovalObserverIntegrationTests: XCTestCase {
         func integration(onIntentRegistered: (@Sendable (Bool) -> Void)? = nil) -> ApprovalObserverIntegration {
             ApprovalObserverIntegration(
                 paths: paths,
-                applicationExecutableURL: executable,
+                helperExecutableURL: executable,
+                signatureVerifier: { _ in true },
                 codex: fake,
                 journalSource: source,
                 onIntentRegistered: onIntentRegistered
@@ -493,13 +525,13 @@ final class ApprovalObserverIntegrationTests: XCTestCase {
                   let hooks = snapshot.objectValue?["hooks"]?.objectValue else { return true }
             return hooks.values.flatMap { $0.arrayValue ?? [] }.flatMap { $0.objectValue?["hooks"]?.arrayValue ?? [] }.allSatisfy {
                 guard let command = $0.objectValue?["command"]?.stringValue else { return true }
-                return !command.contains("observer.sh")
+                return !command.contains("ApprovalObserver")
             }
         }
         func countOwnedHandlers() -> Int {
             guard let hooks = configuration.objectValue?["hooks"]?.objectValue else { return 0 }
             return hooks.values.flatMap { $0.arrayValue ?? [] }.flatMap { $0.objectValue?["hooks"]?.arrayValue ?? [] }.filter {
-                $0.objectValue?["command"]?.stringValue?.contains("observer.sh") == true
+                $0.objectValue?["command"]?.stringValue?.contains("ApprovalObserver") == true
             }.count
         }
         func trustedHashes() -> [String: String] { trustByKey }
@@ -570,7 +602,7 @@ final class ApprovalObserverIntegrationTests: XCTestCase {
         let appSupport = root.appendingPathComponent("Application Support/Codex Monitor/ApprovalObserver", isDirectory: true)
         let codexHome = root.appendingPathComponent("codex-home", isDirectory: true)
         try FileManager.default.createDirectory(at: codexHome, withIntermediateDirectories: true)
-        let executable = root.appendingPathComponent("CodexMonitorApp")
+        let executable = root.appendingPathComponent("ApprovalObserver")
         FileManager.default.createFile(atPath: executable.path, contents: Data("#!/bin/sh\nexit 0\n".utf8))
         try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: executable.path)
         let paths = AppOwnedApprovalObserverPaths(rootURL: appSupport, codexHomeURL: codexHome)

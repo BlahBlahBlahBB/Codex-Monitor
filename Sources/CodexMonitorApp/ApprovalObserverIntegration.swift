@@ -1,45 +1,8 @@
 import AppKit
 import CryptoKit
-import Darwin
 import Foundation
 import Security
 import CodexMonitorContracts
-
-// MARK: - App-owned paths and the frozen journal boundary
-
-/// All files under this root are owned by Codex Monitor.  It is intentionally
-/// distinct from the retained R1 evidence release and from Codex's user home.
-struct AppOwnedApprovalObserverPaths: Sendable, Equatable {
-    let rootURL: URL
-    let versionsURL: URL
-    let journalURL: URL
-    let sequenceURL: URL
-    let identityKeyURL: URL
-    let receiptURL: URL
-    let codexHomeURL: URL
-
-    init(rootURL: URL, codexHomeURL: URL = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".codex", isDirectory: true)) {
-        let normalizedRoot = rootURL.standardizedFileURL
-        self.rootURL = normalizedRoot
-        versionsURL = normalizedRoot.appendingPathComponent("versions", isDirectory: true)
-        let journalDirectory = normalizedRoot.appendingPathComponent("journal", isDirectory: true)
-        journalURL = journalDirectory.appendingPathComponent("events.ndjson")
-        sequenceURL = journalDirectory.appendingPathComponent("sequence")
-        identityKeyURL = normalizedRoot.appendingPathComponent("identity.key")
-        receiptURL = normalizedRoot.appendingPathComponent("installation.json")
-        self.codexHomeURL = codexHomeURL.standardizedFileURL
-    }
-
-    static var `default`: Self {
-        let applicationSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
-            ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support", isDirectory: true)
-        return Self(
-            rootURL: applicationSupport
-                .appendingPathComponent("Codex Monitor", isDirectory: true)
-                .appendingPathComponent("ApprovalObserver", isDirectory: true)
-        )
-    }
-}
 
 /// The driver can keep this source injected for the whole app lifetime while
 /// still treating it as absent until the user's setting has successfully
@@ -86,121 +49,6 @@ final class AppManagedHookApprovalIdentityResolver: HookApprovalIdentityResolvin
     }
 }
 
-/// This is the only process mode used by the installed observer command.  It
-/// is deliberately implemented by the shipped Codex Monitor executable, so
-/// the release wrapper has no dependency on Homebrew, jq, Python, or Node.
-enum ApprovalObserverHookRunner {
-    static let commandLineArgument = "--approval-observer-hook"
-    static let maximumInputBytes = 1 * 1_024 * 1_024
-    private static let sourceRawID = "codex-desktop-local"
-
-    static func run() {
-        do {
-            guard let input = try FileHandle.standardInput.read(upToCount: maximumInputBytes + 1),
-                  input.count <= maximumInputBytes else { return }
-            _ = run(input: input, paths: .default, keyMaterial: nil)
-        } catch {
-            return
-        }
-    }
-
-    @discardableResult
-    static func run(input: Data, paths: AppOwnedApprovalObserverPaths, keyMaterial: Data?) -> Bool {
-        guard input.count <= maximumInputBytes,
-              let object = try? JSONSerialization.jsonObject(with: input) as? [String: Any],
-              let rawEvent = object["hook_event_name"] as? String,
-              let kind = kind(for: rawEvent),
-              let sessionID = object["session_id"] as? String,
-              let turnID = object["turn_id"] as? String else { return false }
-
-        let material: Data
-        if let keyMaterial {
-            material = keyMaterial
-        } else {
-            guard let loaded = try? Data(contentsOf: paths.identityKeyURL) else { return false }
-            material = loaded
-        }
-        guard let deriver = KeyedHookApprovalIdentityDeriver(keyMaterial: material),
-              let owner = deriver.owner(sourceRawID: sourceRawID, sessionRawID: sessionID, turnRawID: turnID) else { return false }
-
-        return append(kind: kind, owner: owner, observedAt: Date(), paths: paths)
-    }
-
-    private static func kind(for rawEvent: String) -> HookApprovalJournalRecordKind? {
-        switch rawEvent.lowercased() {
-        case "permissionrequest": .permissionRequest
-        case "posttooluse": .postToolUse
-        case "stop": .stop
-        default: nil
-        }
-    }
-
-    private static func append(kind: HookApprovalJournalRecordKind, owner: HookApprovalTurnOwner, observedAt: Date, paths: AppOwnedApprovalObserverPaths) -> Bool {
-        let fileManager = FileManager.default
-        do {
-            let journalDirectory = paths.journalURL.deletingLastPathComponent()
-            try fileManager.createDirectory(at: journalDirectory, withIntermediateDirectories: true)
-            let descriptor = open(paths.sequenceURL.path, O_CREAT | O_RDWR, S_IRUSR | S_IWUSR)
-            guard descriptor >= 0 else { return false }
-            defer { close(descriptor) }
-            guard flock(descriptor, LOCK_EX) == 0 else { return false }
-            defer { _ = flock(descriptor, LOCK_UN) }
-
-            let stored = readAll(from: descriptor)
-            let current = UInt64(String(data: stored, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "") ?? 0
-            guard current < UInt64.max else { return false }
-            let next = current + 1
-            guard let eventID = HookApprovalJournalEventID(next),
-                  let record = HookApprovalJournalRecord(
-                      journalEventID: eventID,
-                      kind: kind,
-                      sourceID: owner.sourceID,
-                      sessionID: owner.sessionID,
-                      turnID: owner.turnID,
-                      observedAtMilliseconds: Int64(observedAt.timeIntervalSince1970 * 1_000)
-                  ),
-                  let encoded = try? JSONEncoder().encode(record),
-                  lseek(descriptor, 0, SEEK_SET) >= 0,
-                  ftruncate(descriptor, 0) == 0,
-                  writeAll(to: descriptor, data: Data(String(next).utf8)) else { return false }
-            if !fileManager.fileExists(atPath: paths.journalURL.path) {
-                guard fileManager.createFile(atPath: paths.journalURL.path, contents: nil, attributes: [.posixPermissions: 0o600]) else { return false }
-            }
-            let handle = try FileHandle(forWritingTo: paths.journalURL)
-            try handle.seekToEnd()
-            try handle.write(contentsOf: encoded + Data([0x0A]))
-            try handle.close()
-            return true
-        } catch {
-            return false
-        }
-    }
-
-    private static func readAll(from descriptor: Int32) -> Data {
-        guard lseek(descriptor, 0, SEEK_SET) >= 0 else { return Data() }
-        var result = Data()
-        var buffer = [UInt8](repeating: 0, count: 256)
-        while true {
-            let count = read(descriptor, &buffer, buffer.count)
-            guard count > 0 else { break }
-            result.append(contentsOf: buffer.prefix(count))
-        }
-        return result
-    }
-
-    private static func writeAll(to descriptor: Int32, data: Data) -> Bool {
-        data.withUnsafeBytes { rawBuffer in
-            guard let baseAddress = rawBuffer.baseAddress else { return data.isEmpty }
-            var offset = 0
-            while offset < rawBuffer.count {
-                let count = write(descriptor, baseAddress.advanced(by: offset), rawBuffer.count - offset)
-                guard count > 0 else { return false }
-                offset += count
-            }
-            return true
-        }
-    }
-}
 
 // MARK: - Immutable release installer
 
@@ -216,22 +64,29 @@ struct AppOwnedApprovalObserverRelease: Sendable, Equatable {
 
 struct AppOwnedApprovalObserverReleaseInstaller: Sendable {
     let paths: AppOwnedApprovalObserverPaths
-    let applicationExecutableURL: URL?
+    let helperExecutableURL: URL?
+    let signatureVerifier: @Sendable (URL) -> Bool
 
-    init(paths: AppOwnedApprovalObserverPaths, applicationExecutableURL: URL? = Bundle.main.executableURL) {
+    init(
+        paths: AppOwnedApprovalObserverPaths,
+        helperExecutableURL: URL? = Bundle.main.bundleURL.appendingPathComponent("Contents/Library/Helpers/ApprovalObserver"),
+        signatureVerifier: @escaping @Sendable (URL) -> Bool = AppOwnedApprovalObserverReleaseInstaller.strictlyValidSignature
+    ) {
         self.paths = paths
-        self.applicationExecutableURL = applicationExecutableURL
+        self.helperExecutableURL = helperExecutableURL
+        self.signatureVerifier = signatureVerifier
     }
 
     func ensureRelease() throws -> AppOwnedApprovalObserverRelease {
-        guard let applicationExecutableURL else {
+        guard let helperExecutableURL else {
             throw ApprovalObserverIntegrationError.releaseUnavailable
         }
-        let executable = applicationExecutableURL.resolvingSymlinksInPath().standardizedFileURL
+        let executable = helperExecutableURL.resolvingSymlinksInPath().standardizedFileURL
         let values = try executable.resourceValues(forKeys: [.isRegularFileKey, .isExecutableKey])
         guard values.isRegularFile == true, values.isExecutable == true else {
             throw ApprovalObserverIntegrationError.releaseUnavailable
         }
+        guard signatureVerifier(executable) else { throw ApprovalObserverIntegrationError.releaseSignatureInvalid }
         let payload = try Data(contentsOf: executable)
         guard !payload.isEmpty else { throw ApprovalObserverIntegrationError.releaseUnavailable }
         let payloadDigest = SHA256.hash(data: payload).map { String(format: "%02x", $0) }.joined()
@@ -243,17 +98,22 @@ struct AppOwnedApprovalObserverReleaseInstaller: Sendable {
 
         let releaseName = "observer-\(String(payloadDigest.prefix(32)))"
         let directory = paths.versionsURL.appendingPathComponent(releaseName, isDirectory: true)
-        let payloadURL = directory.appendingPathComponent("observer-payload")
-        let observerURL = directory.appendingPathComponent("observer.sh")
+        let payloadURL = directory.appendingPathComponent("ApprovalObserver")
         try ensureDirectory(directory)
 
         // The release owns an immutable copy of the observer payload.  The
         // installed command must never execute a future app binary through an
         // old trusted path.
         try ensureImmutableFile(payload, at: payloadURL, permissions: 0o700)
-        let wrapper = Data(("#!/bin/sh\nexec " + shellQuote(payloadURL.path) + " " + ApprovalObserverHookRunner.commandLineArgument + "\n").utf8)
-        try ensureImmutableFile(wrapper, at: observerURL, permissions: 0o700)
-        return AppOwnedApprovalObserverRelease(version: releaseName, directoryURL: directory, executableURL: observerURL, payloadURL: payloadURL, command: shellQuote(observerURL.path))
+        guard signatureVerifier(payloadURL) else { throw ApprovalObserverIntegrationError.releaseSignatureInvalid }
+        return AppOwnedApprovalObserverRelease(version: releaseName, directoryURL: directory, executableURL: payloadURL, payloadURL: payloadURL, command: shellQuote(payloadURL.path))
+    }
+
+    private static func strictlyValidSignature(_ url: URL) -> Bool {
+        var code: SecStaticCode?
+        guard SecStaticCodeCreateWithPath(url as CFURL, [], &code) == errSecSuccess,
+              let code else { return false }
+        return SecStaticCodeCheckValidity(code, SecCSFlags(rawValue: kSecCSStrictValidate), nil) == errSecSuccess
     }
 
     private func ensureImmutableFile(_ data: Data, at url: URL, permissions: Int) throws {
@@ -301,6 +161,7 @@ private func unquotedShellPath(_ command: String) -> String? {
 enum ApprovalObserverIntegrationError: Error, Sendable, Equatable {
     case releaseUnavailable
     case releaseCollision
+    case releaseSignatureInvalid
     case identityKeyUnavailable
     case malformedHooks
     case journalTooLarge
@@ -734,14 +595,20 @@ actor ApprovalObserverIntegration {
 
     init(
         paths: AppOwnedApprovalObserverPaths = .default,
-        applicationExecutableURL: URL? = Bundle.main.executableURL,
+        helperExecutableURL: URL? = Bundle.main.bundleURL.appendingPathComponent("Contents/Library/Helpers/ApprovalObserver"),
+        signatureVerifier: @escaping @Sendable (URL) -> Bool = { url in
+            var code: SecStaticCode?
+            guard SecStaticCodeCreateWithPath(url as CFURL, [], &code) == errSecSuccess,
+                  let code else { return false }
+            return SecStaticCodeCheckValidity(code, SecCSFlags(rawValue: kSecCSStrictValidate), nil) == errSecSuccess
+        },
         codex: (any ApprovalObserverCodexAPI)? = nil,
         journalSource: AppManagedHookApprovalJournalSource? = nil,
         identityResolver: AppManagedHookApprovalIdentityResolver? = nil,
         onIntentRegistered: (@Sendable (Bool) -> Void)? = nil
     ) {
         self.paths = paths
-        installer = AppOwnedApprovalObserverReleaseInstaller(paths: paths, applicationExecutableURL: applicationExecutableURL)
+        installer = AppOwnedApprovalObserverReleaseInstaller(paths: paths, helperExecutableURL: helperExecutableURL, signatureVerifier: signatureVerifier)
         self.codex = codex ?? AppServerApprovalObserverCodexClient()
         self.journalSource = journalSource ?? AppManagedHookApprovalJournalSource(journalURL: paths.journalURL)
         self.identityResolver = identityResolver ?? AppManagedHookApprovalIdentityResolver(identityKeyURL: paths.identityKeyURL)

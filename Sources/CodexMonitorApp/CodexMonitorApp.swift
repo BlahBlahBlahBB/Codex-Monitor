@@ -11,10 +11,6 @@ final class CodexMonitorApplication: NSObject {
     private static let applicationDelegate = CodexMonitorAppDelegate()
 
     static func main() {
-        if CommandLine.arguments.dropFirst().contains(ApprovalObserverHookRunner.commandLineArgument) {
-            ApprovalObserverHookRunner.run()
-            return
-        }
         let application = NSApplication.shared
         application.delegate = applicationDelegate
         application.run()
@@ -33,7 +29,6 @@ final class CodexMonitorAppDelegate: NSObject, NSApplicationDelegate {
     private lazy var approvalIntegration: ApprovalObserverIntegration = {
         ApprovalObserverIntegration(
             paths: approvalObserverPaths,
-            applicationExecutableURL: Bundle.main.executableURL,
             journalSource: approvalJournalSource,
             identityResolver: approvalIdentityResolver
         )
