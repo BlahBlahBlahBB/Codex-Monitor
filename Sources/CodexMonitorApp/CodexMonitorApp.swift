@@ -40,7 +40,11 @@ final class CodexMonitorAppDelegate: NSObject, NSApplicationDelegate {
             usageLedger: usageLedger,
             hookJournalSource: source,
             hookIdentityResolver: approvalIdentityResolver,
-            hookApprovalSourceIsActive: { source.isActive }
+            hookApprovalSourceIsActive: { source.isActive },
+            approvalNotificationDelivery: { [weak self] intent in
+                guard let self else { return .retry }
+                return await self.deliverApprovalNotificationOutboxIntent(intent)
+            }
         )
     }()
     private lazy var accountProvider = AccountUsageProvider(runtime: runtime)
@@ -102,6 +106,11 @@ final class CodexMonitorAppDelegate: NSObject, NSApplicationDelegate {
             await driver.refreshOnce()
             await accountProvider.refreshOnce()
         }
+    }
+
+    private func deliverApprovalNotificationOutboxIntent(_ intent: ApprovalNotificationOutboxIntent) async -> ApprovalNotificationDeliveryDisposition {
+        guard let surfaces else { return .retry }
+        return await surfaces.deliverApprovalOutboxIntent(intent)
     }
 
     private func setMonitoringPaused(_ paused: Bool) {

@@ -1,6 +1,7 @@
 import AppKit
 import CoreGraphics
 import Foundation
+import UserNotifications
 import XCTest
 @testable import CodexMonitorApp
 @testable import CodexMonitorContracts
@@ -368,6 +369,162 @@ final class MonitorProductIntegrationTests: XCTestCase {
             waitingApprovalEnabled: false,
             taskCompletedEnabled: true
         ))
+    }
+
+    func testApprovalNotificationUsesTheExistingTaskTitleAndLocalizedWaitingState() {
+        let chinese = MonitorNotificationContent.waitingApproval(
+            taskTitle: "真实审批任务",
+            languageCode: "zh-Hans",
+            appDisplayName: "Codex Monitor"
+        )
+        let english = MonitorNotificationContent.waitingApproval(
+            taskTitle: "Real approval task",
+            languageCode: "en",
+            appDisplayName: "Codex Monitor"
+        )
+
+        XCTAssertEqual(chinese.title, "Codex Monitor")
+        XCTAssertEqual(chinese.subtitle, "等待审批")
+        XCTAssertEqual(chinese.body, "真实审批任务")
+        XCTAssertEqual(english.title, "Codex Monitor")
+        XCTAssertEqual(english.subtitle, "Waiting for approval")
+        XCTAssertEqual(english.body, "Real approval task")
+    }
+
+    func testApprovalOutboxDeliveryUsesOneDeterministicRequestPerJournalIdentity() async {
+        let suite = "CodexMonitorTests.approvalNotification.\(UUID().uuidString)"
+        let preferences = MonitorPreferences(defaults: UserDefaults(suiteName: suite)!)
+        defer { UserDefaults.standard.removePersistentDomain(forName: suite) }
+        preferences.waitingApprovalNotifications = true
+        let delivery = NotificationDeliveryRecorder()
+        let controller = MonitorNotificationController(delivery: delivery, responseHandlerInstaller: {})
+
+        let first = approvalNotificationIntent(eventID: 91, title: "Authoritative task title")
+        let firstDelivery = await controller.deliverApprovalOutboxIntent(first, preferences: preferences)
+        XCTAssertEqual(firstDelivery, .confirmed)
+        let duplicateDelivery = await controller.deliverApprovalOutboxIntent(first, preferences: preferences)
+        XCTAssertEqual(duplicateDelivery, .confirmed)
+        let second = approvalNotificationIntent(eventID: 92, title: "Second real approval")
+        let secondDelivery = await controller.deliverApprovalOutboxIntent(second, preferences: preferences)
+        XCTAssertEqual(secondDelivery, .confirmed)
+
+        XCTAssertEqual(delivery.notifications.count, 2)
+        XCTAssertEqual(delivery.notifications.map(\.kind), [.waitingApproval, .waitingApproval])
+        XCTAssertEqual(delivery.notifications.map(\.content.body), ["Authoritative task title", "Second real approval"])
+        XCTAssertNotEqual(first.requestIdentifier, second.requestIdentifier)
+        XCTAssertEqual(first.requestIdentifier, ApprovalNotificationOutboxIntent.requestIdentifier(sourceID: first.sourceID, journalEventID: first.journalEventID))
+    }
+
+    func testApprovalNotificationDisabledAndWaitingSnapshotsDoNotDeliver() async {
+        let suite = "CodexMonitorTests.approvalNotificationDisabled.\(UUID().uuidString)"
+        let preferences = MonitorPreferences(defaults: UserDefaults(suiteName: suite)!)
+        defer { UserDefaults.standard.removePersistentDomain(forName: suite) }
+        let delivery = NotificationDeliveryRecorder()
+        let controller = MonitorNotificationController(delivery: delivery, responseHandlerInstaller: {})
+        let suppressed = await controller.deliverApprovalOutboxIntent(approvalNotificationIntent(eventID: 93, title: "Suppressed task"), preferences: preferences)
+        XCTAssertEqual(suppressed, .suppressed)
+
+        let snapshot = await activeUsageSessionSnapshot(
+            conversationName: "Snapshot is not authority",
+            threadRawID: "approval-snapshot-not-authority",
+            sessionTokens: 1
+        )
+        XCTAssertNil(MonitorNotificationContent.forTransition(
+            from: .working,
+            to: .waitingApproval,
+            snapshot: snapshot,
+            desktopSourceAvailable: true,
+            waitingApprovalEnabled: true,
+            taskCompletedEnabled: true
+        ))
+        XCTAssertTrue(delivery.notifications.isEmpty)
+    }
+
+    func testApprovalFeatureEnablementDoesNotDependOnNotificationPermission() {
+        XCTAssertEqual(notificationPreferenceEnablement(for: .waitingApproval), .beforeAuthorization)
+        XCTAssertEqual(notificationPreferenceEnablement(for: .taskCompleted), .afterAuthorization)
+    }
+
+    func testCompletionNotificationPresentationIsUnchangedAndNowCarriesTheCodexClickCategory() async throws {
+        let suite = "CodexMonitorTests.completionNotificationCategory.\(UUID().uuidString)"
+        let preferences = MonitorPreferences(defaults: UserDefaults(suiteName: suite)!)
+        defer { UserDefaults.standard.removePersistentDomain(forName: suite) }
+        preferences.taskCompletedNotifications = true
+        let delivery = NotificationDeliveryRecorder()
+        let controller = MonitorNotificationController(delivery: delivery, responseHandlerInstaller: {})
+        let runtime = MonitorRuntimeStore(engine: RuntimeStateEngine(initialPhase: .live), initialPhase: .live)
+        let source = SourceID("completion-notification-category")!
+        let thread = NamespacedID(sourceID: source, entityKind: .thread, rawID: "completion-thread")!
+        let turn = NamespacedID(sourceID: source, entityKind: .turn, rawID: "completion-turn")!
+        let now = Date(timeIntervalSince1970: 1_900_000_000)
+        await runtime.registerDesktopThread(DesktopThreadSnapshot(threadID: thread, conversationName: "Existing completion title", model: nil, reasoningEffort: nil, updatedAtMilliseconds: nil, tokensUsed: nil))
+        await runtime.ingest(.rollout(RolloutRecordEnvelope(threadID: thread, turnID: turn, itemID: nil, kind: .taskStarted, activity: nil, tokenSnapshot: nil, model: nil, reasoningEffort: nil, observedAt: now, fileOffset: 0)))
+        let working = await runtime.snapshot()
+        await runtime.ingest(.rollout(RolloutRecordEnvelope(threadID: thread, turnID: turn, itemID: nil, kind: .taskCompletedSuccess, activity: nil, tokenSnapshot: nil, model: nil, reasoningEffort: nil, observedAt: now, fileOffset: 1)))
+        let completed = await runtime.snapshot()
+
+        await controller.receive(snapshot: working, preferences: preferences)
+        await controller.receive(snapshot: completed, preferences: preferences)
+
+        XCTAssertEqual(delivery.notifications.count, 1)
+        let delivered = try XCTUnwrap(delivery.notifications.first)
+        XCTAssertEqual(delivered.kind, .completed)
+        XCTAssertEqual(delivered.content, MonitorNotificationContent.completed(snapshot: completed))
+    }
+
+    func testTaskNotificationClicksActivateOnlyKnownCodexMonitorNotifications() {
+        let activation = TaskNotificationActivationRecorder()
+        let handler = MonitorTaskNotificationResponseHandler { activation.record() }
+        let click = UNNotificationDefaultActionIdentifier
+
+        handler.handle(MonitorTaskNotificationResponse(
+            categoryIdentifier: MonitorTaskNotification.categoryIdentifier,
+            kindRawValue: MonitorTaskNotificationKind.waitingApproval.rawValue,
+            actionIdentifier: click
+        ))
+        handler.handle(MonitorTaskNotificationResponse(
+            categoryIdentifier: MonitorTaskNotification.categoryIdentifier,
+            kindRawValue: MonitorTaskNotificationKind.completed.rawValue,
+            actionIdentifier: click
+        ))
+        handler.handle(MonitorTaskNotificationResponse(
+            categoryIdentifier: MonitorTaskNotification.categoryIdentifier,
+            kindRawValue: "unknown",
+            actionIdentifier: click
+        ))
+        handler.handle(MonitorTaskNotificationResponse(
+            categoryIdentifier: MonitorTaskNotification.categoryIdentifier,
+            kindRawValue: MonitorTaskNotificationKind.completed.rawValue,
+            actionIdentifier: UNNotificationDismissActionIdentifier
+        ))
+
+        XCTAssertEqual(activation.count, 2)
+    }
+
+    func testCodexDesktopActivatorActivatesRunningAppLaunchesMissingAppAndFailsSafely() {
+        var runningActivations = 0
+        var launchedURLs: [URL] = []
+        CodexDesktopApplicationActivator(
+            activateRunning: { runningActivations += 1; return true },
+            resolvedApplicationURL: { XCTFail("Running Codex must not resolve a launch URL"); return nil },
+            launch: { launchedURLs.append($0) }
+        ).activateOrLaunch()
+        XCTAssertEqual(runningActivations, 1)
+        XCTAssertTrue(launchedURLs.isEmpty)
+
+        let codexURL = URL(fileURLWithPath: "/Applications/Codex.app")
+        CodexDesktopApplicationActivator(
+            activateRunning: { false },
+            resolvedApplicationURL: { codexURL },
+            launch: { launchedURLs.append($0) }
+        ).activateOrLaunch()
+        XCTAssertEqual(launchedURLs, [codexURL])
+
+        CodexDesktopApplicationActivator(
+            activateRunning: { false },
+            resolvedApplicationURL: { nil },
+            launch: { _ in XCTFail("Missing Codex must not attempt a launch") }
+        ).activateOrLaunch()
     }
 
     func testUsageCurrentSessionUsesResolvedDisplayTitle() async {
@@ -2396,12 +2553,43 @@ final class MonitorProductIntegrationTests: XCTestCase {
         return await runtime.snapshot()
     }
 
+    private func approvalNotificationIntent(eventID: UInt64, title: String) -> ApprovalNotificationOutboxIntent {
+        let source = HookOpaqueIdentity("hmac-sha256:" + String(repeating: "a", count: 64))!
+        return ApprovalNotificationOutboxIntent(
+            sourceID: source,
+            journalEventID: HookApprovalJournalEventID(eventID)!,
+            taskTitle: title
+        )
+    }
+
     private func id(_ kind: EntityKind, _ raw: String) -> NamespacedID {
         NamespacedID(sourceID: SourceID("permission-product-test")!, entityKind: kind, rawID: raw)!
     }
 
     private func event(_ thread: NamespacedID, _ turn: NamespacedID, _ kind: RolloutEventKind, activity: RolloutActivityCategory? = nil, item: NamespacedID? = nil, clock: PermissionPresentationTestClock) -> DesktopObservation {
         .rollout(RolloutRecordEnvelope(threadID: thread, turnID: turn, itemID: item, kind: kind, activity: activity, tokenSnapshot: nil, model: nil, reasoningEffort: nil, observedAt: clock.now(), fileOffset: 0))
+    }
+}
+
+@MainActor
+private final class NotificationDeliveryRecorder: MonitorNotificationDelivering {
+    private(set) var notifications: [MonitorTaskNotification] = []
+    private var pendingIdentifiers = Set<String>()
+
+    func deliver(_ notification: MonitorTaskNotification) async -> Bool {
+        notifications.append(notification)
+        pendingIdentifiers.insert(notification.identifier)
+        return true
+    }
+
+    func containsNotification(identifier: String) async -> Bool { pendingIdentifiers.contains(identifier) }
+}
+
+private final class TaskNotificationActivationRecorder: @unchecked Sendable {
+    private(set) var count = 0
+
+    func record() {
+        count += 1
     }
 }
 

@@ -425,6 +425,12 @@ public actor MonitorRuntimeStore {
         publishSnapshot()
     }
 
+    /// Exposes the frozen reducer's exact pending-event admission result to
+    /// downstream consumers without changing reducer semantics.
+    public func pendingHookApprovalThreadID(for event: HookApprovalLifecycleEvent) -> NamespacedID? {
+        engine.pendingHookApprovalThreadID(for: event)
+    }
+
     /// Accessibility health is independent of Desktop Local and the approval
     /// log lane. A missing permission never degrades runtime health.
     public func ingest(_ observation: ApprovalUIObservation) {

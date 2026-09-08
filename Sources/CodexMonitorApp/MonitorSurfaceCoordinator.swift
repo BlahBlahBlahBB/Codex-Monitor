@@ -91,6 +91,12 @@ final class MonitorSurfaceCoordinator: NSObject {
         ownership.reset()
     }
 
+    /// Notification outbox delivery remains a presentation concern, while the
+    /// driver owns durable cursor/outbox acknowledgement.
+    func deliverApprovalOutboxIntent(_ intent: ApprovalNotificationOutboxIntent) async -> ApprovalNotificationDeliveryDisposition {
+        await notifications.deliverApprovalOutboxIntent(intent, preferences: preferences)
+    }
+
     func showUsage() {
         if usageWindowController == nil {
             guard ownership.acquire(.usage) else { return }

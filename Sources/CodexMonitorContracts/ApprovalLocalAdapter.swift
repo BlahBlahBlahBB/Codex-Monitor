@@ -93,9 +93,15 @@ public struct ApprovalLifecycleCheckpoint: Sendable, Equatable {
     /// This optional lane is deliberately opaque. It carries no Hook payload
     /// or raw Hook identifier and shares the existing Monitor checkpoint file.
     public let hookJournal: HookApprovalJournalCheckpoint?
-    public init(cursor: ApprovalLogCursor?, unresolved: [ApprovalRequested], hookJournal: HookApprovalJournalCheckpoint? = nil) {
+    /// Intents that have a durable Hook cursor but still require Notification
+    /// Center reconciliation. Successful acknowledgement removes them.
+    public let notificationOutbox: [ApprovalNotificationOutboxIntent]
+    public init(cursor: ApprovalLogCursor?, unresolved: [ApprovalRequested], hookJournal: HookApprovalJournalCheckpoint? = nil, notificationOutbox: [ApprovalNotificationOutboxIntent] = []) {
         self.cursor = cursor
         self.hookJournal = hookJournal
+        self.notificationOutbox = Dictionary(uniqueKeysWithValues: notificationOutbox.map { ($0.requestIdentifier, $0) })
+            .values
+            .sorted { $0.requestIdentifier < $1.requestIdentifier }
         self.unresolved = unresolved.sorted { lhs, rhs in
             let left = (lhs.threadID.rawID, lhs.turnID.rawID, lhs.requestID.rawID)
             let right = (rhs.threadID.rawID, rhs.turnID.rawID, rhs.requestID.rawID)

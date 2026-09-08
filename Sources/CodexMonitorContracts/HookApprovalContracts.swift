@@ -268,6 +268,31 @@ public struct HookApprovalJournalCheckpoint: Codable, Sendable, Equatable {
     }
 }
 
+/// A Monitor-owned notification intent paired atomically with the opaque Hook
+/// journal cursor. It contains no raw session, turn, tool, or Hook payload
+/// information, so it is safe to recover after a process crash.
+public struct ApprovalNotificationOutboxIntent: Codable, Sendable, Equatable, Hashable {
+    public let requestIdentifier: String
+    public let sourceID: HookOpaqueIdentity
+    public let journalEventID: HookApprovalJournalEventID
+    public let taskTitle: String
+
+    public init(sourceID: HookOpaqueIdentity, journalEventID: HookApprovalJournalEventID, taskTitle: String) {
+        self.sourceID = sourceID
+        self.journalEventID = journalEventID
+        self.taskTitle = taskTitle
+        requestIdentifier = Self.requestIdentifier(sourceID: sourceID, journalEventID: journalEventID)
+    }
+
+    /// One sanitized journal event always maps to one opaque Notification
+    /// Center request identifier without exposing its identity there.
+    public static func requestIdentifier(sourceID: HookOpaqueIdentity, journalEventID: HookApprovalJournalEventID) -> String {
+        let material = Data("approval-notification\\u{0}\(sourceID.value)\\u{0}\(journalEventID.value)".utf8)
+        let digest = SHA256.hash(data: material)
+        return "approval." + digest.map { String(format: "%02x", $0) }.joined()
+    }
+}
+
 public struct HookApprovalJournalReadResult: Sendable, Equatable {
     public let events: [HookApprovalEvent]
     public let checkpoint: HookApprovalJournalCheckpoint

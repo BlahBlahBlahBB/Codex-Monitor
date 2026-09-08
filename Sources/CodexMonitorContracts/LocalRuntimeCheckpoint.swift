@@ -7,6 +7,7 @@ public final class ApprovalLifecycleRuntimeOwner: @unchecked Sendable {
     public let adapter: ApprovalLocalAdapter
     private let store: ApprovalLifecycleCheckpointStore
     private var hookJournalCheckpoint: HookApprovalJournalCheckpoint?
+    private var notificationOutbox: [ApprovalNotificationOutboxIntent]
 
     public init(databaseURL: URL, sourceID: ApprovalLocalSourceID, schema: ApprovalLogSchema, store: ApprovalLifecycleCheckpointStore, retryPolicy: ApprovalDBRetryPolicy = .init()) throws {
         self.store = store
@@ -20,6 +21,7 @@ public final class ApprovalLifecycleRuntimeOwner: @unchecked Sendable {
             checkpoint = ApprovalLifecycleCheckpoint(cursor: nil, unresolved: [])
         }
         hookJournalCheckpoint = checkpoint.hookJournal
+        notificationOutbox = checkpoint.notificationOutbox
         adapter = ApprovalLocalAdapter(databaseURL: databaseURL, sourceID: sourceID, schema: schema, lifecycleCheckpoint: checkpoint, retryPolicy: retryPolicy)
     }
 
@@ -77,7 +79,7 @@ public final class ApprovalLifecycleRuntimeOwner: @unchecked Sendable {
 
     public func checkpoint() -> ApprovalLifecycleCheckpoint {
         let legacy = adapter.lifecycleCheckpoint()
-        return ApprovalLifecycleCheckpoint(cursor: legacy.cursor, unresolved: legacy.unresolved, hookJournal: hookJournalCheckpoint)
+        return ApprovalLifecycleCheckpoint(cursor: legacy.cursor, unresolved: legacy.unresolved, hookJournal: hookJournalCheckpoint, notificationOutbox: notificationOutbox)
     }
 }
 
@@ -106,7 +108,12 @@ public enum ApprovalCatchUpError: Error, Equatable {
 
 public enum ApprovalLifecycleCheckpointStoreError: Error, Equatable { case unreadable, invalidCheckpoint, writeFailed }
 
-public final class ApprovalLifecycleCheckpointStore: @unchecked Sendable {
+public protocol ApprovalLifecycleCheckpointStoring: Sendable {
+    func load() throws -> ApprovalLifecycleCheckpoint
+    func save(_ checkpoint: ApprovalLifecycleCheckpoint) throws
+}
+
+public final class ApprovalLifecycleCheckpointStore: ApprovalLifecycleCheckpointStoring, @unchecked Sendable {
     private let url: URL
     public init(url: URL) { self.url = url }
 
@@ -125,7 +132,7 @@ public final class ApprovalLifecycleCheckpointStore: @unchecked Sendable {
                   let request = NamespacedID(sourceID: source, entityKind: .item, rawID: value.requestID) else { throw ApprovalLifecycleCheckpointStoreError.invalidCheckpoint }
             return ApprovalRequested(threadID: thread, turnID: turn, requestID: request, observedAt: value.observedAt)
         }
-        return ApprovalLifecycleCheckpoint(cursor: cursor, unresolved: unresolved, hookJournal: stored.hookJournal)
+        return ApprovalLifecycleCheckpoint(cursor: cursor, unresolved: unresolved, hookJournal: stored.hookJournal, notificationOutbox: stored.notificationOutbox ?? [])
     }
 
     public func save(_ checkpoint: ApprovalLifecycleCheckpoint) throws {
@@ -262,9 +269,11 @@ private struct StoredApprovalCheckpoint: Codable {
     let cursor: Cursor?
     let unresolved: [Request]
     let hookJournal: HookApprovalJournalCheckpoint?
+    let notificationOutbox: [ApprovalNotificationOutboxIntent]?
     init(_ checkpoint: ApprovalLifecycleCheckpoint) {
         cursor = checkpoint.cursor.map { Cursor(device: $0.fileIdentity.device, inode: $0.fileIdentity.inode, lastLogID: $0.lastLogID) }
         unresolved = checkpoint.unresolved.map { Request(sourceID: $0.threadID.sourceID.rawValue, threadID: $0.threadID.rawID, turnID: $0.turnID.rawID, requestID: $0.requestID.rawID, observedAt: $0.observedAt) }
         hookJournal = checkpoint.hookJournal
+        notificationOutbox = checkpoint.notificationOutbox
     }
 }

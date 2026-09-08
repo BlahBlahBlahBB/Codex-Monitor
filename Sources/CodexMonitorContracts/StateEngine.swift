@@ -346,6 +346,17 @@ public final class RuntimeStateEngine: @unchecked Sendable {
         }
     }
 
+    /// Read-only proof that this exact sanitized PermissionRequest was
+    /// admitted to its exact bound thread as a pending Hook approval. This is
+    /// deliberately narrower than the global presentation state.
+    public func pendingHookApprovalThreadID(for event: HookApprovalLifecycleEvent) -> NamespacedID? {
+        guard let threadID = boundThread(for: event.owner),
+              let record = records[threadID],
+              let pending = record.hookPendingApprovals[event.journalEventID],
+              pending.event.owner == event.owner else { return nil }
+        return threadID
+    }
+
     /// AX never reads a thread identifier. Attribute the visible sheet only
     /// when exactly one current runtime owner exists; otherwise keep it global.
     public func ingest(_ observation: ApprovalUIObservation) {

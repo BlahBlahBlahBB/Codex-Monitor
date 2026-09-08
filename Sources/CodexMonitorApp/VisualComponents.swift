@@ -513,7 +513,15 @@ enum MonitorDisplayValue {
         guard let currentThread = snapshot?.currentThread else {
             return L10n.tr("activity.noSession", languageCode: languageCode)
         }
-        return trustedConversationDisplayName(currentThread.conversationName)
+        return resolvedConversationDisplayTitle(for: currentThread, languageCode: languageCode)
+    }
+
+    /// Approval delivery is scoped to an already-correlated thread, rather
+    /// than whichever thread happens to be representative in a later
+    /// snapshot. It keeps the same trusted-name filtering and product fallback
+    /// used everywhere else, without creating another title system.
+    static func resolvedConversationDisplayTitle(for thread: MonitorThreadViewModel?, languageCode: String? = nil) -> String {
+        return trustedConversationDisplayName(thread?.conversationName)
             ?? L10n.tr("activity.currentTask", languageCode: languageCode)
     }
 
