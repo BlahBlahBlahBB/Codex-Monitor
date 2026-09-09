@@ -44,7 +44,7 @@ final class MonitorAppModelTests: XCTestCase {
         await runtime.ingest(event(thread, turn, .taskStarted, clock: clock))
         await runtime.ingest(.requested(ApprovalRequested(threadID: thread, turnID: turn, requestID: request, observedAt: clock.now())))
         model.apply(await runtime.snapshot())
-        XCTAssertEqual(model.snapshot?.currentState, .thinking)
+        XCTAssertEqual(model.snapshot?.currentState, .waitingApproval)
         XCTAssertEqual(model.snapshot?.approvalRequestObserved, true)
         XCTAssertEqual(model.snapshot?.capabilities[.waitingApproval]?.availability, .available)
 

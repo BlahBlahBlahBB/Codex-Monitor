@@ -6,6 +6,8 @@ import Foundation
 public final class ApprovalLifecycleRuntimeOwner: @unchecked Sendable {
     public let adapter: ApprovalLocalAdapter
     private let store: ApprovalLifecycleCheckpointStore
+    private var hookJournalCheckpoint: HookApprovalJournalCheckpoint?
+    private var notificationOutbox: [ApprovalNotificationOutboxIntent]
 
     public init(databaseURL: URL, sourceID: ApprovalLocalSourceID, schema: ApprovalLogSchema, store: ApprovalLifecycleCheckpointStore, retryPolicy: ApprovalDBRetryPolicy = .init()) throws {
         self.store = store
@@ -18,6 +20,8 @@ public final class ApprovalLifecycleRuntimeOwner: @unchecked Sendable {
               ApprovalLifecycleCheckpointStoreError.unreadable {
             checkpoint = ApprovalLifecycleCheckpoint(cursor: nil, unresolved: [])
         }
+        hookJournalCheckpoint = checkpoint.hookJournal
+        notificationOutbox = checkpoint.notificationOutbox
         adapter = ApprovalLocalAdapter(databaseURL: databaseURL, sourceID: sourceID, schema: schema, lifecycleCheckpoint: checkpoint, retryPolicy: retryPolicy)
     }
 
@@ -25,7 +29,7 @@ public final class ApprovalLifecycleRuntimeOwner: @unchecked Sendable {
     /// after the adapter's transactional admission point succeeds.
     public func poll() throws -> ApprovalPollResult {
         let result = try adapter.poll()
-        try store.save(adapter.lifecycleCheckpoint())
+        try store.save(checkpoint())
         return result
     }
 
@@ -55,7 +59,7 @@ public final class ApprovalLifecycleRuntimeOwner: @unchecked Sendable {
             if result.cursor == previousCursor { unchangedAvailablePolls += 1 }
             else { previousCursor = result.cursor; unchangedAvailablePolls = 0 }
             if unchangedAvailablePolls >= policy.requiredUnchangedAvailablePolls {
-                return ApprovalCatchUpResult(polls: pollNumber, cursor: result.cursor, checkpoint: adapter.lifecycleCheckpoint())
+                return ApprovalCatchUpResult(polls: pollNumber, cursor: result.cursor, checkpoint: checkpoint())
             }
         }
         if let lastResult, lastResult.health.state == .unavailable {
@@ -65,6 +69,18 @@ public final class ApprovalLifecycleRuntimeOwner: @unchecked Sendable {
     }
 
     public func shutdown() { adapter.shutdown() }
+
+    /// The future Hook reader supplies only a sanitized opaque checkpoint here.
+    /// This Monitor-side persistence API neither installs nor controls a Hook.
+    public func replaceHookJournalCheckpoint(_ value: HookApprovalJournalCheckpoint?) throws {
+        hookJournalCheckpoint = value
+        try store.save(checkpoint())
+    }
+
+    public func checkpoint() -> ApprovalLifecycleCheckpoint {
+        let legacy = adapter.lifecycleCheckpoint()
+        return ApprovalLifecycleCheckpoint(cursor: legacy.cursor, unresolved: legacy.unresolved, hookJournal: hookJournalCheckpoint, notificationOutbox: notificationOutbox)
+    }
 }
 
 /// Bounded reconciliation policy for first start, checkpoint loss, and
@@ -92,7 +108,12 @@ public enum ApprovalCatchUpError: Error, Equatable {
 
 public enum ApprovalLifecycleCheckpointStoreError: Error, Equatable { case unreadable, invalidCheckpoint, writeFailed }
 
-public final class ApprovalLifecycleCheckpointStore: @unchecked Sendable {
+public protocol ApprovalLifecycleCheckpointStoring: Sendable {
+    func load() throws -> ApprovalLifecycleCheckpoint
+    func save(_ checkpoint: ApprovalLifecycleCheckpoint) throws
+}
+
+public final class ApprovalLifecycleCheckpointStore: ApprovalLifecycleCheckpointStoring, @unchecked Sendable {
     private let url: URL
     public init(url: URL) { self.url = url }
 
@@ -111,7 +132,7 @@ public final class ApprovalLifecycleCheckpointStore: @unchecked Sendable {
                   let request = NamespacedID(sourceID: source, entityKind: .item, rawID: value.requestID) else { throw ApprovalLifecycleCheckpointStoreError.invalidCheckpoint }
             return ApprovalRequested(threadID: thread, turnID: turn, requestID: request, observedAt: value.observedAt)
         }
-        return ApprovalLifecycleCheckpoint(cursor: cursor, unresolved: unresolved)
+        return ApprovalLifecycleCheckpoint(cursor: cursor, unresolved: unresolved, hookJournal: stored.hookJournal, notificationOutbox: stored.notificationOutbox ?? [])
     }
 
     public func save(_ checkpoint: ApprovalLifecycleCheckpoint) throws {
@@ -133,10 +154,34 @@ public enum RuntimeActivityReconciliationAdmission: Sendable, Equatable {
 }
 
 public enum LocalRuntimeReconciliationOwner {
-    public static func thread(snapshot: DesktopThreadSnapshot, hydration: RolloutCheckpointHydration, approval: ApprovalLifecycleCheckpoint, approvalHealth: ApprovalCapabilityHealth, runtimeSourceAvailable: Bool, observedAt: Date, activityAdmission: RuntimeActivityReconciliationAdmission = .establishedProcess) -> RuntimeReconciliationThread {
-        let activeTurnID = activityAdmission == .establishedProcess ? hydration.activeTurnID : nil
+    /// Reduces transient desktop rollout IDs through the same keyed contract
+    /// used by the Hook writer. A missing session, turn, or resolver yields no
+    /// owner; callers must then conservatively avoid Hook attachment.
+    public static func derivedHookOwner(snapshot: DesktopThreadSnapshot, hydration: RolloutCheckpointHydration, resolver: (any HookApprovalIdentityResolving)?) -> HookApprovalTurnOwner? {
+        guard let resolver, let session = hydration.sessionID, let turn = hydration.activeTurnID?.rawID else { return nil }
+        return resolver.owner(sourceRawID: snapshot.threadID.sourceID.rawValue, sessionRawID: session, turnRawID: turn)
+    }
+
+    public static func thread(snapshot: DesktopThreadSnapshot, hydration: RolloutCheckpointHydration, approval: ApprovalLifecycleCheckpoint, approvalHealth: ApprovalCapabilityHealth, runtimeSourceAvailable: Bool, observedAt: Date, activityAdmission: RuntimeActivityReconciliationAdmission = .establishedProcess, hookOwner: HookApprovalTurnOwner? = nil, hookSourceHealth: HookApprovalSourceHealthState? = nil) -> RuntimeReconciliationThread {
+        let hookCheckpoint = approval.hookJournal
+        let hasExactHookSource = hookOwner.map { $0.sourceID == hookCheckpoint?.sourceID } ?? false
+        let hookPending = hasExactHookSource ? hookCheckpoint!.unresolved.filter { $0.owner == hookOwner } : []
+        // A durable, exact-owner Hook request is authoritative approval
+        // evidence. It may retain the rollout's turn through a process
+        // boundary, while ordinary historical activity remains suppressed.
+        let activeTurnID = activityAdmission == .establishedProcess || !hookPending.isEmpty ? hydration.activeTurnID : nil
         let activeItemCategory = activityAdmission == .establishedProcess ? hydration.activeItemCategory : nil
         let pending = approval.unresolved.filter { $0.threadID == snapshot.threadID && $0.turnID == activeTurnID }
+        let effectiveApprovalHealth: ApprovalCapabilityHealth
+        if let effectiveHookSourceHealth = hookSourceHealth ?? (hasExactHookSource ? hookCheckpoint?.sourceHealth : nil) {
+            switch effectiveHookSourceHealth {
+            case .available: effectiveApprovalHealth = hookPending.isEmpty ? .availableKnownNotWaiting : .availableWaiting
+            case .unavailable: effectiveApprovalHealth = .unavailable
+            case .unknown: effectiveApprovalHealth = .unknown
+            }
+        } else {
+            effectiveApprovalHealth = approvalHealth
+        }
         let activity: RuntimeActivityCategory? = switch activeItemCategory {
         case .tool?: .tool
         case .fileChange?: .fileChange
@@ -146,7 +191,7 @@ public enum LocalRuntimeReconciliationOwner {
             ?? hydration.terminal?.authoritativeEventAt
             ?? hydration.latestActiveStateAt
             ?? hydration.turnStartedAt
-        return RuntimeReconciliationThread(threadID: snapshot.threadID, conversationName: snapshot.conversationName, model: snapshot.model, activeTurnID: activeTurnID, turnStartedAt: activityAdmission == .establishedProcess ? hydration.turnStartedAt : nil, latestActiveState: activityAdmission == .establishedProcess ? hydration.latestActiveState : nil, latestActiveStateAt: activityAdmission == .establishedProcess ? hydration.latestActiveStateAt : nil, activeItemID: activityAdmission == .establishedProcess ? hydration.activeItemID : nil, activeItemCategory: activity, terminal: hydration.terminal, sessionTokenCumulative: hydration.authoritativeTokenTotal ?? snapshot.tokensUsed, sessionTokenProvenance: hydration.authoritativeTokenTotal == nil ? (snapshot.tokensUsed == nil ? nil : .stateDBSeedOrCrosscheck) : .rolloutCumulativeAuthoritative, approvalHealth: approvalHealth, unresolvedApprovals: pending, runtimeSourceAvailable: runtimeSourceAvailable, runtimeObservedAt: observedAt, approvalObservedAt: observedAt, lastMeaningfulActivityAt: meaningfulAt)
+        return RuntimeReconciliationThread(threadID: snapshot.threadID, conversationName: snapshot.conversationName, model: snapshot.model, activeTurnID: activeTurnID, turnStartedAt: activityAdmission == .establishedProcess ? hydration.turnStartedAt : nil, latestActiveState: activityAdmission == .establishedProcess ? hydration.latestActiveState : nil, latestActiveStateAt: activityAdmission == .establishedProcess ? hydration.latestActiveStateAt : nil, activeItemID: activityAdmission == .establishedProcess ? hydration.activeItemID : nil, activeItemCategory: activity, terminal: hydration.terminal, sessionTokenCumulative: hydration.authoritativeTokenTotal ?? snapshot.tokensUsed, sessionTokenProvenance: hydration.authoritativeTokenTotal == nil ? (snapshot.tokensUsed == nil ? nil : .stateDBSeedOrCrosscheck) : .rolloutCumulativeAuthoritative, approvalHealth: effectiveApprovalHealth, unresolvedApprovals: pending, unresolvedHookApprovals: hookPending, hookApprovalOwner: hasExactHookSource ? hookOwner : nil, runtimeSourceAvailable: runtimeSourceAvailable, runtimeObservedAt: observedAt, approvalObservedAt: observedAt, lastMeaningfulActivityAt: meaningfulAt)
     }
 
     /// Startup/pause owners call this exactly once after all selected local
@@ -164,9 +209,12 @@ public enum LocalRuntimeReconciliationOwner {
 public struct LocalRuntimeThreadCheckpoint: Sendable, Equatable {
     public let threadRawID: String
     public let rolloutCursor: RolloutCursor?
-    public init?(threadRawID: String, rolloutCursor: RolloutCursor?) {
+    /// Opaque binding for this already-selected desktop thread. It never holds
+    /// raw Hook session, turn, or tool-use identifiers.
+    public let hookApprovalOwner: HookApprovalTurnOwner?
+    public init?(threadRawID: String, rolloutCursor: RolloutCursor?, hookApprovalOwner: HookApprovalTurnOwner? = nil) {
         guard !threadRawID.isEmpty else { return nil }
-        self.threadRawID = threadRawID; self.rolloutCursor = rolloutCursor
+        self.threadRawID = threadRawID; self.rolloutCursor = rolloutCursor; self.hookApprovalOwner = hookApprovalOwner
     }
 }
 
@@ -208,7 +256,7 @@ public final class LocalRuntimeReconciliationInstaller: @unchecked Sendable {
                 if case .sourceHealth(let health) = observation { return health.state == .available }
                 return false
             }
-            rebuilt.append(LocalRuntimeReconciliationOwner.thread(snapshot: snapshot, hydration: hydration, approval: approvalCheckpoint, approvalHealth: approvalHealth, runtimeSourceAvailable: runtimeAvailable, observedAt: now, activityAdmission: .requireFreshLiveEvidence))
+            rebuilt.append(LocalRuntimeReconciliationOwner.thread(snapshot: snapshot, hydration: hydration, approval: approvalCheckpoint, approvalHealth: approvalHealth, runtimeSourceAvailable: runtimeAvailable, observedAt: now, activityAdmission: .requireFreshLiveEvidence, hookOwner: checkpoint.hookApprovalOwner))
         }
         engine.installReconciliation(rebuilt)
         return rebuilt
@@ -220,8 +268,12 @@ private struct StoredApprovalCheckpoint: Codable {
     struct Request: Codable { let sourceID: String; let threadID: String; let turnID: String; let requestID: String; let observedAt: Date }
     let cursor: Cursor?
     let unresolved: [Request]
+    let hookJournal: HookApprovalJournalCheckpoint?
+    let notificationOutbox: [ApprovalNotificationOutboxIntent]?
     init(_ checkpoint: ApprovalLifecycleCheckpoint) {
         cursor = checkpoint.cursor.map { Cursor(device: $0.fileIdentity.device, inode: $0.fileIdentity.inode, lastLogID: $0.lastLogID) }
         unresolved = checkpoint.unresolved.map { Request(sourceID: $0.threadID.sourceID.rawValue, threadID: $0.threadID.rawID, turnID: $0.turnID.rawID, requestID: $0.requestID.rawID, observedAt: $0.observedAt) }
+        hookJournal = checkpoint.hookJournal
+        notificationOutbox = checkpoint.notificationOutbox
     }
 }

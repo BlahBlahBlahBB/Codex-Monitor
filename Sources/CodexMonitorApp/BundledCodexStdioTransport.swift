@@ -121,13 +121,13 @@ actor BundledCodexStdioChannel: JSONRPCByteChannel {
     }
 }
 
-private final class StdioLineReader: @unchecked Sendable {
+final class StdioLineReader: @unchecked Sendable {
     private let lock = NSLock()
     private let handle: FileHandle
     private var buffered = Data()
     private var lines = [Data]()
     private var finished = false
-    private var waiter: CheckedContinuation<Data?, Never>?
+    private var waiters = [CheckedContinuation<Data?, Never>]()
 
     init(handle: FileHandle) {
         self.handle = handle
@@ -137,10 +137,17 @@ private final class StdioLineReader: @unchecked Sendable {
     func nextLine() async -> Data? {
         await withCheckedContinuation { continuation in
             lock.lock()
-            if !lines.isEmpty { continuation.resume(returning: lines.removeFirst()) }
-            else if finished { continuation.resume(returning: nil) }
-            else { waiter = continuation }
-            lock.unlock()
+            if !lines.isEmpty {
+                let line = lines.removeFirst()
+                lock.unlock()
+                continuation.resume(returning: line)
+            } else if finished {
+                lock.unlock()
+                continuation.resume(returning: nil)
+            } else {
+                waiters.append(continuation)
+                lock.unlock()
+            }
         }
     }
 
@@ -149,11 +156,11 @@ private final class StdioLineReader: @unchecked Sendable {
         guard !finished else { lock.unlock(); return }
         finished = true
         handle.readabilityHandler = nil
-        let waiting = waiter
-        waiter = nil
+        let waiting = waiters
+        waiters.removeAll()
         lock.unlock()
         handle.closeFile()
-        waiting?.resume(returning: nil)
+        for continuation in waiting { continuation.resume(returning: nil) }
     }
 
     private func read(_ data: Data) {
@@ -167,12 +174,23 @@ private final class StdioLineReader: @unchecked Sendable {
             lines.append(Data(line))
             buffered.removeSubrange(...newline)
         }
-        let waiting = waiter
-        let line = waiting == nil || lines.isEmpty ? nil : lines.removeFirst()
-        if line != nil { waiter = nil }
+        var deliveries = [(CheckedContinuation<Data?, Never>, Data)]()
+        while !waiters.isEmpty, !lines.isEmpty {
+            deliveries.append((waiters.removeFirst(), lines.removeFirst()))
+        }
         lock.unlock()
-        if let waiting { waiting.resume(returning: line) }
+        for (continuation, line) in deliveries { continuation.resume(returning: line) }
     }
+
+#if DEBUG
+    var pendingReadCountForTesting: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return waiters.count
+    }
+
+    func ingestForTesting(_ data: Data) { read(data) }
+#endif
 }
 
 private final class StdioDrainer: @unchecked Sendable {

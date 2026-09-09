@@ -87,43 +87,49 @@ build_args=(
 SDKROOT="$sdk_path" "$swift_tool" "${build_args[@]}"
 bin_path="$(SDKROOT="$sdk_path" "$swift_tool" "${build_args[@]}" --show-bin-path)"
 executable="$bin_path/CodexMonitorApp"
+helper_executable="$bin_path/ApprovalObserver"
 resource_bundle="$bin_path/CodexMonitorContracts_CodexMonitorApp.bundle"
 
 [[ -x "$executable" ]] || { print -u2 "Missing executable: $executable"; exit 1; }
+[[ -x "$helper_executable" ]] || { print -u2 "Missing approval observer helper: $helper_executable"; exit 1; }
 [[ -d "$resource_bundle" ]] || { print -u2 "Missing SwiftPM resource bundle: $resource_bundle"; exit 1; }
 
 cp "$executable" "$app_path/Contents/MacOS/CodexMonitorApp"
+mkdir -p "$app_path/Contents/Library/Helpers"
+cp "$helper_executable" "$app_path/Contents/Library/Helpers/ApprovalObserver"
 ditto "$resource_bundle" "$app_path/Contents/Resources/$(basename "$resource_bundle")"
 cp "$icon_source" "$app_path/Contents/Resources/$(basename "$icon_source")"
 
 app_executable="$app_path/Contents/MacOS/CodexMonitorApp"
+app_helper="$app_path/Contents/Library/Helpers/ApprovalObserver"
 
 # SwiftPM/Xcode currently adds a toolchain-local Swift rpath. It is useful only
 # to the build host and makes the app nonportable. Remove that Mach-O load
 # command structurally (not by binary-string replacement), preserving the
 # system Swift and @loader_path rpaths used at runtime.
-toolchain_rpaths=()
-while IFS= read -r rpath; do
-  [[ "$rpath" == "$toolchain_root"/* ]] && toolchain_rpaths+=("$rpath")
-done < <("$otool_tool" -l "$app_executable" | awk '
-  $1 == "cmd" && $2 == "LC_RPATH" { in_rpath = 1; next }
-  in_rpath && $1 == "path" { print $2; in_rpath = 0 }
-')
-for rpath in "${toolchain_rpaths[@]}"; do
-  "$install_name_tool" -delete_rpath "$rpath" "$app_executable"
+for packaged_executable in "$app_executable" "$app_helper"; do
+  toolchain_rpaths=()
+  while IFS= read -r rpath; do
+    [[ "$rpath" == "$toolchain_root"/* ]] && toolchain_rpaths+=("$rpath")
+  done < <("$otool_tool" -l "$packaged_executable" | awk '
+    $1 == "cmd" && $2 == "LC_RPATH" { in_rpath = 1; next }
+    in_rpath && $1 == "path" { print $2; in_rpath = 0 }
+  ')
+  for rpath in "${toolchain_rpaths[@]}"; do
+    "$install_name_tool" -delete_rpath "$rpath" "$packaged_executable"
+  done
+  if "$otool_tool" -l "$packaged_executable" | awk '
+    $1 == "cmd" && $2 == "LC_RPATH" { in_rpath = 1; next }
+    in_rpath && $1 == "path" { print $2; in_rpath = 0 }
+  ' | grep -Eq '^/.*?/Toolchains/'; then
+    print -u2 "Refusing to package an executable with an absolute Xcode toolchain LC_RPATH"
+    exit 1
+  fi
+  if grep -aFq "$project_root" "$packaged_executable"; then
+    print -u2 "Refusing to package an executable containing the checkout path"
+    exit 1
+  fi
 done
-
-if "$otool_tool" -l "$app_executable" | awk '
-  $1 == "cmd" && $2 == "LC_RPATH" { in_rpath = 1; next }
-  in_rpath && $1 == "path" { print $2; in_rpath = 0 }
-' | grep -Eq '^/.*?/Toolchains/'; then
-  print -u2 "Refusing to package an executable with an absolute Xcode toolchain LC_RPATH"
-  exit 1
-fi
-if grep -aFq "$project_root" "$app_executable"; then
-  print -u2 "Refusing to package an executable containing the checkout path"
-  exit 1
-fi
 
 # Validate the final, post-RPATH-cleanup binary before signing or creating a
 # DMG. The SDK marker is part of the frozen visual-release contract.
@@ -194,6 +200,7 @@ done < <(find "$app_path/Contents" -depth -type d \( -name '*.framework' -o -nam
 sign_code "$main_executable"
 sign_code "$app_path"
 "$codesign_tool" --verify --deep --strict --verbose=2 "$app_path"
+"$codesign_tool" --verify --strict --verbose=2 "$app_helper"
 
 # The staging directory is deliberately limited to the app and Applications
 # alias. hdiutil receives a stable volume name and output filename.

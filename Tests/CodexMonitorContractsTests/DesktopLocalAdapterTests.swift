@@ -90,6 +90,26 @@ final class DesktopLocalAdapterTests: XCTestCase {
         XCTAssertFalse(active.contains { $0.kind == .taskCompletedSuccess || $0.kind == .taskCompletedFailure || $0.kind == .turnAbortedInterrupted })
     }
 
+    func testItemCompletedIsNotATurnTerminal() throws {
+        let file = try fixture.rollout("thread-a", lines: [fixture.session("thread-a"), fixture.started("turn-a"), fixture.itemCompleted("turn-a")])
+        try fixture.addThread("thread-a", rollout: file)
+        let adapter = try fixture.adapter(); let thread = try adapter.open(threadRawID: "thread-a")
+
+        let observations = try adapter.poll(threadID: thread.threadID).observations.rollouts
+        XCTAssertTrue(observations.contains { $0.kind == .taskStarted })
+        XCTAssertFalse(observations.contains { $0.kind == .taskCompletedSuccess || $0.kind == .taskCompletedFailure || $0.kind == .turnAbortedInterrupted })
+    }
+
+    func testNumericTaskCompleteWithoutErrorFieldIsSuccessTerminal() throws {
+        let file = try fixture.rollout("thread-a", lines: [fixture.session("thread-a"), fixture.started("turn-a"), fixture.completeWithoutError("turn-a")])
+        try fixture.addThread("thread-a", rollout: file)
+        let adapter = try fixture.adapter(); let thread = try adapter.open(threadRawID: "thread-a")
+
+        let terminal = try XCTUnwrap(try adapter.poll(threadID: thread.threadID).observations.rollouts.first { $0.kind == .taskCompletedSuccess })
+        XCTAssertEqual(terminal.turnID?.rawID, "turn-a")
+        XCTAssertEqual(terminal.authoritativeEventAt, fixture.authoritativeTerminalDate)
+    }
+
     func testDuplicateTokenSnapshotDoesNotAddLastValue() throws {
         let file = try fixture.rollout("thread-a", lines: [fixture.session("thread-a"), fixture.started("turn-a"), fixture.token(total: 100, last: 10), fixture.token(total: 100, last: 10), fixture.token(total: 110, last: 10)])
         try fixture.addThread("thread-a", rollout: file)
@@ -304,17 +324,17 @@ final class DesktopLocalAdapterTests: XCTestCase {
         XCTAssertEqual(terminal.authoritativeEventAt, fixture.authoritativeTerminalDate)
         XCTAssertNotEqual(terminal.authoritativeEventAt, terminal.observedAt)
 
-        // Exercise the real decoder-to-reducer path: the output clears only
-        // the exact request/call, through agentResponse rather than thinking.
+        // An item/call ID is not a proven PermissionRequest identity. The
+        // output therefore cannot clear a pending approval by guesswork.
         let engine = RuntimeStateEngine(initialPhase: .live)
         for record in records.prefix(2) { engine.ingest(record) }
         let turn = try XCTUnwrap(records.first { $0.kind == .taskStarted }?.turnID)
         let call = try XCTUnwrap(records.first { $0.activity == .tool }?.itemID)
         engine.ingest(.requested(ApprovalRequested(threadID: thread.threadID, turnID: turn, requestID: call, observedAt: Date())))
-        XCTAssertEqual(engine.snapshot().threads.first?.state, .working)
+        XCTAssertEqual(engine.snapshot().threads.first?.state, .waitingApproval)
         XCTAssertEqual(engine.snapshot().threads.first?.approvalRequestObserved, true)
         engine.ingest(try XCTUnwrap(records.first { $0.activity == .agentResponse }))
-        XCTAssertEqual(engine.snapshot().threads.first?.state, .thinking)
+        XCTAssertEqual(engine.snapshot().threads.first?.state, .waitingApproval)
     }
 
     func testCheckpointRejectsReplacedFileAndSameInodeSessionMismatch() throws {
@@ -601,6 +621,8 @@ private final class LocalFixture {
     func reasoning(_ id: String) -> String { "{\"type\":\"response_item\",\"payload\":{\"type\":\"reasoning\",\"id\":\"\(id)\"}}" }
     func tool(_ id: String) -> String { "{\"type\":\"response_item\",\"payload\":{\"type\":\"function_call\",\"call_id\":\"\(id)\"}}" }
     func complete(_ turn: String) -> String { "{\"timestamp\":\"2030-01-01T00:00:00Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"task_complete\",\"turn_id\":\"\(turn)\",\"completed_at\":1893456000,\"error\":null}}" }
+    func completeWithoutError(_ turn: String) -> String { "{\"timestamp\":\"2030-01-01T00:00:00Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"task_complete\",\"turn_id\":\"\(turn)\",\"completed_at\":1893456000}}" }
+    func itemCompleted(_ turn: String) -> String { "{\"type\":\"event_msg\",\"payload\":{\"type\":\"item_completed\",\"turn_id\":\"\(turn)\"}}" }
     func toolOutput(_ id: String) -> String { "{\"type\":\"response_item\",\"payload\":{\"type\":\"function_call_output\",\"call_id\":\"\(id)\"}}" }
 
     private func executeDatabase(_ sql: String) throws {

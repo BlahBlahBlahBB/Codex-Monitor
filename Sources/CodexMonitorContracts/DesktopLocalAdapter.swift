@@ -373,9 +373,12 @@ public struct RolloutCheckpointHydration: Sendable, Equatable {
     public let latestActiveStateAt: Date?
     public let terminal: ReconciledTerminal?
     public let authoritativeTokenTotal: Int64?
-    public init(activeTurnID: NamespacedID?, turnStartedAt: Date?, activeItemID: NamespacedID?, activeItemCategory: RolloutActivityCategory?, latestActiveState: MonitorRuntimeState?, latestActiveStateAt: Date?, terminal: ReconciledTerminal?, authoritativeTokenTotal: Int64?) {
+    /// Memory-only source input for deriving an opaque Hook owner. It is not
+    /// copied into a Hook checkpoint or a runtime reconciliation result.
+    public let sessionID: String?
+    public init(activeTurnID: NamespacedID?, turnStartedAt: Date?, activeItemID: NamespacedID?, activeItemCategory: RolloutActivityCategory?, latestActiveState: MonitorRuntimeState?, latestActiveStateAt: Date?, terminal: ReconciledTerminal?, authoritativeTokenTotal: Int64?, sessionID: String? = nil) {
         self.activeTurnID = activeTurnID; self.turnStartedAt = turnStartedAt; self.activeItemID = activeItemID; self.activeItemCategory = activeItemCategory
-        self.latestActiveState = latestActiveState; self.latestActiveStateAt = latestActiveStateAt; self.terminal = terminal; self.authoritativeTokenTotal = authoritativeTokenTotal
+        self.latestActiveState = latestActiveState; self.latestActiveStateAt = latestActiveStateAt; self.terminal = terminal; self.authoritativeTokenTotal = authoritativeTokenTotal; self.sessionID = sessionID
     }
 }
 
@@ -654,7 +657,7 @@ public final class RolloutIncrementalReader: @unchecked Sendable {
     }
 
     private func checkpointHydration() -> RolloutCheckpointHydration {
-        RolloutCheckpointHydration(activeTurnID: activeTurnID, turnStartedAt: activeTurnStartedAt, activeItemID: activeItemID, activeItemCategory: activeItemCategory, latestActiveState: latestActiveState, latestActiveStateAt: latestActiveStateAt, terminal: latestTerminal, authoritativeTokenTotal: lastTokenTotal)
+        RolloutCheckpointHydration(activeTurnID: activeTurnID, turnStartedAt: activeTurnStartedAt, activeItemID: activeItemID, activeItemCategory: activeItemCategory, latestActiveState: latestActiveState, latestActiveStateAt: latestActiveStateAt, terminal: latestTerminal, authoritativeTokenTotal: lastTokenTotal, sessionID: binding.sessionID)
     }
 
     private func invalidated(_ invalidation: RolloutReadInvalidation, reason: DesktopSourceHealthReason, identity: FileIdentity?) -> RolloutReadResult {

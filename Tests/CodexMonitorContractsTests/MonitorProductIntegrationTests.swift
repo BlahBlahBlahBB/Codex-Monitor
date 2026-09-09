@@ -1,6 +1,7 @@
 import AppKit
 import CoreGraphics
 import Foundation
+import UserNotifications
 import XCTest
 @testable import CodexMonitorApp
 @testable import CodexMonitorContracts
@@ -83,9 +84,8 @@ final class MonitorProductIntegrationTests: XCTestCase {
 
     func testSettingsAlwaysHasAStableDefaultDetailRoute() {
         XCTAssertEqual(SettingsSection.defaultSection, .floating)
-        XCTAssertEqual(SettingsSection.allCases.count, 7)
+        XCTAssertEqual(SettingsSection.allCases.count, 6)
         XCTAssertEqual(SettingsSection.defaultSection.title, L10n.tr("settings.floating"))
-        XCTAssertEqual(SettingsSection.maintenance.title, L10n.tr("settings.maintenance"))
     }
 
     func testActionRowAndBilingualLocalizationContracts() {
@@ -93,6 +93,8 @@ final class MonitorProductIntegrationTests: XCTestCase {
         XCTAssertEqual(UIInteractionContract.disabledOpacity, 0.42)
         XCTAssertEqual(L10n.tr("menu.refresh", languageCode: "en"), "Refresh")
         XCTAssertEqual(L10n.tr("menu.refresh", languageCode: "zh-Hans"), "刷新")
+        XCTAssertEqual(L10n.tr("settings.refresh", languageCode: "zh-Hans"), "立即刷新")
+        XCTAssertEqual(L10n.tr("settings.exportDiagnostics", languageCode: "zh-Hans"), "导出诊断")
         XCTAssertEqual(L10n.tr("menu.alwaysOnTopUnavailable", languageCode: "zh-Hans"), "始终置顶（不可用）")
         XCTAssertEqual(PopoverActionFeedback.surfaceOpacity(for: .rest), 0)
         XCTAssertEqual(PopoverActionFeedback.surfaceOpacity(for: .hover), 0.09)
@@ -106,11 +108,45 @@ final class MonitorProductIntegrationTests: XCTestCase {
         ]
         let popoverKeys = ["label.account", "label.plan", "label.quota", "label.resetDate", "label.quotaReset", "label.resetCredit", "quota.window.daily", "quota.window.weekly", "quota.window.monthly"]
         let usageKeys = ["label.session", "label.currentSession", "label.sessionToken", "label.tokenUsage", "label.todayToken", "label.last30DaysToken"]
-        let settingsKeys = ["settings.general", "settings.floating", "settings.notifications", "settings.privacy", "settings.advanced", "settings.maintenance", "settings.about", "settings.exportDiagnostics", "settings.diagnosticsExported", "settings.diagnosticsExportFailed"]
+        let settingsKeys = ["settings.general", "settings.floating", "settings.notifications", "settings.privacy", "settings.advanced", "settings.about", "settings.exportDiagnostics", "settings.diagnosticsExported", "settings.diagnosticsExportFailed"]
         for key in contextMenuKeys + popoverKeys + usageKeys + settingsKeys {
             XCTAssertNotEqual(L10n.tr(key, languageCode: "zh-Hans"), key, "missing zh-Hans string: \(key)")
             XCTAssertNotEqual(L10n.tr(key, languageCode: "en"), key, "missing English string: \(key)")
         }
+    }
+
+    func testSettingsCleanupRemovesDeprecatedRowsAndKeepsApprovedPlacement() throws {
+        let removedKeys = [
+            "settings.experimentalApprovalYellow",
+            "settings.experimentalApprovalYellowDescription",
+            "settings.beta",
+            "settings.openCodex",
+            "settings.maintenance"
+        ]
+        for language in ["en", "zh-Hans"] {
+            for key in removedKeys {
+                XCTAssertEqual(L10n.tr(key, languageCode: language), key, "obsolete localization key remains: \(key) [\(language)]")
+            }
+        }
+
+        let sourceURL = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("Sources/CodexMonitorApp/ProductViews.swift")
+        let source = try String(contentsOf: sourceURL, encoding: .utf8)
+        let advancedStart = try XCTUnwrap(source.range(of: "private struct AdvancedSettingsDetail: View {"))
+        let aboutStart = try XCTUnwrap(source.range(of: "private struct AboutSettingsDetail: View {", range: advancedStart.upperBound..<source.endIndex))
+        let advanced = String(source[advancedStart.lowerBound..<aboutStart.lowerBound])
+
+        XCTAssertTrue(advanced.contains("SettingsRow(title: L10n.tr(\"settings.refresh\"))"))
+        XCTAssertTrue(advanced.contains("SettingsRow(title: L10n.tr(\"settings.exportDiagnostics\"))"))
+        XCTAssertFalse(advanced.contains("settings.experimentalApprovalYellow"))
+        XCTAssertFalse(advanced.contains("settings.openCodex"))
+        XCTAssertFalse(source.contains("case maintenance"))
+        XCTAssertFalse(source.contains("case .maintenance"))
+        XCTAssertFalse(source.contains("MaintenanceSettingsDetail"))
+        XCTAssertFalse(source.contains("settings.maintenance"))
     }
 
     func testDiagnosticsExportUsesTimestampedNonOverwritingSanitizedZIP() async throws {
@@ -368,6 +404,162 @@ final class MonitorProductIntegrationTests: XCTestCase {
             waitingApprovalEnabled: false,
             taskCompletedEnabled: true
         ))
+    }
+
+    func testApprovalNotificationUsesTheExistingTaskTitleAndLocalizedWaitingState() {
+        let chinese = MonitorNotificationContent.waitingApproval(
+            taskTitle: "真实审批任务",
+            languageCode: "zh-Hans",
+            appDisplayName: "Codex Monitor"
+        )
+        let english = MonitorNotificationContent.waitingApproval(
+            taskTitle: "Real approval task",
+            languageCode: "en",
+            appDisplayName: "Codex Monitor"
+        )
+
+        XCTAssertEqual(chinese.title, "Codex Monitor")
+        XCTAssertEqual(chinese.subtitle, "等待审批")
+        XCTAssertEqual(chinese.body, "真实审批任务")
+        XCTAssertEqual(english.title, "Codex Monitor")
+        XCTAssertEqual(english.subtitle, "Waiting for approval")
+        XCTAssertEqual(english.body, "Real approval task")
+    }
+
+    func testApprovalOutboxDeliveryUsesOneDeterministicRequestPerJournalIdentity() async {
+        let suite = "CodexMonitorTests.approvalNotification.\(UUID().uuidString)"
+        let preferences = MonitorPreferences(defaults: UserDefaults(suiteName: suite)!)
+        defer { UserDefaults.standard.removePersistentDomain(forName: suite) }
+        preferences.waitingApprovalNotifications = true
+        let delivery = NotificationDeliveryRecorder()
+        let controller = MonitorNotificationController(delivery: delivery, responseHandlerInstaller: {})
+
+        let first = approvalNotificationIntent(eventID: 91, title: "Authoritative task title")
+        let firstDelivery = await controller.deliverApprovalOutboxIntent(first, preferences: preferences)
+        XCTAssertEqual(firstDelivery, .confirmed)
+        let duplicateDelivery = await controller.deliverApprovalOutboxIntent(first, preferences: preferences)
+        XCTAssertEqual(duplicateDelivery, .confirmed)
+        let second = approvalNotificationIntent(eventID: 92, title: "Second real approval")
+        let secondDelivery = await controller.deliverApprovalOutboxIntent(second, preferences: preferences)
+        XCTAssertEqual(secondDelivery, .confirmed)
+
+        XCTAssertEqual(delivery.notifications.count, 2)
+        XCTAssertEqual(delivery.notifications.map(\.kind), [.waitingApproval, .waitingApproval])
+        XCTAssertEqual(delivery.notifications.map(\.content.body), ["Authoritative task title", "Second real approval"])
+        XCTAssertNotEqual(first.requestIdentifier, second.requestIdentifier)
+        XCTAssertEqual(first.requestIdentifier, ApprovalNotificationOutboxIntent.requestIdentifier(sourceID: first.sourceID, journalEventID: first.journalEventID))
+    }
+
+    func testApprovalNotificationDisabledAndWaitingSnapshotsDoNotDeliver() async {
+        let suite = "CodexMonitorTests.approvalNotificationDisabled.\(UUID().uuidString)"
+        let preferences = MonitorPreferences(defaults: UserDefaults(suiteName: suite)!)
+        defer { UserDefaults.standard.removePersistentDomain(forName: suite) }
+        let delivery = NotificationDeliveryRecorder()
+        let controller = MonitorNotificationController(delivery: delivery, responseHandlerInstaller: {})
+        let suppressed = await controller.deliverApprovalOutboxIntent(approvalNotificationIntent(eventID: 93, title: "Suppressed task"), preferences: preferences)
+        XCTAssertEqual(suppressed, .suppressed)
+
+        let snapshot = await activeUsageSessionSnapshot(
+            conversationName: "Snapshot is not authority",
+            threadRawID: "approval-snapshot-not-authority",
+            sessionTokens: 1
+        )
+        XCTAssertNil(MonitorNotificationContent.forTransition(
+            from: .working,
+            to: .waitingApproval,
+            snapshot: snapshot,
+            desktopSourceAvailable: true,
+            waitingApprovalEnabled: true,
+            taskCompletedEnabled: true
+        ))
+        XCTAssertTrue(delivery.notifications.isEmpty)
+    }
+
+    func testApprovalFeatureEnablementDoesNotDependOnNotificationPermission() {
+        XCTAssertEqual(notificationPreferenceEnablement(for: .waitingApproval), .beforeAuthorization)
+        XCTAssertEqual(notificationPreferenceEnablement(for: .taskCompleted), .afterAuthorization)
+    }
+
+    func testCompletionNotificationPresentationIsUnchangedAndNowCarriesTheCodexClickCategory() async throws {
+        let suite = "CodexMonitorTests.completionNotificationCategory.\(UUID().uuidString)"
+        let preferences = MonitorPreferences(defaults: UserDefaults(suiteName: suite)!)
+        defer { UserDefaults.standard.removePersistentDomain(forName: suite) }
+        preferences.taskCompletedNotifications = true
+        let delivery = NotificationDeliveryRecorder()
+        let controller = MonitorNotificationController(delivery: delivery, responseHandlerInstaller: {})
+        let runtime = MonitorRuntimeStore(engine: RuntimeStateEngine(initialPhase: .live), initialPhase: .live)
+        let source = SourceID("completion-notification-category")!
+        let thread = NamespacedID(sourceID: source, entityKind: .thread, rawID: "completion-thread")!
+        let turn = NamespacedID(sourceID: source, entityKind: .turn, rawID: "completion-turn")!
+        let now = Date(timeIntervalSince1970: 1_900_000_000)
+        await runtime.registerDesktopThread(DesktopThreadSnapshot(threadID: thread, conversationName: "Existing completion title", model: nil, reasoningEffort: nil, updatedAtMilliseconds: nil, tokensUsed: nil))
+        await runtime.ingest(.rollout(RolloutRecordEnvelope(threadID: thread, turnID: turn, itemID: nil, kind: .taskStarted, activity: nil, tokenSnapshot: nil, model: nil, reasoningEffort: nil, observedAt: now, fileOffset: 0)))
+        let working = await runtime.snapshot()
+        await runtime.ingest(.rollout(RolloutRecordEnvelope(threadID: thread, turnID: turn, itemID: nil, kind: .taskCompletedSuccess, activity: nil, tokenSnapshot: nil, model: nil, reasoningEffort: nil, observedAt: now, fileOffset: 1)))
+        let completed = await runtime.snapshot()
+
+        await controller.receive(snapshot: working, preferences: preferences)
+        await controller.receive(snapshot: completed, preferences: preferences)
+
+        XCTAssertEqual(delivery.notifications.count, 1)
+        let delivered = try XCTUnwrap(delivery.notifications.first)
+        XCTAssertEqual(delivered.kind, .completed)
+        XCTAssertEqual(delivered.content, MonitorNotificationContent.completed(snapshot: completed))
+    }
+
+    func testTaskNotificationClicksActivateOnlyKnownCodexMonitorNotifications() {
+        let activation = TaskNotificationActivationRecorder()
+        let handler = MonitorTaskNotificationResponseHandler { activation.record() }
+        let click = UNNotificationDefaultActionIdentifier
+
+        handler.handle(MonitorTaskNotificationResponse(
+            categoryIdentifier: MonitorTaskNotification.categoryIdentifier,
+            kindRawValue: MonitorTaskNotificationKind.waitingApproval.rawValue,
+            actionIdentifier: click
+        ))
+        handler.handle(MonitorTaskNotificationResponse(
+            categoryIdentifier: MonitorTaskNotification.categoryIdentifier,
+            kindRawValue: MonitorTaskNotificationKind.completed.rawValue,
+            actionIdentifier: click
+        ))
+        handler.handle(MonitorTaskNotificationResponse(
+            categoryIdentifier: MonitorTaskNotification.categoryIdentifier,
+            kindRawValue: "unknown",
+            actionIdentifier: click
+        ))
+        handler.handle(MonitorTaskNotificationResponse(
+            categoryIdentifier: MonitorTaskNotification.categoryIdentifier,
+            kindRawValue: MonitorTaskNotificationKind.completed.rawValue,
+            actionIdentifier: UNNotificationDismissActionIdentifier
+        ))
+
+        XCTAssertEqual(activation.count, 2)
+    }
+
+    func testCodexDesktopActivatorActivatesRunningAppLaunchesMissingAppAndFailsSafely() {
+        var runningActivations = 0
+        var launchedURLs: [URL] = []
+        CodexDesktopApplicationActivator(
+            activateRunning: { runningActivations += 1; return true },
+            resolvedApplicationURL: { XCTFail("Running Codex must not resolve a launch URL"); return nil },
+            launch: { launchedURLs.append($0) }
+        ).activateOrLaunch()
+        XCTAssertEqual(runningActivations, 1)
+        XCTAssertTrue(launchedURLs.isEmpty)
+
+        let codexURL = URL(fileURLWithPath: "/Applications/Codex.app")
+        CodexDesktopApplicationActivator(
+            activateRunning: { false },
+            resolvedApplicationURL: { codexURL },
+            launch: { launchedURLs.append($0) }
+        ).activateOrLaunch()
+        XCTAssertEqual(launchedURLs, [codexURL])
+
+        CodexDesktopApplicationActivator(
+            activateRunning: { false },
+            resolvedApplicationURL: { nil },
+            launch: { _ in XCTFail("Missing Codex must not attempt a launch") }
+        ).activateOrLaunch()
     }
 
     func testUsageCurrentSessionUsesResolvedDisplayTitle() async {
@@ -758,7 +950,7 @@ final class MonitorProductIntegrationTests: XCTestCase {
         XCTAssertNotNil(root)
         XCTAssertEqual(controller.presentation.selection, .floating)
 
-        let navigationPath: [SettingsSection] = [.general, .floating, .notifications, .privacy, .advanced, .maintenance, .about, .floating]
+        let navigationPath: [SettingsSection] = [.general, .floating, .notifications, .privacy, .advanced, .about, .floating]
         for index in 0..<30 {
             controller.show()
             XCTAssertTrue(controller.window?.isVisible == true, "open cycle \(index)")
@@ -797,7 +989,7 @@ final class MonitorProductIntegrationTests: XCTestCase {
         XCTAssertEqual(VisualStatePresentation.forState(.completed).orbTone, .green)
         XCTAssertEqual(VisualStatePresentation.forState(.working), .init(dots: [.init(tone: .green, breathes: true), .inactive, .inactive], orbTone: .blue, breathes: true, stateTextKey: "state.working"))
         XCTAssertEqual(VisualStatePresentation.forState(.thinking).orbTone, .blue)
-        XCTAssertEqual(VisualStatePresentation.forState(.waitingApproval).orbTone, .blue)
+        XCTAssertEqual(VisualStatePresentation.forState(.waitingApproval), .init(dots: [.init(tone: .green, breathes: true), .init(tone: .yellow, breathes: false), .inactive], orbTone: .yellow, breathes: true, stateTextKey: "state.waitingApproval"))
         for state in [MonitorRuntimeState.failed, .interrupted, .systemError] {
             XCTAssertEqual(VisualStatePresentation.forState(state).dots, [.inactive, .inactive, .init(tone: .red, breathes: false)])
             XCTAssertEqual(VisualStatePresentation.forState(state).orbTone, .red)
@@ -807,7 +999,12 @@ final class MonitorProductIntegrationTests: XCTestCase {
         XCTAssertEqual(VisualStatePresentation.unavailable.orbTone, .gray)
     }
 
-    func testPermissionRequestCreatesSecondaryEventWhileWorkRemainsBlue() async {
+    func testWaitingApprovalUsesDedicatedLocalizedStateText() {
+        XCTAssertEqual(L10n.tr("state.waitingApproval", languageCode: "en"), "Waiting for approval")
+        XCTAssertEqual(L10n.tr("state.waitingApproval", languageCode: "zh-Hans"), "等待审批")
+    }
+
+    func testPermissionRequestCreatesWaitingStateAndWaveB1PresentationIsYellow() async {
         let clock = PermissionPresentationTestClock()
         let runtime = MonitorRuntimeStore(engine: RuntimeStateEngine(clock: clock, initialPhase: .live), clock: clock, initialPhase: .live)
         let thread = id(.thread, "permission-thread")
@@ -825,19 +1022,56 @@ final class MonitorProductIntegrationTests: XCTestCase {
         await runtime.ingest(ApprovalObservation.requested(ApprovalRequested(threadID: thread, turnID: turn, requestID: request, observedAt: clock.now())))
 
         let waiting = await runtime.snapshot()
-        XCTAssertEqual(waiting.currentState, .working)
+        XCTAssertEqual(waiting.currentState, .waitingApproval)
         XCTAssertTrue(waiting.approvalRequestObserved)
         XCTAssertEqual(waiting.capabilities[MonitorRuntimeCapability.approvalResolution], MonitorCapabilityAvailability(availability: .unavailable, reason: .externalCodexDesktopCapability))
-        XCTAssertEqual(VisualStatePresentation.forSnapshot(waiting).orbTone, .blue)
+        XCTAssertEqual(VisualStatePresentation.forSnapshot(waiting), .init(dots: [.init(tone: .green, breathes: true), .init(tone: .yellow, breathes: false), .inactive], orbTone: .yellow, breathes: true, stateTextKey: "state.waitingApproval"))
 
-        // The output is authoritative rollout evidence for the exact request;
-        // no Approved/Declined/Cancelled outcome is inferred or manufactured.
+        // A rollout output is not an exact PermissionRequest identity; the
+        // reducer remains waiting until Hook PostToolUse or Stop evidence.
         await runtime.ingest(event(thread, turn, .activity, activity: .agentResponse, item: request, clock: clock))
         await runtime.ingest(event(thread, turn, .activity, activity: .tool, item: resumedWork, clock: clock))
 
-        let working = await runtime.snapshot()
-        XCTAssertEqual(working.currentState, .working)
-        XCTAssertEqual(VisualStatePresentation.forSnapshot(working), .init(dots: [.init(tone: .green, breathes: true), .inactive, .inactive], orbTone: .blue, breathes: true, stateTextKey: "state.working"))
+        let waitingAfterOutput = await runtime.snapshot()
+        XCTAssertEqual(waitingAfterOutput.currentState, .waitingApproval)
+        XCTAssertEqual(VisualStatePresentation.forSnapshot(waitingAfterOutput).orbTone, .yellow)
+    }
+
+    func testRequestOnlyApprovalMetadataCannotRecolorThinkingOrCompleted() {
+        let thinking = presentationSnapshot(state: .thinking, approvalRequestObserved: true)
+        XCTAssertEqual(VisualStatePresentation.forSnapshot(thinking).orbTone, .blue)
+
+        let completed = presentationSnapshot(state: .completed, approvalRequestObserved: true)
+        XCTAssertEqual(VisualStatePresentation.forSnapshot(completed).orbTone, .green)
+    }
+
+    func testWaitingApprovalQuotaWarningKeepsLifecycleOrbYellowAndQuotaSeparate() {
+        let snapshot = presentationSnapshot(state: .waitingApproval, remaining: 20)
+        let presentation = VisualStatePresentation.forSnapshot(snapshot, quotaWarningEnabled: true, quotaWarningThreshold: 20)
+
+        XCTAssertEqual(presentation.orbTone, .yellow)
+        XCTAssertTrue(presentation.breathes)
+        XCTAssertEqual(presentation.stateTextKey, "state.waitingApproval")
+        XCTAssertEqual(presentation.dots, [.init(tone: .green, breathes: true), .init(tone: .yellow, breathes: false), .inactive])
+        XCTAssertEqual(QuotaCapsuleHealth.resolve(snapshot: snapshot, warningEnabled: true, threshold: 20), .warning)
+    }
+
+    func testWaitingApprovalQuotaExhaustedKeepsLifecycleOrbYellow() {
+        let snapshot = presentationSnapshot(state: .waitingApproval, remaining: 0)
+        let presentation = VisualStatePresentation.forSnapshot(snapshot)
+
+        XCTAssertEqual(presentation.orbTone, .yellow)
+        XCTAssertTrue(presentation.breathes)
+        XCTAssertEqual(presentation.stateTextKey, "state.waitingApproval")
+        XCTAssertEqual(presentation.dots, [.inactive, .inactive, .init(tone: .red, breathes: false)])
+        XCTAssertEqual(QuotaCapsuleHealth.resolve(snapshot: snapshot, warningEnabled: true, threshold: 20), .exhausted)
+    }
+
+    func testWaitingApprovalCountDoesNotSelectYellowWithoutWaitingLifecycleState() {
+        let snapshot = presentationSnapshot(state: .failed, approvalRequestObserved: true, waitingApprovalCount: 1)
+        XCTAssertEqual(snapshot.waitingApprovalCount, 1)
+        XCTAssertNotEqual(snapshot.currentState, .waitingApproval)
+        XCTAssertEqual(VisualStatePresentation.forSnapshot(snapshot).orbTone, .red)
     }
 
     func testIdlePresentationCannotCarryBreathingFromWorkingOrTerminalState() {
@@ -959,48 +1193,20 @@ final class MonitorProductIntegrationTests: XCTestCase {
         XCTAssertEqual(MonitorPreferences(defaults: defaults).quotaWarningThreshold, 40)
     }
 
-    func testApprovalBetaDisabledDoesNotChangeOrb() async {
+    func testWaitingLifecycleStateControlsOrbFromAuthoritativeApprovalState() async {
         let presentation = await quotaPresentation(remaining: 80, working: true, approvalObserved: true)
-        XCTAssertEqual(presentation.orbTone, .blue)
-    }
-
-    func testApprovalBetaEnabledObservedRequestMakesOrbYellow() async {
-        let presentation = await quotaPresentation(remaining: 80, working: true, approvalObserved: true, betaEnabled: true)
         XCTAssertEqual(presentation.orbTone, .yellow)
+        XCTAssertEqual(presentation.stateTextKey, "state.waitingApproval")
     }
 
-    func testApprovalBetaDoesNotChangeCapsule() async {
-        let presentation = await quotaPresentation(remaining: 80, working: true, approvalObserved: true, betaEnabled: true)
-        XCTAssertEqual(presentation.dots, [.init(tone: .green, breathes: true), .inactive, .inactive])
+    func testWaitingLifecycleStateHasDedicatedStatusDots() async {
+        let presentation = await quotaPresentation(remaining: 80, working: true, approvalObserved: true)
+        XCTAssertEqual(presentation.dots, [.init(tone: .green, breathes: true), .init(tone: .yellow, breathes: false), .inactive])
     }
 
-    func testCompletedExecDoesNotTriggerApprovalBeta() async {
-        let presentation = await quotaPresentation(remaining: 80, working: false, betaEnabled: true)
-        XCTAssertEqual(presentation.orbTone, .green)
-    }
-
-    func testOrdinaryTaskDoesNotTriggerApprovalBeta() async {
-        let presentation = await quotaPresentation(remaining: 80, working: true, betaEnabled: true)
-        XCTAssertEqual(presentation.orbTone, .blue)
-    }
-
-    func testHistoricalApprovalDoesNotResurrectBeta() async {
-        let presentation = await quotaPresentation(remaining: 80, working: false, betaEnabled: true)
-        XCTAssertEqual(presentation.orbTone, .green)
-    }
-
-    func testFatalRuntimeErrorOverridesApprovalBetaOrb() async {
-        let presentation = await quotaPresentation(remaining: 80, working: true, approvalObserved: true, betaEnabled: true, fatal: true)
+    func testFatalRuntimeErrorOverridesWaitingApprovalOrb() async {
+        let presentation = await quotaPresentation(remaining: 80, working: true, approvalObserved: true, fatal: true)
         XCTAssertEqual(presentation.orbTone, .red)
-    }
-
-    func testApprovalBetaPreferencePersistsAcrossRelaunch() {
-        let suite = "CodexMonitorTests.approvalBeta.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suite)!
-        defer { defaults.removePersistentDomain(forName: suite) }
-        let preferences = MonitorPreferences(defaults: defaults)
-        preferences.experimentalApprovalYellowEnabled = true
-        XCTAssertTrue(MonitorPreferences(defaults: defaults).experimentalApprovalYellowEnabled)
     }
 
     func testFollowSystemLocaleResolvesSynchronouslyBeforeAnySurfaceCreation() {
@@ -2213,13 +2419,59 @@ final class MonitorProductIntegrationTests: XCTestCase {
 
     private func testSettingsActions() -> SettingsSystemActions {
         SettingsSystemActions(
-            refresh: {}, openCodex: {}, openLogsFolder: {}, setMonitoringPaused: { _ in }, requestNotificationPermission: { _ in }, exportDiagnostics: { _ in }, loginItem: LoginItemController(), showDiagnostics: {}
+            refresh: {}, openLogsFolder: {}, setMonitoringPaused: { _ in }, requestNotificationPermission: { _ in }, exportDiagnostics: { _ in }, loginItem: LoginItemController(), showDiagnostics: {}
         )
     }
 
     private func quotaPresentationDate(_ value: String) -> Date {
         let formatter = ISO8601DateFormatter()
         return try! XCTUnwrap(formatter.date(from: value))
+    }
+
+    private func presentationSnapshot(
+        state: MonitorRuntimeState,
+        approvalRequestObserved: Bool = false,
+        waitingApprovalCount: Int = 0,
+        remaining: Double? = nil
+    ) -> MonitorRuntimeSnapshot {
+        let now = Date(timeIntervalSince1970: 1_900_000_000)
+        let freshness = Freshness(state: .fresh, assessedAt: now, observedAt: now)
+        let desktop = MonitorSourceHealth(source: .desktopLocal, availability: .available, freshness: freshness)
+        let primary = remaining.map { RateLimitWindow(usedPercent: 100 - $0) }
+        let quotaAvailability: MonitorDataAvailability = primary == nil ? .unavailable : .available
+        let activity: RuntimeActivityCategory
+        switch state {
+        case .thinking: activity = .thinking
+        case .working: activity = .tool
+        case .waitingApproval: activity = .waitingApproval
+        case .completed: activity = .completed
+        case .failed: activity = .failed
+        case .interrupted: activity = .interrupted
+        case .systemError: activity = .systemError
+        case .disconnected: activity = .disconnected
+        case .paused, .idle: activity = .idle
+        }
+
+        return MonitorRuntimeSnapshot(
+            capturedAt: now,
+            monitoringPhase: .live,
+            currentState: state,
+            currentStateSince: now,
+            currentActivity: activity,
+            currentThread: nil,
+            currentSessionThread: nil,
+            activeThreadCount: [.thinking, .working].contains(state) ? 1 : 0,
+            waitingApprovalCount: waitingApprovalCount,
+            approvalRequestObserved: approvalRequestObserved,
+            threads: [],
+            sessionToken: nil,
+            account: MonitorAccountViewModel(availability: .unavailable, accountKind: nil, plan: nil),
+            usage: MonitorUsageViewModel(availability: .unavailable, usage: nil),
+            quota: MonitorQuotaViewModel(primaryAvailability: quotaAvailability, primary: primary, secondaryAvailability: .unavailable, secondary: nil, windowsAvailability: .unavailable, windows: []),
+            resetInformation: MonitorResetInformationViewModel(countAvailability: .unavailable, count: nil, detailsAvailability: .unavailable, details: nil),
+            sourceHealth: [.desktopLocal: desktop],
+            capabilities: [:]
+        )
     }
 
     private func quotaSnapshot(primary: RateLimitWindow, secondary: RateLimitWindow?, windows: [RateLimitWindow] = []) async -> MonitorRuntimeSnapshot {
@@ -2248,7 +2500,6 @@ final class MonitorProductIntegrationTests: XCTestCase {
         warningEnabled: Bool = true,
         threshold: Double = 20,
         approvalObserved: Bool = false,
-        betaEnabled: Bool = false,
         fatal: Bool = false
     ) async -> VisualStatePresentation {
         let primary = RateLimitWindow(usedPercent: remaining.map { 100 - $0 })
@@ -2275,7 +2526,7 @@ final class MonitorProductIntegrationTests: XCTestCase {
         if fatal {
             await runtime.ingest(.rollout(RolloutRecordEnvelope(threadID: thread, turnID: turn, itemID: nil, kind: .taskCompletedFailure, activity: nil, tokenSnapshot: nil, model: nil, reasoningEffort: nil, observedAt: now, fileOffset: 2)))
         }
-        return VisualStatePresentation.forSnapshot(await runtime.snapshot(), quotaWarningEnabled: warningEnabled, quotaWarningThreshold: threshold, experimentalApprovalYellowEnabled: betaEnabled)
+        return VisualStatePresentation.forSnapshot(await runtime.snapshot(), quotaWarningEnabled: warningEnabled, quotaWarningThreshold: threshold)
     }
 
     private func usageSnapshot(buckets: [AccountUsageDailyBucket]) async -> MonitorRuntimeSnapshot {
@@ -2322,12 +2573,43 @@ final class MonitorProductIntegrationTests: XCTestCase {
         return await runtime.snapshot()
     }
 
+    private func approvalNotificationIntent(eventID: UInt64, title: String) -> ApprovalNotificationOutboxIntent {
+        let source = HookOpaqueIdentity("hmac-sha256:" + String(repeating: "a", count: 64))!
+        return ApprovalNotificationOutboxIntent(
+            sourceID: source,
+            journalEventID: HookApprovalJournalEventID(eventID)!,
+            taskTitle: title
+        )
+    }
+
     private func id(_ kind: EntityKind, _ raw: String) -> NamespacedID {
         NamespacedID(sourceID: SourceID("permission-product-test")!, entityKind: kind, rawID: raw)!
     }
 
     private func event(_ thread: NamespacedID, _ turn: NamespacedID, _ kind: RolloutEventKind, activity: RolloutActivityCategory? = nil, item: NamespacedID? = nil, clock: PermissionPresentationTestClock) -> DesktopObservation {
         .rollout(RolloutRecordEnvelope(threadID: thread, turnID: turn, itemID: item, kind: kind, activity: activity, tokenSnapshot: nil, model: nil, reasoningEffort: nil, observedAt: clock.now(), fileOffset: 0))
+    }
+}
+
+@MainActor
+private final class NotificationDeliveryRecorder: MonitorNotificationDelivering {
+    private(set) var notifications: [MonitorTaskNotification] = []
+    private var pendingIdentifiers = Set<String>()
+
+    func deliver(_ notification: MonitorTaskNotification) async -> Bool {
+        notifications.append(notification)
+        pendingIdentifiers.insert(notification.identifier)
+        return true
+    }
+
+    func containsNotification(identifier: String) async -> Bool { pendingIdentifiers.contains(identifier) }
+}
+
+private final class TaskNotificationActivationRecorder: @unchecked Sendable {
+    private(set) var count = 0
+
+    func record() {
+        count += 1
     }
 }
 

@@ -36,7 +36,6 @@ public final class MonitorPreferences: ObservableObject {
             defaults.set(quotaWarningThreshold, forKey: Keys.quotaWarningThreshold)
         }
     }
-    @Published public var experimentalApprovalYellowEnabled: Bool { didSet { defaults.set(experimentalApprovalYellowEnabled, forKey: Keys.experimentalApprovalYellowEnabled) } }
     @Published public var interfaceLanguage: InterfaceLanguage { didSet { defaults.set(interfaceLanguage.rawValue, forKey: Keys.interfaceLanguage) } }
     @Published public var orbOrigin: CGPoint? { didSet { persistOrigin() } }
 
@@ -55,7 +54,6 @@ public final class MonitorPreferences: ObservableObject {
         static let hideAccountInfo = "monitor.hideAccountInfo"
         static let quotaWarningEnabled = "monitor.quotaWarningEnabled"
         static let quotaWarningThreshold = "monitor.quotaWarningThreshold"
-        static let experimentalApprovalYellowEnabled = "monitor.experimentalApprovalYellowEnabled"
         static let interfaceLanguage = "monitor.interfaceLanguage"
         static let orbX = "monitor.orbX"
         static let orbY = "monitor.orbY"
@@ -77,7 +75,6 @@ public final class MonitorPreferences: ObservableObject {
         hideAccountInfo = defaults.object(forKey: Keys.hideAccountInfo) as? Bool ?? false
         quotaWarningEnabled = defaults.object(forKey: Keys.quotaWarningEnabled) as? Bool ?? true
         quotaWarningThreshold = QuotaWarningThreshold.snap(defaults.object(forKey: Keys.quotaWarningThreshold) as? Double ?? QuotaWarningThreshold.defaultValue)
-        experimentalApprovalYellowEnabled = defaults.object(forKey: Keys.experimentalApprovalYellowEnabled) as? Bool ?? false
         interfaceLanguage = InterfaceLanguage(rawValue: defaults.string(forKey: Keys.interfaceLanguage) ?? "") ?? .system
         if defaults.object(forKey: Keys.orbX) != nil, defaults.object(forKey: Keys.orbY) != nil {
             orbOrigin = CGPoint(x: defaults.double(forKey: Keys.orbX), y: defaults.double(forKey: Keys.orbY))

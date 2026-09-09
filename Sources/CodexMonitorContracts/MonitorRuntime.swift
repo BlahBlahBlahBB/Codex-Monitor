@@ -77,6 +77,7 @@ public struct MonitorThreadViewModel: Sendable, Equatable {
     public let activity: RuntimeActivityCategory
     public let waitingApproval: MonitorCapabilityAvailability
     public let approvalRequestObserved: Bool
+    public let userAttentionRequired: Bool
     public let sessionToken: Int64?
     public let sessionTokenAvailability: MonitorDataAvailability
     public let sessionTokenProvenance: SessionTokenProvenance?
@@ -92,6 +93,7 @@ public struct MonitorThreadViewModel: Sendable, Equatable {
         activity = value.currentActivityCategory
         waitingApproval = MonitorRuntimeSnapshotBuilder.waitingApprovalAvailability(for: value)
         approvalRequestObserved = value.approvalRequestObserved
+        userAttentionRequired = value.userAttentionRequired
         let tokenAvailability = MonitorRuntimeSnapshotBuilder.sessionTokenAvailability(for: value)
         sessionToken = tokenAvailability == .available ? value.sessionTokenCumulative : nil
         sessionTokenAvailability = tokenAvailability
@@ -163,6 +165,8 @@ public struct MonitorRuntimeSnapshot: Sendable, Equatable {
     public let sourceHealth: [MonitorRuntimeSource: MonitorSourceHealth]
     public let capabilities: [MonitorRuntimeCapability: MonitorCapabilityAvailability]
 
+    public var userAttentionRequired: Bool { currentThread?.userAttentionRequired ?? false }
+
     /// `capturedAt` and freshness assessment timestamps are sampling metadata,
     /// not presentation changes. UI bindings use this to avoid rerendering on
     /// a timer when the observable product state has not changed.
@@ -210,7 +214,7 @@ public struct MonitorRuntimeSnapshot: Sendable, Equatable {
     }
 
     private func equivalent(_ lhs: MonitorThreadViewModel, _ rhs: MonitorThreadViewModel) -> Bool {
-        lhs.threadID == rhs.threadID && lhs.activeTurnID == rhs.activeTurnID && lhs.conversationName == rhs.conversationName && lhs.model == rhs.model && lhs.state == rhs.state && lhs.stateSince == rhs.stateSince && lhs.activity == rhs.activity && lhs.waitingApproval == rhs.waitingApproval && lhs.approvalRequestObserved == rhs.approvalRequestObserved && lhs.sessionToken == rhs.sessionToken && lhs.sessionTokenAvailability == rhs.sessionTokenAvailability && lhs.sessionTokenProvenance == rhs.sessionTokenProvenance && equivalent(lhs.freshness, rhs.freshness)
+        lhs.threadID == rhs.threadID && lhs.activeTurnID == rhs.activeTurnID && lhs.conversationName == rhs.conversationName && lhs.model == rhs.model && lhs.state == rhs.state && lhs.stateSince == rhs.stateSince && lhs.activity == rhs.activity && lhs.waitingApproval == rhs.waitingApproval && lhs.approvalRequestObserved == rhs.approvalRequestObserved && lhs.userAttentionRequired == rhs.userAttentionRequired && lhs.sessionToken == rhs.sessionToken && lhs.sessionTokenAvailability == rhs.sessionTokenAvailability && lhs.sessionTokenProvenance == rhs.sessionTokenProvenance && equivalent(lhs.freshness, rhs.freshness)
     }
 
     private func equivalent(_ lhs: MonitorSourceHealth, _ rhs: MonitorSourceHealth) -> Bool {
@@ -413,6 +417,22 @@ public actor MonitorRuntimeStore {
         approvalSource = SourceState(availability: health.state == .available ? .available : .unavailable, observedAt: health.observedAt, reason: health.state == .available ? nil : .sourceUnavailable)
         engine.ingest(.sourceHealth(health))
         publishSnapshot()
+    }
+
+    public func bindHookApprovalOwner(_ owner: HookApprovalTurnOwner, to threadID: NamespacedID, turnID: NamespacedID, observedAt: Date) {
+        engine.bindHookApprovalOwner(owner, to: threadID, turnID: turnID, observedAt: observedAt)
+        publishSnapshot()
+    }
+
+    public func ingest(_ event: HookApprovalEvent) {
+        engine.ingest(event)
+        publishSnapshot()
+    }
+
+    /// Exposes the frozen reducer's exact pending-event admission result to
+    /// downstream consumers without changing reducer semantics.
+    public func pendingHookApprovalThreadID(for event: HookApprovalLifecycleEvent) -> NamespacedID? {
+        engine.pendingHookApprovalThreadID(for: event)
     }
 
     /// Accessibility health is independent of Desktop Local and the approval
@@ -710,7 +730,7 @@ public actor MonitorRuntimeStore {
                 processRunning: desktopSource.availability == .available,
                 stateDBReadable: desktopSource.availability == .available,
                 monitorPaused: monitoringPhase == .paused,
-                activeTurnPresent: runtime.activeThreadCount > 0,
+                activeTurnPresent: runtime.activeThreadCount > 0 || runtime.waitingApprovalCount > 0,
                 fatalSourceError: desktopSource.availability == .unavailable
             )
         }
@@ -718,7 +738,7 @@ public actor MonitorRuntimeStore {
             processRunning: health.processRunning,
             stateDBReadable: health.stateDBReadable,
             monitorPaused: monitoringPhase == .paused,
-            activeTurnPresent: runtime.activeThreadCount > 0,
+            activeTurnPresent: runtime.activeThreadCount > 0 || runtime.waitingApprovalCount > 0,
             fatalSourceError: desktopCycleHasActiveThreadFailure
         )
     }
@@ -788,6 +808,7 @@ private enum MonitorRuntimeSnapshotBuilder {
     static func waitingApprovalAvailability(for thread: ThreadRuntimeSnapshot) -> MonitorCapabilityAvailability {
         switch thread.approvalHealth {
         case .availableKnownNotWaiting, .availableWaiting: return MonitorCapabilityAvailability(availability: .available)
+        case .unknown: return MonitorCapabilityAvailability(availability: .unknown, reason: .noObservedValue)
         case .unavailable: return MonitorCapabilityAvailability(availability: .unavailable, reason: .sourceUnavailable)
         case .stale: return MonitorCapabilityAvailability(availability: .stale, reason: .sourceStale)
         }

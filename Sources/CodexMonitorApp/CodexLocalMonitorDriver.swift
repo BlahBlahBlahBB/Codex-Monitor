@@ -61,9 +61,20 @@ public actor CodexLocalMonitorDriver {
     private let sourceID: DesktopLocalSourceID
     private let stateReader: StateDBReader
     private let approvalReader: ApprovalLocalAdapter
+    private let approvalCheckpointStore: any ApprovalLifecycleCheckpointStoring
+    private let hookJournalSource: (any HookApprovalJournalSource)?
+    private let hookIdentityResolver: (any HookApprovalIdentityResolving)?
+    private let hookApprovalSourceIsActive: @Sendable () -> Bool
+    private let approvalNotificationDelivery: @Sendable (ApprovalNotificationOutboxIntent) async -> ApprovalNotificationDeliveryDisposition
+    private let processIsRunning: @Sendable () -> Bool
     private let usageLedger: LocalUsageLedgerProvider?
     private let sessionRoots: [URL]
     private var desktop: DesktopLocalAdapter
+    private var hookJournalReader: HookApprovalJournalReader?
+    private var hookJournalCheckpoint: HookApprovalJournalCheckpoint?
+    private var durableHookJournalCheckpoint: HookApprovalJournalCheckpoint?
+    private var approvalNotificationOutbox: [String: ApprovalNotificationOutboxIntent]
+    private var durableApprovalNotificationOutbox: [String: ApprovalNotificationOutboxIntent]
     private var trackedThreads = Set<NamespacedID>()
     private var loopTask: Task<Void, Never>?
     private var sleepObservers: [NSObjectProtocol] = []
@@ -84,9 +95,14 @@ public actor CodexLocalMonitorDriver {
     private var knownLedgerSessionKeys = Set<String>()
     private var verifiedLiveSessionStartKeys = Set<String>()
 
-    public init(runtime: MonitorRuntimeStore, usageLedger: LocalUsageLedgerProvider? = nil, codexRoot: URL = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".codex", isDirectory: true)) {
+    public init(runtime: MonitorRuntimeStore, usageLedger: LocalUsageLedgerProvider? = nil, codexRoot: URL = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".codex", isDirectory: true), hookJournalSource: (any HookApprovalJournalSource)? = nil, hookIdentityResolver: (any HookApprovalIdentityResolving)? = nil, approvalCheckpointURL: URL? = nil, approvalCheckpointStore: (any ApprovalLifecycleCheckpointStoring)? = nil, processIsRunning: (@Sendable () -> Bool)? = nil, hookApprovalSourceIsActive: @escaping @Sendable () -> Bool = { true }, approvalNotificationDelivery: @escaping @Sendable (ApprovalNotificationOutboxIntent) async -> ApprovalNotificationDeliveryDisposition = { _ in .retry }) {
         self.runtime = runtime
         self.usageLedger = usageLedger
+        self.hookJournalSource = hookJournalSource
+        self.hookIdentityResolver = hookIdentityResolver
+        self.hookApprovalSourceIsActive = hookApprovalSourceIsActive
+        self.approvalNotificationDelivery = approvalNotificationDelivery
+        self.processIsRunning = processIsRunning ?? CodexProcessLiveness.isRunning
         sourceID = DesktopLocalSourceID("codex-desktop-local")!
         sessionRoots = [
             codexRoot.appendingPathComponent("sessions", isDirectory: true),
@@ -94,6 +110,17 @@ public actor CodexLocalMonitorDriver {
         ]
         let reader = StateDBReader(databaseURL: codexRoot.appendingPathComponent("state_5.sqlite"), sourceID: sourceID, schema: StateDBSchema(acceptedUserVersions: [0]))
         stateReader = reader
+        let checkpointStore: any ApprovalLifecycleCheckpointStoring = approvalCheckpointStore ?? ApprovalLifecycleCheckpointStore(url: approvalCheckpointURL ?? codexRoot.appendingPathComponent("monitor-approval-checkpoint.json"))
+        self.approvalCheckpointStore = checkpointStore
+        let restoredCheckpoint = (try? checkpointStore.load()) ?? ApprovalLifecycleCheckpoint(cursor: nil, unresolved: [])
+        hookJournalCheckpoint = restoredCheckpoint.hookJournal
+        durableHookJournalCheckpoint = restoredCheckpoint.hookJournal
+        let restoredOutbox = Dictionary(uniqueKeysWithValues: restoredCheckpoint.notificationOutbox.map { ($0.requestIdentifier, $0) })
+        approvalNotificationOutbox = restoredOutbox
+        durableApprovalNotificationOutbox = restoredOutbox
+        if hookJournalSource != nil {
+            hookJournalReader = HookApprovalJournalReader(checkpoint: restoredCheckpoint.hookJournal ?? .init(sourceID: nil, lastJournalEventID: nil, unresolved: []))
+        }
         // This is the already-validated, read-only request-evidence source.
         // Its source identity deliberately matches the desktop source so a
         // request can only affect the exact desktop thread/turn it names.
@@ -101,6 +128,7 @@ public actor CodexLocalMonitorDriver {
             databaseURL: codexRoot.appendingPathComponent("logs_2.sqlite"),
             sourceID: ApprovalLocalSourceID(sourceID.value.rawValue)!,
             schema: ApprovalLogSchema(acceptedUserVersions: [0]),
+            lifecycleCheckpoint: restoredCheckpoint,
             retryPolicy: ApprovalDBRetryPolicy(maximumRowsPerPoll: 2_048)
         )
         desktop = DesktopLocalAdapter(sourceID: sourceID, validatedSessionRoots: sessionRoots, stateDB: reader)
@@ -172,7 +200,11 @@ public actor CodexLocalMonitorDriver {
         // Reconciliation is an internal staging step. The completed desktop
         // cycle publishes exactly one reduced semantic snapshot below.
         await runtime.beginReconciliation(publish: false)
-        guard CodexProcessLiveness.isRunning() else {
+        guard processIsRunning() else {
+            // A previously durable notification intent is independent of
+            // Codex liveness. It must still reconcile via its deterministic
+            // Notification Center identifier after a Monitor restart.
+            await drainApprovalNotificationOutbox()
             requiresFreshActivityEvidenceAfterProcessBoundary = true
             let health = DesktopCycleHealth(processRunning: false, stateDBReadable: false, removedThreadIDs: Array(trackedThreads))
             for threadID in trackedThreads { desktop.forget(threadID: threadID) }
@@ -187,7 +219,8 @@ public actor CodexLocalMonitorDriver {
             let records = try stateReader.recentThreads()
             hasSuccessfulStateDBRead = true
             let approval = try? Self.catchUpApproval(approvalReader).result
-            let approvalCheckpoint = approvalReader.lifecycleCheckpoint()
+            let hook = hookApprovalSourceIsActive() ? pollHookJournal() : nil
+            let approvalCheckpoint = combinedApprovalCheckpoint()
             let approvalHealth = approvalHealth(for: approval)
             var rebuilt: [RuntimeReconciliationThread] = []
             var usageObservations: [DesktopObservation] = []
@@ -200,13 +233,22 @@ public actor CodexLocalMonitorDriver {
                 usageObservations.append(contentsOf: poll.observations)
                 let hydration = poll.hydration ?? RolloutCheckpointHydration(activeTurnID: nil, turnStartedAt: nil, activeItemID: nil, activeItemCategory: nil, latestActiveState: nil, latestActiveStateAt: nil, terminal: nil, authoritativeTokenTotal: nil)
                 let admission: RuntimeActivityReconciliationAdmission = requiresFreshActivityEvidenceAfterProcessBoundary ? .requireFreshLiveEvidence : .establishedProcess
-                rebuilt.append(LocalRuntimeReconciliationOwner.thread(snapshot: snapshot, hydration: hydration, approval: approvalCheckpoint, approvalHealth: approvalHealth, runtimeSourceAvailable: true, observedAt: Date(), activityAdmission: admission))
+                let hookSourceActive = hookApprovalSourceIsActive()
+                let hookOwner = hookSourceActive ? LocalRuntimeReconciliationOwner.derivedHookOwner(snapshot: snapshot, hydration: hydration, resolver: hookIdentityResolver) : nil
+                let hookHealth: HookApprovalSourceHealthState? = !hookSourceActive ? nil : (hookOwner == nil ? .unknown : (hook?.checkpoint.sourceHealth ?? hookJournalCheckpoint?.sourceHealth ?? .unknown))
+                rebuilt.append(LocalRuntimeReconciliationOwner.thread(snapshot: snapshot, hydration: hydration, approval: approvalCheckpoint, approvalHealth: approvalHealth, runtimeSourceAvailable: true, observedAt: Date(), activityAdmission: admission, hookOwner: hookOwner, hookSourceHealth: hookHealth))
             }
             trackedThreads = admitted
             await installReconciliation(rebuilt, health: DesktopCycleHealth(processRunning: true, stateDBReadable: true), caller: "bootstrap.stateDBRead")
             await usageLedger?.ingest(registrations: records.map(\.snapshot), observations: usageObservations)
             await backfillUsageIfNeeded()
             await applyApprovalPoll(approval)
+            if let hook {
+                _ = await applyHookJournalResult(hook, observations: usageObservations)
+            } else {
+                _ = persistApprovalCheckpoint()
+            }
+            await drainApprovalNotificationOutbox()
             needsBootstrap = false
         } catch {
             trackedThreads.removeAll()
@@ -215,12 +257,14 @@ public actor CodexLocalMonitorDriver {
             let health = DesktopCycleHealth(processRunning: true, stateDBReadable: disposition == .retainLastKnownHealthy)
             await installReconciliation([], health: health, caller: "bootstrap.stateDBReadFailure")
             await applyApprovalPoll(pollApproval())
+            await drainApprovalNotificationOutbox()
             needsBootstrap = disposition == .fatal
         }
     }
 
     private func pollIncrementally() async {
-        guard CodexProcessLiveness.isRunning() else {
+        guard processIsRunning() else {
+            await drainApprovalNotificationOutbox()
             requiresFreshActivityEvidenceAfterProcessBoundary = true
             let removed = Array(trackedThreads)
             for threadID in trackedThreads { desktop.forget(threadID: threadID) }
@@ -233,6 +277,7 @@ public actor CodexLocalMonitorDriver {
             let records = try stateReader.recentThreads()
             hasSuccessfulStateDBRead = true
             let approval = pollApproval()
+            let hook = hookApprovalSourceIsActive() ? pollHookJournal() : nil
             let current = Set(records.map { $0.snapshot.threadID })
             let archived = trackedThreads.subtracting(current)
             for threadID in archived { desktop.forget(threadID: threadID) }
@@ -269,6 +314,12 @@ public actor CodexLocalMonitorDriver {
                 requiresFreshActivityEvidenceAfterProcessBoundary = false
             }
             await applyApprovalPoll(approval)
+            if let hook {
+                _ = await applyHookJournalResult(hook, observations: observations)
+            } else {
+                _ = persistApprovalCheckpoint()
+            }
+            await drainApprovalNotificationOutbox()
         } catch {
             let disposition = DesktopPrimarySourceReadDisposition(error: error, hasSuccessfulStateDBRead: hasSuccessfulStateDBRead)
             recordStateDBReadFailure(error, disposition: disposition, caller: "pollIncrementally.stateDBRead")
@@ -277,6 +328,7 @@ public actor CodexLocalMonitorDriver {
             await runtime.clearDesktopConversationNames()
             await applyDesktopCycle(registrations: [], observations: [], health: DesktopCycleHealth(processRunning: true, stateDBReadable: disposition == .retainLastKnownHealthy), caller: "pollIncrementally.stateDBReadFailure")
             await applyApprovalPoll(pollApproval())
+            await drainApprovalNotificationOutbox()
             needsBootstrap = disposition == .fatal
         }
     }
@@ -318,7 +370,115 @@ public actor CodexLocalMonitorDriver {
     /// capability contract; a following authoritative rollout is what moves
     /// a waiting thread back to its real semantic state.
     private func pollApproval() -> ApprovalPollResult? {
-        try? approvalReader.poll()
+        let result = try? approvalReader.poll()
+        _ = persistApprovalCheckpoint()
+        return result
+    }
+
+    private func combinedApprovalCheckpoint() -> ApprovalLifecycleCheckpoint {
+        let legacy = approvalReader.lifecycleCheckpoint()
+        return ApprovalLifecycleCheckpoint(
+            cursor: legacy.cursor,
+            unresolved: legacy.unresolved,
+            hookJournal: hookJournalCheckpoint,
+            notificationOutbox: approvalNotificationOutbox.values.sorted { $0.requestIdentifier < $1.requestIdentifier }
+        )
+    }
+
+    /// The Hook cursor and notification intents share one atomic checkpoint.
+    /// A failed write leaves the last durable cursor/outbox intact and is
+    /// explicitly retried; it is never treated as a successful commit.
+    @discardableResult
+    private func persistApprovalCheckpoint() -> Bool {
+        do {
+            try approvalCheckpointStore.save(combinedApprovalCheckpoint())
+            durableHookJournalCheckpoint = hookJournalCheckpoint
+            durableApprovalNotificationOutbox = approvalNotificationOutbox
+            return true
+        } catch {
+            DiagnosticEvent.record(.state, ["event": "approvalCheckpointPersistenceFailed"])
+            return false
+        }
+    }
+
+    private func rollbackUncommittedHookNotificationState() {
+        hookJournalCheckpoint = durableHookJournalCheckpoint
+        approvalNotificationOutbox = durableApprovalNotificationOutbox
+        hookJournalReader = HookApprovalJournalReader(
+            checkpoint: durableHookJournalCheckpoint ?? .init(sourceID: nil, lastJournalEventID: nil, unresolved: [])
+        )
+    }
+
+    private func pollHookJournal() -> HookApprovalJournalReadResult? {
+        guard hookApprovalSourceIsActive() else { return nil }
+        guard let source = hookJournalSource, let reader = hookJournalReader else { return nil }
+        guard let records = try? source.readRecords() else {
+            let result = reader.markUnavailable()
+            hookJournalCheckpoint = result.checkpoint
+            return result
+        }
+        let result = reader.ingest(records)
+        hookJournalCheckpoint = result.checkpoint
+        return result
+    }
+
+    /// Applies one already-read journal batch, commits its cursor and every
+    /// newly admitted notification intent together, then lets the outbox be
+    /// drained separately. A failed commit rolls the reader back to the last
+    /// durable checkpoint so no event is externally notified ahead of cursor.
+    private func applyHookJournalResult(_ result: HookApprovalJournalReadResult, observations: [DesktopObservation]) async -> Bool {
+        // Rollout raw IDs are reduced immediately through the injected keyed
+        // resolver and are never persisted in the Hook checkpoint.
+        if let resolver = hookIdentityResolver {
+            for observation in observations {
+                guard case let .rollout(record) = observation,
+                      let session = record.sessionID, let turn = record.turnID,
+                      let owner = resolver.owner(sourceRawID: record.threadID.sourceID.rawValue, sessionRawID: session, turnRawID: turn.rawID) else { continue }
+                await runtime.bindHookApprovalOwner(owner, to: record.threadID, turnID: turn, observedAt: record.observedAt)
+            }
+        }
+        for event in result.events {
+            await runtime.ingest(event)
+            guard case let .permissionRequest(request) = event else { continue }
+            // Exact reducer admission is the notification authority. A global
+            // WAITING_APPROVAL from another task is never sufficient.
+            guard let threadID = await runtime.pendingHookApprovalThreadID(for: request),
+                  request.reviewer.requiresUserAttention else { continue }
+            let snapshot = await runtime.snapshot()
+            guard let thread = snapshot.threads.first(where: {
+                $0.threadID == threadID && $0.state == .waitingApproval
+            }) else { continue }
+            let intent = ApprovalNotificationOutboxIntent(
+                sourceID: request.owner.sourceID,
+                journalEventID: request.journalEventID,
+                taskTitle: MonitorDisplayValue.resolvedConversationDisplayTitle(for: thread)
+            )
+            approvalNotificationOutbox[intent.requestIdentifier] = intent
+        }
+        await runtime.ingest(.sourceHealth(result.health))
+        guard persistApprovalCheckpoint() else {
+            rollbackUncommittedHookNotificationState()
+            return false
+        }
+        return true
+    }
+
+    /// Reconciles only the bounded set of intents that were persisted with a
+    /// Hook cursor. The deterministic ID allows Notification Center state to
+    /// close the add/ack crash window without a lifetime delivered-ID ledger.
+    private func drainApprovalNotificationOutbox() async {
+        for intent in approvalNotificationOutbox.values.sorted(by: { $0.requestIdentifier < $1.requestIdentifier }) {
+            let disposition = await approvalNotificationDelivery(intent)
+            guard disposition != .retry else { continue }
+            approvalNotificationOutbox.removeValue(forKey: intent.requestIdentifier)
+            if !persistApprovalCheckpoint() {
+                // The external add may have succeeded. Retain the durable
+                // intent so a later Notification Center lookup can reconcile
+                // acknowledgement without submitting a duplicate request.
+                approvalNotificationOutbox[intent.requestIdentifier] = intent
+                break
+            }
+        }
     }
 
     /// A fresh app has no durable approval cursor. Before publishing its

@@ -131,8 +131,7 @@ struct VisualStatePresentation: Equatable {
     static func forSnapshot(
         _ snapshot: MonitorRuntimeSnapshot?,
         quotaWarningEnabled: Bool = true,
-        quotaWarningThreshold: Double = QuotaWarningThreshold.defaultValue,
-        experimentalApprovalYellowEnabled: Bool = false
+        quotaWarningThreshold: Double = QuotaWarningThreshold.defaultValue
     ) -> Self {
         guard let snapshot else {
             return unavailable
@@ -143,7 +142,11 @@ struct VisualStatePresentation: Equatable {
         }
         guard desktop?.availability == .available else { return unavailable }
 
-        var presentation = forState(snapshot.currentState)
+        // Auto-reviewed approvals remain internally WAITING_APPROVAL, but
+        // they are not a human-attention event. Keep the active blue Orb
+        // presentation while preserving the reducer's pending state.
+        let visualState: MonitorRuntimeState = snapshot.currentState == .waitingApproval && snapshot.currentThread?.userAttentionRequired == false ? .working : snapshot.currentState
+        var presentation = forState(visualState)
         // Existing terminal/disconnected behavior is deliberately untouched.
         guard ![.failed, .interrupted, .systemError, .disconnected, .paused].contains(snapshot.currentState) else {
             return presentation
@@ -166,11 +169,6 @@ struct VisualStatePresentation: Equatable {
             break
         }
 
-        // Approval Beta has no capsule effect. It is intentionally applied
-        // after quota rendering so the two dimensions cannot leak together.
-        if experimentalApprovalYellowEnabled && snapshot.approvalRequestObserved {
-            presentation = Self(dots: presentation.dots, orbTone: .yellow, breathes: true, stateTextKey: presentation.stateTextKey)
-        }
         return presentation
     }
 
@@ -185,9 +183,7 @@ struct VisualStatePresentation: Equatable {
         case .working:
             return Self(dots: [.init(tone: .green, breathes: true), .inactive, .inactive], orbTone: .blue, breathes: true, stateTextKey: "state.working")
         case .waitingApproval:
-            // Compatibility-only enum case. V1 has no reliable waiting
-            // lifecycle, so presentation must never select a yellow orb.
-            return Self(dots: [.init(tone: .green, breathes: true), .inactive, .inactive], orbTone: .blue, breathes: true, stateTextKey: "state.thinking")
+            return Self(dots: [.init(tone: .green, breathes: true), .init(tone: .yellow, breathes: false), .inactive], orbTone: .yellow, breathes: true, stateTextKey: "state.waitingApproval")
         case .failed:
             return Self(dots: [.inactive, .inactive, .init(tone: .red, breathes: false)], orbTone: .red, breathes: false, stateTextKey: "state.failed")
         case .interrupted:
