@@ -119,6 +119,15 @@ public struct HookApprovalSourceHealth: Sendable, Equatable {
     }
 }
 
+/// Sanitized classification attached to one PermissionRequest at the source.
+public enum ApprovalReviewer: String, Codable, Sendable {
+    case user
+    case autoReview = "auto_review"
+    case unknown
+
+    public var requiresUserAttention: Bool { self != .autoReview }
+}
+
 public struct HookApprovalLifecycleEvent: Sendable, Equatable {
     public let journalEventID: HookApprovalJournalEventID
     public let owner: HookApprovalTurnOwner
@@ -126,9 +135,10 @@ public struct HookApprovalLifecycleEvent: Sendable, Equatable {
     /// does not use this value as a correlation key.
     public let toolUseID: HookOpaqueIdentity?
     public let observedAt: Date
+    public let reviewer: ApprovalReviewer
 
-    public init(journalEventID: HookApprovalJournalEventID, owner: HookApprovalTurnOwner, toolUseID: HookOpaqueIdentity? = nil, observedAt: Date) {
-        self.journalEventID = journalEventID; self.owner = owner; self.toolUseID = toolUseID; self.observedAt = observedAt
+    public init(journalEventID: HookApprovalJournalEventID, owner: HookApprovalTurnOwner, toolUseID: HookOpaqueIdentity? = nil, observedAt: Date, reviewer: ApprovalReviewer = .unknown) {
+        self.journalEventID = journalEventID; self.owner = owner; self.toolUseID = toolUseID; self.observedAt = observedAt; self.reviewer = reviewer
     }
 }
 
@@ -163,9 +173,11 @@ public struct HookApprovalJournalRecord: Codable, Sendable, Equatable {
     public let toolUseID: HookOpaqueIdentity?
     public let observedAtMilliseconds: Int64
     public let sourceHealth: HookApprovalSourceHealthState?
+    /// Absent on old records and on non-request events.
+    public let reviewer: ApprovalReviewer?
 
-    public init?(journalEventID: HookApprovalJournalEventID, kind: HookApprovalJournalRecordKind, sourceID: HookOpaqueIdentity, sessionID: HookOpaqueIdentity? = nil, turnID: HookOpaqueIdentity? = nil, toolUseID: HookOpaqueIdentity? = nil, observedAtMilliseconds: Int64, sourceHealth: HookApprovalSourceHealthState? = nil) {
-        guard observedAtMilliseconds >= 0 else { return nil }
+    public init?(journalEventID: HookApprovalJournalEventID, kind: HookApprovalJournalRecordKind, sourceID: HookOpaqueIdentity, sessionID: HookOpaqueIdentity? = nil, turnID: HookOpaqueIdentity? = nil, toolUseID: HookOpaqueIdentity? = nil, observedAtMilliseconds: Int64, sourceHealth: HookApprovalSourceHealthState? = nil, reviewer: ApprovalReviewer? = nil) {
+        guard observedAtMilliseconds >= 0, reviewer == nil || kind == .permissionRequest else { return nil }
         switch kind {
         case .permissionRequest, .postToolUse, .stop:
             guard sessionID != nil, turnID != nil, sourceHealth == nil else { return nil }
@@ -176,7 +188,7 @@ public struct HookApprovalJournalRecord: Codable, Sendable, Equatable {
         self.schema = Self.schemaVersion
         self.journalEventID = journalEventID; self.kind = kind; self.sourceID = sourceID
         self.sessionID = sessionID; self.turnID = turnID; self.toolUseID = toolUseID
-        self.observedAtMilliseconds = observedAtMilliseconds; self.sourceHealth = sourceHealth
+        self.observedAtMilliseconds = observedAtMilliseconds; self.sourceHealth = sourceHealth; self.reviewer = reviewer
     }
 
     public var event: HookApprovalEvent {
@@ -198,12 +210,13 @@ public struct HookApprovalJournalRecord: Codable, Sendable, Equatable {
             journalEventID: journalEventID,
             owner: HookApprovalTurnOwner(sourceID: sourceID, sessionID: sessionID!, turnID: turnID!),
             toolUseID: toolUseID,
-            observedAt: observedAt
+            observedAt: observedAt,
+            reviewer: reviewer ?? .unknown
         )
     }
 
     private enum CodingKeys: String, CodingKey, CaseIterable {
-        case schema, journalEventID, kind, sourceID, sessionID, turnID, toolUseID, observedAtMilliseconds, sourceHealth
+        case schema, journalEventID, kind, sourceID, sessionID, turnID, toolUseID, observedAtMilliseconds, sourceHealth, reviewer
     }
 
     /// A dynamic key is required here: a container keyed by `CodingKeys` only
@@ -235,7 +248,8 @@ public struct HookApprovalJournalRecord: Codable, Sendable, Equatable {
             turnID: try container.decodeIfPresent(HookOpaqueIdentity.self, forKey: .turnID),
             toolUseID: try container.decodeIfPresent(HookOpaqueIdentity.self, forKey: .toolUseID),
             observedAtMilliseconds: try container.decode(Int64.self, forKey: .observedAtMilliseconds),
-            sourceHealth: try container.decodeIfPresent(HookApprovalSourceHealthState.self, forKey: .sourceHealth)
+            sourceHealth: try container.decodeIfPresent(HookApprovalSourceHealthState.self, forKey: .sourceHealth),
+            reviewer: try container.decodeIfPresent(ApprovalReviewer.self, forKey: .reviewer)
         ) else {
             throw DecodingError.dataCorruptedError(forKey: .kind, in: container, debugDescription: "Invalid sanitized journal record")
         }
@@ -247,13 +261,14 @@ public struct HookApprovalPendingEvidence: Codable, Sendable, Equatable {
     public let journalEventID: HookApprovalJournalEventID
     public let owner: HookApprovalTurnOwner
     public let observedAt: Date
-    public init(journalEventID: HookApprovalJournalEventID, owner: HookApprovalTurnOwner, observedAt: Date) {
-        self.journalEventID = journalEventID; self.owner = owner; self.observedAt = observedAt
+    public let reviewer: ApprovalReviewer?
+    public init(journalEventID: HookApprovalJournalEventID, owner: HookApprovalTurnOwner, observedAt: Date, reviewer: ApprovalReviewer? = nil) {
+        self.journalEventID = journalEventID; self.owner = owner; self.observedAt = observedAt; self.reviewer = reviewer
     }
 }
 
 /// Persistable reconciliation input for the future Hook lane.  It includes
-/// only opaque IDs and timestamps and can therefore be safely retained across
+/// only opaque IDs, timestamps, and a closed reviewer enum, retained across
 /// a Monitor restart without retaining Hook payload content.
 public struct HookApprovalJournalCheckpoint: Codable, Sendable, Equatable {
     public let sourceID: HookOpaqueIdentity?
@@ -368,7 +383,7 @@ public final class HookApprovalJournalReader: @unchecked Sendable {
     private func apply(_ event: HookApprovalEvent) {
         switch event {
         case .permissionRequest(let value):
-            unresolved[value.journalEventID] = HookApprovalPendingEvidence(journalEventID: value.journalEventID, owner: value.owner, observedAt: value.observedAt)
+            unresolved[value.journalEventID] = HookApprovalPendingEvidence(journalEventID: value.journalEventID, owner: value.owner, observedAt: value.observedAt, reviewer: value.reviewer)
         case .postToolUse(let value):
             let matching = unresolved.values.filter { $0.owner == value.owner }
             if matching.count == 1, let pending = matching.first {

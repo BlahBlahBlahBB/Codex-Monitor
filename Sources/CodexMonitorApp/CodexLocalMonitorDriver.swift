@@ -75,9 +75,6 @@ public actor CodexLocalMonitorDriver {
     private var durableHookJournalCheckpoint: HookApprovalJournalCheckpoint?
     private var approvalNotificationOutbox: [String: ApprovalNotificationOutboxIntent]
     private var durableApprovalNotificationOutbox: [String: ApprovalNotificationOutboxIntent]
-    /// In-memory correlation only. Its keys are HMAC-derived and it is never
-    /// persisted; the durable Hook checkpoint remains the sole restart source.
-    private var hookOwnerThreads: [HookApprovalTurnOwner: NamespacedID] = [:]
     private var trackedThreads = Set<NamespacedID>()
     private var loopTask: Task<Void, Never>?
     private var sleepObservers: [NSObjectProtocol] = []
@@ -165,7 +162,6 @@ public actor CodexLocalMonitorDriver {
         ledgerLiveObservationStartedAt = nil
         knownLedgerSessionKeys.removeAll()
         verifiedLiveSessionStartKeys.removeAll()
-        hookOwnerThreads.removeAll()
         if let usageLedger { Task { await usageLedger.stop() } }
     }
 
@@ -439,7 +435,6 @@ public actor CodexLocalMonitorDriver {
                       let session = record.sessionID, let turn = record.turnID,
                       let owner = resolver.owner(sourceRawID: record.threadID.sourceID.rawValue, sessionRawID: session, turnRawID: turn.rawID) else { continue }
                 await runtime.bindHookApprovalOwner(owner, to: record.threadID, turnID: turn, observedAt: record.observedAt)
-                hookOwnerThreads[owner] = record.threadID
             }
         }
         for event in result.events {
@@ -447,7 +442,8 @@ public actor CodexLocalMonitorDriver {
             guard case let .permissionRequest(request) = event else { continue }
             // Exact reducer admission is the notification authority. A global
             // WAITING_APPROVAL from another task is never sufficient.
-            guard let threadID = await runtime.pendingHookApprovalThreadID(for: request) else { continue }
+            guard let threadID = await runtime.pendingHookApprovalThreadID(for: request),
+                  request.reviewer.requiresUserAttention else { continue }
             let snapshot = await runtime.snapshot()
             guard let thread = snapshot.threads.first(where: {
                 $0.threadID == threadID && $0.state == .waitingApproval

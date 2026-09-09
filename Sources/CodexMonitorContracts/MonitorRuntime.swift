@@ -77,6 +77,7 @@ public struct MonitorThreadViewModel: Sendable, Equatable {
     public let activity: RuntimeActivityCategory
     public let waitingApproval: MonitorCapabilityAvailability
     public let approvalRequestObserved: Bool
+    public let userAttentionRequired: Bool
     public let sessionToken: Int64?
     public let sessionTokenAvailability: MonitorDataAvailability
     public let sessionTokenProvenance: SessionTokenProvenance?
@@ -92,6 +93,7 @@ public struct MonitorThreadViewModel: Sendable, Equatable {
         activity = value.currentActivityCategory
         waitingApproval = MonitorRuntimeSnapshotBuilder.waitingApprovalAvailability(for: value)
         approvalRequestObserved = value.approvalRequestObserved
+        userAttentionRequired = value.userAttentionRequired
         let tokenAvailability = MonitorRuntimeSnapshotBuilder.sessionTokenAvailability(for: value)
         sessionToken = tokenAvailability == .available ? value.sessionTokenCumulative : nil
         sessionTokenAvailability = tokenAvailability
@@ -163,6 +165,8 @@ public struct MonitorRuntimeSnapshot: Sendable, Equatable {
     public let sourceHealth: [MonitorRuntimeSource: MonitorSourceHealth]
     public let capabilities: [MonitorRuntimeCapability: MonitorCapabilityAvailability]
 
+    public var userAttentionRequired: Bool { currentThread?.userAttentionRequired ?? false }
+
     /// `capturedAt` and freshness assessment timestamps are sampling metadata,
     /// not presentation changes. UI bindings use this to avoid rerendering on
     /// a timer when the observable product state has not changed.
@@ -210,7 +214,7 @@ public struct MonitorRuntimeSnapshot: Sendable, Equatable {
     }
 
     private func equivalent(_ lhs: MonitorThreadViewModel, _ rhs: MonitorThreadViewModel) -> Bool {
-        lhs.threadID == rhs.threadID && lhs.activeTurnID == rhs.activeTurnID && lhs.conversationName == rhs.conversationName && lhs.model == rhs.model && lhs.state == rhs.state && lhs.stateSince == rhs.stateSince && lhs.activity == rhs.activity && lhs.waitingApproval == rhs.waitingApproval && lhs.approvalRequestObserved == rhs.approvalRequestObserved && lhs.sessionToken == rhs.sessionToken && lhs.sessionTokenAvailability == rhs.sessionTokenAvailability && lhs.sessionTokenProvenance == rhs.sessionTokenProvenance && equivalent(lhs.freshness, rhs.freshness)
+        lhs.threadID == rhs.threadID && lhs.activeTurnID == rhs.activeTurnID && lhs.conversationName == rhs.conversationName && lhs.model == rhs.model && lhs.state == rhs.state && lhs.stateSince == rhs.stateSince && lhs.activity == rhs.activity && lhs.waitingApproval == rhs.waitingApproval && lhs.approvalRequestObserved == rhs.approvalRequestObserved && lhs.userAttentionRequired == rhs.userAttentionRequired && lhs.sessionToken == rhs.sessionToken && lhs.sessionTokenAvailability == rhs.sessionTokenAvailability && lhs.sessionTokenProvenance == rhs.sessionTokenProvenance && equivalent(lhs.freshness, rhs.freshness)
     }
 
     private func equivalent(_ lhs: MonitorSourceHealth, _ rhs: MonitorSourceHealth) -> Bool {

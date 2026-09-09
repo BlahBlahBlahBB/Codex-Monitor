@@ -67,6 +67,9 @@ public struct ThreadRuntimeSnapshot: Sendable, Equatable {
     /// A bounded request-only signal. It never asserts an ongoing wait or a
     /// resolved approval lifecycle.
     public let approvalRequestObserved: Bool
+    /// Presentation-only attention gate derived from exact pending approval
+    /// evidence and each Hook request's source-classified reviewer.
+    public let userAttentionRequired: Bool
     public let currentActivityCategory: RuntimeActivityCategory
 }
 
@@ -83,6 +86,8 @@ public struct GlobalRuntimeSnapshot: Sendable, Equatable {
     public let approvalRequestObserved: Bool
     public let representativeThread: ThreadRuntimeSnapshot?
     public let threads: [ThreadRuntimeSnapshot]
+
+    public var userAttentionRequired: Bool { representativeThread?.userAttentionRequired ?? false }
 }
 
 public enum MonitoringPausePhase: Sendable, Equatable { case live, paused, reconciling }
@@ -423,7 +428,7 @@ public final class RuntimeStateEngine: @unchecked Sendable {
             record.pendingApprovals = Dictionary(uniqueKeysWithValues: value.unresolvedApprovals.filter { $0.threadID == value.threadID && $0.turnID == value.activeTurnID }.map { ($0.requestID, PendingApproval(request: $0)) })
             record.hookApprovalOwner = value.hookApprovalOwner
             record.hookPendingApprovals = Dictionary(uniqueKeysWithValues: value.unresolvedHookApprovals.map { evidence in
-                (evidence.journalEventID, PendingHookApproval(event: HookApprovalLifecycleEvent(journalEventID: evidence.journalEventID, owner: evidence.owner, observedAt: evidence.observedAt)))
+                (evidence.journalEventID, PendingHookApproval(event: HookApprovalLifecycleEvent(journalEventID: evidence.journalEventID, owner: evidence.owner, observedAt: evidence.observedAt, reviewer: evidence.reviewer ?? .unknown)))
             })
             if let owner = value.hookApprovalOwner {
                 hookApprovalHealthBySource[owner.sourceID] = switch value.approvalHealth {
@@ -448,7 +453,7 @@ public final class RuntimeStateEngine: @unchecked Sendable {
         let threadSnapshots = records.values.map { snapshot(for: $0, now: now) }.sorted { stableID($0.threadID) < stableID($1.threadID) }
         if pausePhase != .live {
             let since = pauseSince ?? now
-            let pausedThreads = threadSnapshots.map { value in ThreadRuntimeSnapshot(threadID: value.threadID, activeTurnID: value.activeTurnID, conversationName: value.conversationName, model: value.model, state: .paused, stateSince: since, turnRuntimeStartedAt: value.turnRuntimeStartedAt, sessionTokenCumulative: value.sessionTokenCumulative, sessionTokenProvenance: value.sessionTokenProvenance, sessionTokenAvailable: value.sessionTokenAvailable, sourceFreshness: stale(value.sourceFreshness, at: now), approvalHealth: .stale, approvalFreshness: stale(value.approvalFreshness, at: now), approvalRequestObserved: false, currentActivityCategory: value.currentActivityCategory) }
+            let pausedThreads = threadSnapshots.map { value in ThreadRuntimeSnapshot(threadID: value.threadID, activeTurnID: value.activeTurnID, conversationName: value.conversationName, model: value.model, state: .paused, stateSince: since, turnRuntimeStartedAt: value.turnRuntimeStartedAt, sessionTokenCumulative: value.sessionTokenCumulative, sessionTokenProvenance: value.sessionTokenProvenance, sessionTokenAvailable: value.sessionTokenAvailable, sourceFreshness: stale(value.sourceFreshness, at: now), approvalHealth: .stale, approvalFreshness: stale(value.approvalFreshness, at: now), approvalRequestObserved: false, userAttentionRequired: false, currentActivityCategory: value.currentActivityCategory) }
             return GlobalRuntimeSnapshot(state: .paused, stateSince: since, representativeThreadID: nil, currentActivityCategory: .idle, currentActivityShortSafeLabel: RuntimeActivityCategory.idle.shortSafeLabel, sourceFreshness: Freshness(state: .stale, assessedAt: now, observedAt: since, reason: "monitorPausedOrRevalidating"), activeThreadCount: 0, waitingApprovalCount: 0, approvalRequestObserved: false, representativeThread: nil, threads: pausedThreads)
         }
         let ranked = threadSnapshots.sorted { lhs, rhs in
@@ -493,6 +498,13 @@ public final class RuntimeStateEngine: @unchecked Sendable {
 
     private func hasPendingApproval(_ record: ThreadRecord) -> Bool {
         !record.pendingApprovals.isEmpty || !record.hookPendingApprovals.isEmpty
+    }
+
+    private func userAttentionRequired(for record: ThreadRecord) -> Bool {
+        // Legacy request evidence stays conservative. Hook classification
+        // belongs to each pending event, never to a global or latest turn.
+        !record.pendingApprovals.isEmpty
+            || record.hookPendingApprovals.values.contains { $0.event.reviewer.requiresUserAttention }
     }
 
     private func updateHookApprovalHealth(for sourceID: HookOpaqueIdentity, record: inout ThreadRecord) {
@@ -559,7 +571,7 @@ public final class RuntimeStateEngine: @unchecked Sendable {
         let runtimeFreshness = Freshness(state: record.runtimeSourceAvailable ? .fresh : .unknown, assessedAt: now, observedAt: record.runtimeObservedAt, reason: record.runtimeSourceAvailable ? nil : "runtimeSourceUnavailable")
         let approvalFreshness = Freshness(state: record.approvalHealth == .unavailable || record.approvalHealth == .unknown ? .unknown : (record.approvalHealth == .stale ? .stale : .fresh), assessedAt: now, observedAt: record.approvalObservedAt, reason: record.approvalHealth == .unavailable ? "approvalSourceUnavailable" : (record.approvalHealth == .unknown ? "approvalSourceUnknown" : nil))
         let category = [.thinking, .working].contains(state) ? record.lastActivity : activity(for: state)
-        return ThreadRuntimeSnapshot(threadID: record.threadID, activeTurnID: record.activeTurnID, conversationName: record.conversationName, model: record.model, state: state, stateSince: since, turnRuntimeStartedAt: record.turnStartedAt, sessionTokenCumulative: record.tokens, sessionTokenProvenance: record.tokenProvenance, sessionTokenAvailable: record.sessionTokenAvailable, sourceFreshness: runtimeFreshness, approvalHealth: record.approvalHealth, approvalFreshness: approvalFreshness, approvalRequestObserved: record.approvalRequestObservedAt != nil, currentActivityCategory: category)
+        return ThreadRuntimeSnapshot(threadID: record.threadID, activeTurnID: record.activeTurnID, conversationName: record.conversationName, model: record.model, state: state, stateSince: since, turnRuntimeStartedAt: record.turnStartedAt, sessionTokenCumulative: record.tokens, sessionTokenProvenance: record.tokenProvenance, sessionTokenAvailable: record.sessionTokenAvailable, sourceFreshness: runtimeFreshness, approvalHealth: record.approvalHealth, approvalFreshness: approvalFreshness, approvalRequestObserved: record.approvalRequestObservedAt != nil, userAttentionRequired: userAttentionRequired(for: record), currentActivityCategory: category)
     }
 
     private func state(for record: ThreadRecord, now: Date) -> MonitorRuntimeState {

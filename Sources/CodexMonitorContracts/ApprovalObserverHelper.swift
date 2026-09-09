@@ -105,7 +105,10 @@ public enum ApprovalObserverHookRunner {
             recordDiagnostic(paths: paths, stage: "identity_derivation_failed", kind: kind)
             return false
         }
-        let appended = append(kind: kind, owner: owner, observedAt: Date(), paths: paths)
+        let reviewer = kind == .permissionRequest
+            ? transcriptReviewer(path: object["transcript_path"] as? String, turnID: turnID)
+            : nil
+        let appended = append(kind: kind, owner: owner, reviewer: reviewer, observedAt: Date(), paths: paths)
         recordDiagnostic(paths: paths, stage: appended ? "event_appended" : "journal_append_failed", kind: kind)
         return appended
     }
@@ -128,7 +131,46 @@ public enum ApprovalObserverHookRunner {
         }
     }
 
-    private static func append(kind: HookApprovalJournalRecordKind, owner: HookApprovalTurnOwner, observedAt: Date, paths: AppOwnedApprovalObserverPaths) -> Bool {
+    /// One bounded regular-file read; no polling, retry, or transcript content
+    /// escapes this function. Discard a cut first line; an incomplete final
+    /// record is conservative. The newest exact-turn context wins.
+    static let maximumTranscriptBytes = 1_048_576
+
+    static func transcriptReviewer(path: String?, turnID: String) -> ApprovalReviewer {
+        guard let path, path.hasPrefix("/"), !path.utf8.contains(0),
+              URL(fileURLWithPath: path).pathExtension.lowercased() == "jsonl",
+              !turnID.isEmpty else { return .unknown }
+        // O_NONBLOCK prevents a FIFO disguised as .jsonl from blocking open.
+        let descriptor = open(path, O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC)
+        guard descriptor >= 0 else { return .unknown }
+        defer { close(descriptor) }
+        var metadata = stat()
+        guard fstat(descriptor, &metadata) == 0,
+              metadata.st_mode & S_IFMT == S_IFREG, metadata.st_size > 0 else { return .unknown }
+        let count = Int(min(metadata.st_size, off_t(maximumTranscriptBytes)))
+        let offset = metadata.st_size - off_t(count)
+        var bytes = [UInt8](repeating: 0, count: count)
+        let received = bytes.withUnsafeMutableBytes { buffer in
+            pread(descriptor, buffer.baseAddress!, count, offset)
+        }
+        guard received == count, bytes.last == 0x0A else { return .unknown }
+        var lines = Data(bytes).split(separator: 0x0A, omittingEmptySubsequences: false)
+        if offset > 0, !lines.isEmpty { lines.removeFirst() }
+        // Remove the empty slice after the final newline.
+        if !lines.isEmpty { lines.removeLast() }
+        for line in lines.reversed() {
+            guard let object = try? JSONSerialization.jsonObject(with: Data(line)) as? [String: Any] else {
+                return .unknown
+            }
+            guard object["type"] as? String == "turn_context",
+                  let payload = object["payload"] as? [String: Any],
+                  payload["turn_id"] as? String == turnID else { continue }
+            return (payload["approvals_reviewer"] as? String).flatMap(ApprovalReviewer.init(rawValue:)) ?? .unknown
+        }
+        return .unknown
+    }
+
+    private static func append(kind: HookApprovalJournalRecordKind, owner: HookApprovalTurnOwner, reviewer: ApprovalReviewer?, observedAt: Date, paths: AppOwnedApprovalObserverPaths) -> Bool {
         let fileManager = FileManager.default
         do {
             let journalDirectory = paths.journalURL.deletingLastPathComponent()
@@ -143,7 +185,7 @@ public enum ApprovalObserverHookRunner {
             guard current < UInt64.max else { return false }
             let next = current + 1
             guard let eventID = HookApprovalJournalEventID(next),
-                  let record = HookApprovalJournalRecord(journalEventID: eventID, kind: kind, sourceID: owner.sourceID, sessionID: owner.sessionID, turnID: owner.turnID, observedAtMilliseconds: Int64(observedAt.timeIntervalSince1970 * 1_000)),
+                  let record = HookApprovalJournalRecord(journalEventID: eventID, kind: kind, sourceID: owner.sourceID, sessionID: owner.sessionID, turnID: owner.turnID, observedAtMilliseconds: Int64(observedAt.timeIntervalSince1970 * 1_000), reviewer: reviewer),
                   let encoded = try? JSONEncoder().encode(record),
                   lseek(descriptor, 0, SEEK_SET) >= 0,
                   ftruncate(descriptor, 0) == 0,

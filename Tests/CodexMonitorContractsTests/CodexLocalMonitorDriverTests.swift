@@ -137,6 +137,117 @@ final class CodexLocalMonitorDriverTests: XCTestCase {
         XCTAssertEqual(snapshot.currentThread?.threadID.rawID, "thread-a")
     }
 
+
+    func testSourceUserRequestProducesYellowAndOneNotification() async throws {
+        try await verifySourceRequest(reviewer: "user", attention: true)
+    }
+
+    func testSourceAutoRequestStaysPendingWithoutYellowOrNotification() async throws {
+        try await verifySourceRequest(reviewer: "auto_review", attention: false)
+    }
+
+    func testSourceUnknownRequestRemainsConservative() async throws {
+        try await verifySourceRequest(reviewer: "unsupported", attention: true)
+    }
+
+    private func verifySourceRequest(reviewer: String, attention: Bool) async throws {
+        let fixture = try DriverFixture(turn: "t1", terminal: false)
+        defer { fixture.cleanup() }
+        let key = Data("source-to-driver".utf8)
+        let resolver = KeyedHookApprovalIdentityDeriver(keyMaterial: key)!
+        let runtime = MonitorRuntimeStore()
+        let store = InMemoryApprovalCheckpointStore()
+        let delivery = ApprovalOutboxDeliveryRecorder()
+        let driver = fixture.driver(runtime: runtime, resolver: resolver, approvalCheckpointStore: store, approvalNotificationDelivery: { await delivery.deliver($0) })
+        await driver.refreshOnce()
+        fixture.appendFreshTurnStartForThreadA()
+        // This transcript belongs to the helper only. The desktop runtime
+        // never receives its TurnContext, reproducing downstream projection lag.
+        try fixture.appendSourcePermissionRequest(reviewer: reviewer, key: key)
+        await driver.refreshOnce()
+        await driver.refreshOnce()
+        let snapshot = await runtime.snapshot()
+        XCTAssertEqual(snapshot.currentState, .waitingApproval)
+        XCTAssertEqual(snapshot.waitingApprovalCount, 1)
+        XCTAssertEqual(snapshot.userAttentionRequired, attention)
+        XCTAssertEqual(VisualStatePresentation.forSnapshot(snapshot).orbTone, attention ? .yellow : .blue)
+        let submissions = await delivery.submitted()
+        XCTAssertEqual(submissions.count, attention ? 1 : 0)
+        XCTAssertEqual(store.everContainedIntent, attention)
+        XCTAssertTrue(store.latest().notificationOutbox.isEmpty)
+    }
+
+    func testSourceReviewerSurvivesDriverRestartWithNoDuplicateSubmission() async throws {
+        for reviewer in [ApprovalReviewer.user, .autoReview, .unknown] {
+            let fixture = try DriverFixture(turn: "t1", terminal: false)
+            defer { fixture.cleanup() }
+            let key = Data("restart-source".utf8)
+            let resolver = KeyedHookApprovalIdentityDeriver(keyMaterial: key)!
+            let store = InMemoryApprovalCheckpointStore()
+            let delivery = ApprovalOutboxDeliveryRecorder()
+            let first = fixture.driver(runtime: MonitorRuntimeStore(), resolver: resolver, approvalCheckpointStore: store, approvalNotificationDelivery: { await delivery.deliver($0) })
+            await first.refreshOnce()
+            fixture.appendFreshTurnStartForThreadA()
+            try fixture.appendSourcePermissionRequest(reviewer: reviewer.rawValue, key: key)
+            await first.refreshOnce()
+            let runtime = MonitorRuntimeStore()
+            let restarted = fixture.driver(runtime: runtime, resolver: resolver, approvalCheckpointStore: store, approvalNotificationDelivery: { await delivery.deliver($0) })
+            await restarted.refreshOnce()
+            await restarted.refreshOnce()
+            let snapshot = await runtime.snapshot()
+            XCTAssertEqual(snapshot.currentState, .waitingApproval)
+            XCTAssertEqual(snapshot.userAttentionRequired, reviewer.requiresUserAttention)
+            let submissions = await delivery.submitted()
+            XCTAssertEqual(submissions.count, reviewer.requiresUserAttention ? 1 : 0)
+        }
+    }
+
+    func testSourceReviewerResolutionMatrixPreservesPostToolUseAndStop() async throws {
+        for reviewer in [ApprovalReviewer.user, .autoReview, .unknown] {
+            for kind in [HookApprovalJournalRecordKind.postToolUse, .stop] {
+                let fixture = try DriverFixture(turn: "t1", terminal: false)
+                defer { fixture.cleanup() }
+                let key = Data("resolution-source".utf8)
+                let resolver = KeyedHookApprovalIdentityDeriver(keyMaterial: key)!
+                let runtime = MonitorRuntimeStore()
+                let driver = fixture.driver(runtime: runtime, resolver: resolver)
+                await driver.refreshOnce()
+                fixture.appendFreshTurnStartForThreadA()
+                try fixture.appendSourcePermissionRequest(reviewer: reviewer.rawValue, key: key)
+                await driver.refreshOnce()
+                let owner = resolver.owner(sourceRawID: "codex-desktop-local", sessionRawID: "thread-a", turnRawID: "t1")!
+                let resolution = HookApprovalJournalRecord(journalEventID: .init(2)!, kind: kind, sourceID: owner.sourceID, sessionID: owner.sessionID, turnID: owner.turnID, observedAtMilliseconds: 2)!
+                fixture.journalSource.records.append(try JSONEncoder().encode(resolution))
+                await driver.refreshOnce()
+                let snapshot = await runtime.snapshot()
+                XCTAssertEqual(snapshot.currentState, .thinking)
+                XCTAssertEqual(snapshot.waitingApprovalCount, 0)
+                XCTAssertFalse(snapshot.userAttentionRequired)
+            }
+        }
+    }
+
+    func testNotificationUsesExactRequestReviewerEvenWhenSameTurnHasHumanPending() async throws {
+        let fixture = try DriverFixture(turn: "t1", terminal: false)
+        defer { fixture.cleanup() }
+        let resolver = KeyedHookApprovalIdentityDeriver(keyMaterial: Data("mixed".utf8))!
+        let owner = resolver.owner(sourceRawID: "codex-desktop-local", sessionRawID: "thread-a", turnRawID: "t1")!
+        let runtime = MonitorRuntimeStore()
+        let delivery = ApprovalOutboxDeliveryRecorder()
+        let driver = fixture.driver(runtime: runtime, resolver: resolver, approvalNotificationDelivery: { await delivery.deliver($0) })
+        await driver.refreshOnce()
+        fixture.appendFreshTurnStartForThreadA()
+        for (index, reviewer) in [ApprovalReviewer.user, .autoReview].enumerated() {
+            let record = HookApprovalJournalRecord(journalEventID: .init(UInt64(index + 1))!, kind: .permissionRequest, sourceID: owner.sourceID, sessionID: owner.sessionID, turnID: owner.turnID, observedAtMilliseconds: 1, reviewer: reviewer)!
+            fixture.journalSource.records.append(try JSONEncoder().encode(record))
+        }
+        await driver.refreshOnce()
+        let snapshot = await runtime.snapshot()
+        XCTAssertTrue(snapshot.userAttentionRequired)
+        let submissions = await delivery.submitted()
+        XCTAssertEqual(submissions.map(\.journalEventID), [.init(1)!])
+    }
+
     func testOnlyExactlyAdmittedPermissionRequestsCreateOutboxNotifications() async throws {
         let fixture = try DriverFixture(turn: "t1", terminal: false)
         defer { fixture.cleanup() }
@@ -338,6 +449,18 @@ private final class DriverFixture {
     func driver(runtime: MonitorRuntimeStore, resolver: (any HookApprovalIdentityResolving)?, approvalCheckpointStore: (any ApprovalLifecycleCheckpointStoring)? = nil, processIsRunning: @escaping @Sendable () -> Bool = { true }, approvalNotificationDelivery: @escaping @Sendable (ApprovalNotificationOutboxIntent) async -> ApprovalNotificationDeliveryDisposition = { _ in .retry }) -> CodexLocalMonitorDriver {
         CodexLocalMonitorDriver(runtime: runtime, codexRoot: root, hookJournalSource: journalSource, hookIdentityResolver: resolver, approvalCheckpointURL: checkpoint, approvalCheckpointStore: approvalCheckpointStore, processIsRunning: processIsRunning, approvalNotificationDelivery: approvalNotificationDelivery)
     }
+
+    func appendSourcePermissionRequest(reviewer: String, key: Data) throws {
+        let transcript = root.appendingPathComponent("helper-only.jsonl")
+        try Data("{\"type\":\"turn_context\",\"payload\":{\"turn_id\":\"t1\",\"approvals_reviewer\":\"\(reviewer)\"}}\n".utf8).write(to: transcript)
+        let paths = AppOwnedApprovalObserverPaths(rootURL: root.appendingPathComponent("observer"), codexHomeURL: root)
+        let input = try JSONSerialization.data(withJSONObject: [
+            "hook_event_name": "PermissionRequest", "session_id": "thread-a",
+            "turn_id": "t1", "transcript_path": transcript.path
+        ])
+        XCTAssertTrue(ApprovalObserverHookRunner.run(input: input, paths: paths, keyMaterial: key))
+        journalSource.records = try Data(contentsOf: paths.journalURL).split(separator: 0x0A).map { Data($0) }
+    }
     func appendPermissionRequest(owner: HookApprovalTurnOwner, eventID: UInt64) throws {
         let identifier = try XCTUnwrap(HookApprovalJournalEventID(eventID))
         let record = try XCTUnwrap(HookApprovalJournalRecord(journalEventID: identifier, kind: .permissionRequest, sourceID: owner.sourceID, sessionID: owner.sessionID, turnID: owner.turnID, observedAtMilliseconds: Int64(eventID)))
@@ -369,6 +492,7 @@ private actor ApprovalOutboxDeliveryRecorder {
 }
 
 private final class InMemoryApprovalCheckpointStore: ApprovalLifecycleCheckpointStoring, @unchecked Sendable {
+    private(set) var everContainedIntent = false
     private var checkpoint = ApprovalLifecycleCheckpoint(cursor: nil, unresolved: [])
     private var saveCount = 0
     private var failedSaveNumbers = Set<Int>()
@@ -376,6 +500,7 @@ private final class InMemoryApprovalCheckpointStore: ApprovalLifecycleCheckpoint
     func load() throws -> ApprovalLifecycleCheckpoint { checkpoint }
 
     func save(_ checkpoint: ApprovalLifecycleCheckpoint) throws {
+        everContainedIntent = everContainedIntent || !checkpoint.notificationOutbox.isEmpty
         saveCount += 1
         if failedSaveNumbers.remove(saveCount) != nil {
             throw ApprovalLifecycleCheckpointStoreError.writeFailed

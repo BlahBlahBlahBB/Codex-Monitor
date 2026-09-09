@@ -143,7 +143,11 @@ struct VisualStatePresentation: Equatable {
         }
         guard desktop?.availability == .available else { return unavailable }
 
-        var presentation = forState(snapshot.currentState)
+        // Auto-reviewed approvals remain internally WAITING_APPROVAL, but
+        // they are not a human-attention event. Keep the active blue Orb
+        // presentation while preserving the reducer's pending state.
+        let visualState: MonitorRuntimeState = snapshot.currentState == .waitingApproval && snapshot.currentThread?.userAttentionRequired == false ? .working : snapshot.currentState
+        var presentation = forState(visualState)
         // Existing terminal/disconnected behavior is deliberately untouched.
         guard ![.failed, .interrupted, .systemError, .disconnected, .paused].contains(snapshot.currentState) else {
             return presentation
