@@ -18,8 +18,7 @@ public final class MonitorAppModel: ObservableObject {
         VisualStatePresentation.forSnapshot(
             snapshot,
             quotaWarningEnabled: preferences.quotaWarningEnabled,
-            quotaWarningThreshold: preferences.quotaWarningThreshold,
-            experimentalApprovalYellowEnabled: preferences.experimentalApprovalYellowEnabled
+            quotaWarningThreshold: preferences.quotaWarningThreshold
         )
     }
     private var observationTask: Task<Void, Never>?

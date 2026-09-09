@@ -84,9 +84,8 @@ final class MonitorProductIntegrationTests: XCTestCase {
 
     func testSettingsAlwaysHasAStableDefaultDetailRoute() {
         XCTAssertEqual(SettingsSection.defaultSection, .floating)
-        XCTAssertEqual(SettingsSection.allCases.count, 7)
+        XCTAssertEqual(SettingsSection.allCases.count, 6)
         XCTAssertEqual(SettingsSection.defaultSection.title, L10n.tr("settings.floating"))
-        XCTAssertEqual(SettingsSection.maintenance.title, L10n.tr("settings.maintenance"))
     }
 
     func testActionRowAndBilingualLocalizationContracts() {
@@ -94,6 +93,8 @@ final class MonitorProductIntegrationTests: XCTestCase {
         XCTAssertEqual(UIInteractionContract.disabledOpacity, 0.42)
         XCTAssertEqual(L10n.tr("menu.refresh", languageCode: "en"), "Refresh")
         XCTAssertEqual(L10n.tr("menu.refresh", languageCode: "zh-Hans"), "刷新")
+        XCTAssertEqual(L10n.tr("settings.refresh", languageCode: "zh-Hans"), "立即刷新")
+        XCTAssertEqual(L10n.tr("settings.exportDiagnostics", languageCode: "zh-Hans"), "导出诊断")
         XCTAssertEqual(L10n.tr("menu.alwaysOnTopUnavailable", languageCode: "zh-Hans"), "始终置顶（不可用）")
         XCTAssertEqual(PopoverActionFeedback.surfaceOpacity(for: .rest), 0)
         XCTAssertEqual(PopoverActionFeedback.surfaceOpacity(for: .hover), 0.09)
@@ -107,11 +108,45 @@ final class MonitorProductIntegrationTests: XCTestCase {
         ]
         let popoverKeys = ["label.account", "label.plan", "label.quota", "label.resetDate", "label.quotaReset", "label.resetCredit", "quota.window.daily", "quota.window.weekly", "quota.window.monthly"]
         let usageKeys = ["label.session", "label.currentSession", "label.sessionToken", "label.tokenUsage", "label.todayToken", "label.last30DaysToken"]
-        let settingsKeys = ["settings.general", "settings.floating", "settings.notifications", "settings.privacy", "settings.advanced", "settings.maintenance", "settings.about", "settings.exportDiagnostics", "settings.diagnosticsExported", "settings.diagnosticsExportFailed"]
+        let settingsKeys = ["settings.general", "settings.floating", "settings.notifications", "settings.privacy", "settings.advanced", "settings.about", "settings.exportDiagnostics", "settings.diagnosticsExported", "settings.diagnosticsExportFailed"]
         for key in contextMenuKeys + popoverKeys + usageKeys + settingsKeys {
             XCTAssertNotEqual(L10n.tr(key, languageCode: "zh-Hans"), key, "missing zh-Hans string: \(key)")
             XCTAssertNotEqual(L10n.tr(key, languageCode: "en"), key, "missing English string: \(key)")
         }
+    }
+
+    func testSettingsCleanupRemovesDeprecatedRowsAndKeepsApprovedPlacement() throws {
+        let removedKeys = [
+            "settings.experimentalApprovalYellow",
+            "settings.experimentalApprovalYellowDescription",
+            "settings.beta",
+            "settings.openCodex",
+            "settings.maintenance"
+        ]
+        for language in ["en", "zh-Hans"] {
+            for key in removedKeys {
+                XCTAssertEqual(L10n.tr(key, languageCode: language), key, "obsolete localization key remains: \(key) [\(language)]")
+            }
+        }
+
+        let sourceURL = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("Sources/CodexMonitorApp/ProductViews.swift")
+        let source = try String(contentsOf: sourceURL, encoding: .utf8)
+        let advancedStart = try XCTUnwrap(source.range(of: "private struct AdvancedSettingsDetail: View {"))
+        let aboutStart = try XCTUnwrap(source.range(of: "private struct AboutSettingsDetail: View {", range: advancedStart.upperBound..<source.endIndex))
+        let advanced = String(source[advancedStart.lowerBound..<aboutStart.lowerBound])
+
+        XCTAssertTrue(advanced.contains("SettingsRow(title: L10n.tr(\"settings.refresh\"))"))
+        XCTAssertTrue(advanced.contains("SettingsRow(title: L10n.tr(\"settings.exportDiagnostics\"))"))
+        XCTAssertFalse(advanced.contains("settings.experimentalApprovalYellow"))
+        XCTAssertFalse(advanced.contains("settings.openCodex"))
+        XCTAssertFalse(source.contains("case maintenance"))
+        XCTAssertFalse(source.contains("case .maintenance"))
+        XCTAssertFalse(source.contains("MaintenanceSettingsDetail"))
+        XCTAssertFalse(source.contains("settings.maintenance"))
     }
 
     func testDiagnosticsExportUsesTimestampedNonOverwritingSanitizedZIP() async throws {
@@ -915,7 +950,7 @@ final class MonitorProductIntegrationTests: XCTestCase {
         XCTAssertNotNil(root)
         XCTAssertEqual(controller.presentation.selection, .floating)
 
-        let navigationPath: [SettingsSection] = [.general, .floating, .notifications, .privacy, .advanced, .maintenance, .about, .floating]
+        let navigationPath: [SettingsSection] = [.general, .floating, .notifications, .privacy, .advanced, .about, .floating]
         for index in 0..<30 {
             controller.show()
             XCTAssertTrue(controller.window?.isVisible == true, "open cycle \(index)")
@@ -1004,10 +1039,10 @@ final class MonitorProductIntegrationTests: XCTestCase {
 
     func testRequestOnlyApprovalMetadataCannotRecolorThinkingOrCompleted() {
         let thinking = presentationSnapshot(state: .thinking, approvalRequestObserved: true)
-        XCTAssertEqual(VisualStatePresentation.forSnapshot(thinking, experimentalApprovalYellowEnabled: true).orbTone, .blue)
+        XCTAssertEqual(VisualStatePresentation.forSnapshot(thinking).orbTone, .blue)
 
         let completed = presentationSnapshot(state: .completed, approvalRequestObserved: true)
-        XCTAssertEqual(VisualStatePresentation.forSnapshot(completed, experimentalApprovalYellowEnabled: true).orbTone, .green)
+        XCTAssertEqual(VisualStatePresentation.forSnapshot(completed).orbTone, .green)
     }
 
     func testWaitingApprovalQuotaWarningKeepsLifecycleOrbYellowAndQuotaSeparate() {
@@ -1158,34 +1193,20 @@ final class MonitorProductIntegrationTests: XCTestCase {
         XCTAssertEqual(MonitorPreferences(defaults: defaults).quotaWarningThreshold, 40)
     }
 
-    func testWaitingLifecycleStateControlsOrbRegardlessOfBetaPreference() async {
+    func testWaitingLifecycleStateControlsOrbFromAuthoritativeApprovalState() async {
         let presentation = await quotaPresentation(remaining: 80, working: true, approvalObserved: true)
         XCTAssertEqual(presentation.orbTone, .yellow)
         XCTAssertEqual(presentation.stateTextKey, "state.waitingApproval")
     }
 
-    func testWaitingLifecycleStateRetainsYellowWhenBetaPreferenceIsEnabled() async {
-        let presentation = await quotaPresentation(remaining: 80, working: true, approvalObserved: true, betaEnabled: true)
-        XCTAssertEqual(presentation.orbTone, .yellow)
-    }
-
     func testWaitingLifecycleStateHasDedicatedStatusDots() async {
-        let presentation = await quotaPresentation(remaining: 80, working: true, approvalObserved: true, betaEnabled: true)
+        let presentation = await quotaPresentation(remaining: 80, working: true, approvalObserved: true)
         XCTAssertEqual(presentation.dots, [.init(tone: .green, breathes: true), .init(tone: .yellow, breathes: false), .inactive])
     }
 
     func testFatalRuntimeErrorOverridesWaitingApprovalOrb() async {
-        let presentation = await quotaPresentation(remaining: 80, working: true, approvalObserved: true, betaEnabled: true, fatal: true)
+        let presentation = await quotaPresentation(remaining: 80, working: true, approvalObserved: true, fatal: true)
         XCTAssertEqual(presentation.orbTone, .red)
-    }
-
-    func testApprovalBetaPreferencePersistsAcrossRelaunch() {
-        let suite = "CodexMonitorTests.approvalBeta.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suite)!
-        defer { defaults.removePersistentDomain(forName: suite) }
-        let preferences = MonitorPreferences(defaults: defaults)
-        preferences.experimentalApprovalYellowEnabled = true
-        XCTAssertTrue(MonitorPreferences(defaults: defaults).experimentalApprovalYellowEnabled)
     }
 
     func testFollowSystemLocaleResolvesSynchronouslyBeforeAnySurfaceCreation() {
@@ -2398,7 +2419,7 @@ final class MonitorProductIntegrationTests: XCTestCase {
 
     private func testSettingsActions() -> SettingsSystemActions {
         SettingsSystemActions(
-            refresh: {}, openCodex: {}, openLogsFolder: {}, setMonitoringPaused: { _ in }, requestNotificationPermission: { _ in }, exportDiagnostics: { _ in }, loginItem: LoginItemController(), showDiagnostics: {}
+            refresh: {}, openLogsFolder: {}, setMonitoringPaused: { _ in }, requestNotificationPermission: { _ in }, exportDiagnostics: { _ in }, loginItem: LoginItemController(), showDiagnostics: {}
         )
     }
 
@@ -2479,7 +2500,6 @@ final class MonitorProductIntegrationTests: XCTestCase {
         warningEnabled: Bool = true,
         threshold: Double = 20,
         approvalObserved: Bool = false,
-        betaEnabled: Bool = false,
         fatal: Bool = false
     ) async -> VisualStatePresentation {
         let primary = RateLimitWindow(usedPercent: remaining.map { 100 - $0 })
@@ -2506,7 +2526,7 @@ final class MonitorProductIntegrationTests: XCTestCase {
         if fatal {
             await runtime.ingest(.rollout(RolloutRecordEnvelope(threadID: thread, turnID: turn, itemID: nil, kind: .taskCompletedFailure, activity: nil, tokenSnapshot: nil, model: nil, reasoningEffort: nil, observedAt: now, fileOffset: 2)))
         }
-        return VisualStatePresentation.forSnapshot(await runtime.snapshot(), quotaWarningEnabled: warningEnabled, quotaWarningThreshold: threshold, experimentalApprovalYellowEnabled: betaEnabled)
+        return VisualStatePresentation.forSnapshot(await runtime.snapshot(), quotaWarningEnabled: warningEnabled, quotaWarningThreshold: threshold)
     }
 
     private func usageSnapshot(buckets: [AccountUsageDailyBucket]) async -> MonitorRuntimeSnapshot {

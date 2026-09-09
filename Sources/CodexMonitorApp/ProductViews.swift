@@ -572,7 +572,7 @@ enum UsagePresentation {
 }
 
 enum SettingsSection: CaseIterable, Identifiable {
-    case general, floating, notifications, privacy, advanced, maintenance, about
+    case general, floating, notifications, privacy, advanced, about
     var id: Self { self }
     var title: String {
         switch self {
@@ -581,7 +581,6 @@ enum SettingsSection: CaseIterable, Identifiable {
         case .notifications: L10n.tr("settings.notifications")
         case .privacy: L10n.tr("settings.privacy")
         case .advanced: L10n.tr("settings.advanced")
-        case .maintenance: L10n.tr("settings.maintenance")
         case .about: L10n.tr("settings.about")
         }
     }
@@ -592,7 +591,6 @@ enum SettingsSection: CaseIterable, Identifiable {
         case .notifications: "bell"
         case .privacy: "hand.raised"
         case .advanced: "slider.horizontal.3"
-        case .maintenance: "wrench.and.screwdriver"
         case .about: "info.circle"
         }
     }
@@ -607,7 +605,6 @@ final class SettingsPresentationModel: ObservableObject {
 @MainActor
 struct SettingsSystemActions {
     let refresh: () -> Void
-    let openCodex: () -> Void
     let openLogsFolder: () -> Void
     let setMonitoringPaused: (Bool) -> Void
     let requestNotificationPermission: (NotificationPreference) -> Void
@@ -653,9 +650,7 @@ struct NativeSettingsWindowView: View {
         case .privacy:
             PrivacySettingsDetail(preferences: preferences)
         case .advanced:
-            AdvancedSettingsDetail(preferences: preferences, actions: actions)
-        case .maintenance:
-            MaintenanceSettingsDetail(actions: actions)
+            AdvancedSettingsDetail(actions: actions)
         case .about:
             AboutSettingsDetail()
         }
@@ -859,45 +854,12 @@ private struct PrivacySettingsDetail: View {
 }
 
 private struct AdvancedSettingsDetail: View {
-    @ObservedObject var preferences: MonitorPreferences
-    let actions: SettingsSystemActions
-    var body: some View {
-        SettingsDetail(title: L10n.tr("settings.advanced")) {
-            VStack(alignment: .leading, spacing: 6) {
-                SettingsRow(title: L10n.tr("settings.experimentalApprovalYellow")) {
-                    HStack(spacing: 8) {
-                        Text(L10n.tr("settings.beta"))
-                            .font(.system(size: 11, weight: .semibold))
-                            .foregroundStyle(.secondary)
-                        Toggle("", isOn: $preferences.experimentalApprovalYellowEnabled)
-                            .labelsHidden()
-                            .toggleStyle(.switch)
-                    }
-                }
-                Text(L10n.tr("settings.experimentalApprovalYellowDescription"))
-                    .font(.system(size: 12))
-                    .foregroundStyle(.secondary)
-                    .padding(.horizontal, 16)
-                    .padding(.bottom, 10)
-            }
-            SettingsRow(title: L10n.tr("settings.refresh")) { Button(L10n.tr("settings.refresh"), action: actions.refresh).buttonStyle(.bordered) }
-            SettingsRow(title: L10n.tr("settings.openCodex")) { Button(L10n.tr("settings.openCodex"), action: actions.openCodex).buttonStyle(.bordered) }
-#if !CODEX_MONITOR_RELEASE
-            // These local troubleshooting controls are deliberately omitted from
-            // the distributable product. The QA build continues to expose them.
-            SettingsRow(title: L10n.tr("settings.openLogsFolder")) { Button(L10n.tr("settings.openLogsFolder"), action: actions.openLogsFolder).buttonStyle(.bordered) }
-            SettingsRow(title: L10n.tr("settings.openDiagnostics")) { Button(L10n.tr("settings.openDiagnostics"), action: actions.showDiagnostics).buttonStyle(.bordered) }
-#endif
-        }
-    }
-}
-
-private struct MaintenanceSettingsDetail: View {
     let actions: SettingsSystemActions
     @State private var exportState: ExportState = .idle
 
     var body: some View {
-        SettingsDetail(title: L10n.tr("settings.maintenance")) {
+        SettingsDetail(title: L10n.tr("settings.advanced")) {
+            SettingsRow(title: L10n.tr("settings.refresh")) { Button(L10n.tr("settings.refresh"), action: actions.refresh).buttonStyle(.bordered) }
             SettingsRow(title: L10n.tr("settings.exportDiagnostics")) {
                 Button(L10n.tr("settings.exportDiagnostics")) {
                     exportState = .exporting
@@ -918,6 +880,12 @@ private struct MaintenanceSettingsDetail: View {
                     .padding(.horizontal, 16)
                     .padding(.vertical, 10)
             }
+#if !CODEX_MONITOR_RELEASE
+            // These local troubleshooting controls are deliberately omitted from
+            // the distributable product. The QA build continues to expose them.
+            SettingsRow(title: L10n.tr("settings.openLogsFolder")) { Button(L10n.tr("settings.openLogsFolder"), action: actions.openLogsFolder).buttonStyle(.bordered) }
+            SettingsRow(title: L10n.tr("settings.openDiagnostics")) { Button(L10n.tr("settings.openDiagnostics"), action: actions.showDiagnostics).buttonStyle(.bordered) }
+#endif
         }
     }
 

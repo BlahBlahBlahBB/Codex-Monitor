@@ -131,8 +131,7 @@ struct VisualStatePresentation: Equatable {
     static func forSnapshot(
         _ snapshot: MonitorRuntimeSnapshot?,
         quotaWarningEnabled: Bool = true,
-        quotaWarningThreshold: Double = QuotaWarningThreshold.defaultValue,
-        experimentalApprovalYellowEnabled: Bool = false
+        quotaWarningThreshold: Double = QuotaWarningThreshold.defaultValue
     ) -> Self {
         guard let snapshot else {
             return unavailable
@@ -170,10 +169,6 @@ struct VisualStatePresentation: Equatable {
             break
         }
 
-        // Kept for source compatibility with the persisted beta preference.
-        // B1 makes the authoritative runtime state the only lifecycle-orb
-        // authority; request-only metadata must never recolor the Orb.
-        _ = experimentalApprovalYellowEnabled
         return presentation
     }
 

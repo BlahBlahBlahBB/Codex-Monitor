@@ -114,7 +114,6 @@ final class MonitorSurfaceCoordinator: NSObject {
                 localization: localization,
                 actions: SettingsSystemActions(
                     refresh: { [weak self] in self?.refreshMonitoring() },
-                    openCodex: { [weak self] in self?.openCodex() },
                     openLogsFolder: Self.openLogsFolder,
                     setMonitoringPaused: { [weak self] in self?.setMonitoringPaused($0) },
                     requestNotificationPermission: { [weak self] preference in
