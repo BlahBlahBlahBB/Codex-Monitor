@@ -10,7 +10,7 @@ final class ApprovalReviewerSourceTests: XCTestCase {
     }
     override func tearDownWithError() throws { try FileManager.default.removeItem(at: root) }
 
-    func testExactUserAndAutoReviewer() throws {
+    func testExactUserAndAutoReviewerInsideFinalMiBResolveNormally() throws {
         for reviewer in ["user", "auto_review"] {
             let url = try transcript(context("turn", reviewer))
             XCTAssertEqual(ApprovalObserverHookRunner.transcriptReviewer(path: url.path, turnID: "turn").rawValue, reviewer)
@@ -49,11 +49,81 @@ final class ApprovalReviewerSourceTests: XCTestCase {
         XCTAssertEqual(ApprovalObserverHookRunner.transcriptReviewer(path: missing.path, turnID: "current"), .unknown)
     }
 
-    func testOnlyBoundedTailIsReadAndCutFirstLineIsDiscarded() throws {
-        let padding = "{\"padding\":\"" + String(repeating: "x", count: ApprovalObserverHookRunner.maximumTranscriptBytes + 100) + "\"}\n"
-        let url = try transcript(context("old", "auto_review") + padding + context("current", "user"))
+    func testOversizedRecordIsConservativeButNewestMatchStopsBeforeIt() throws {
+        let url = try transcript(context("old", "auto_review"))
+        let handle = try FileHandle(forWritingTo: url)
+        defer { try? handle.close() }
+        try handle.seekToEnd()
+        try handle.write(contentsOf: Data("{\"padding\":\"".utf8))
+        let block = Data(repeating: 120, count: ApprovalObserverHookRunner.transcriptChunkBytes)
+        for _ in 0...ApprovalObserverHookRunner.maximumTranscriptRecordBytes / block.count {
+            try handle.write(contentsOf: block)
+        }
+        try handle.write(contentsOf: Data(("\"}\n" + context("current", "user")).utf8))
         XCTAssertEqual(ApprovalObserverHookRunner.transcriptReviewer(path: url.path, turnID: "old"), .unknown)
         XCTAssertEqual(ApprovalObserverHookRunner.transcriptReviewer(path: url.path, turnID: "current"), .user)
+    }
+
+    func testExactContextSpanningTwoAndSeveralChunks() throws {
+        for size in [ApprovalObserverHookRunner.transcriptChunkBytes + 17,
+                     ApprovalObserverHookRunner.transcriptChunkBytes * 4 + 17] {
+            let record = "{\"type\":\"turn_context\",\"payload\":{\"turn_id\":\"target\",\"approvals_reviewer\":\"auto_review\",\"padding\":\"" + String(repeating: "x", count: size) + "\"}}\n"
+            let url = try transcript(record + context("wrong", "user"))
+            XCTAssertEqual(ApprovalObserverHookRunner.transcriptReviewer(path: url.path, turnID: "target"), .autoReview)
+        }
+    }
+
+    func testExactContextBeyondEightMiBAndWrongTurnAtEOF() throws {
+        let url = try transcript(context("target", "auto_review"))
+        let handle = try FileHandle(forWritingTo: url)
+        defer { try? handle.close() }
+        try handle.seekToEnd()
+        let filler = Data(("{\"padding\":\"" + String(repeating: "x", count: 32 * 1_024) + "\"}\n").utf8)
+        for _ in 0..<640 { try handle.write(contentsOf: filler) }
+        try handle.write(contentsOf: Data(context("wrong", "user").utf8))
+        XCTAssertGreaterThan(try handle.offset(), 20 * 1_024 * 1_024)
+        XCTAssertEqual(ApprovalObserverHookRunner.transcriptReviewer(path: url.path, turnID: "target"), .autoReview)
+        XCTAssertEqual(ApprovalObserverHookRunner.transcriptReviewer(path: url.path, turnID: "absent"), .unknown)
+    }
+
+    func testContextStraddlingChunkBoundaryAndMalformedPrefixIsNotRead() throws {
+        let tail = "{\"padding\":\"" + String(repeating: "x", count: ApprovalObserverHookRunner.transcriptChunkBytes - 40) + "\"}\n"
+        let url = try transcript("{broken}\n" + context("target", "auto_review") + tail)
+        XCTAssertEqual(ApprovalObserverHookRunner.transcriptReviewer(path: url.path, turnID: "target"), .autoReview)
+    }
+
+    func testRecordExactlyAtLimitIsAccepted() throws {
+        let prefix = "{\"type\":\"turn_context\",\"payload\":{\"turn_id\":\"target\",\"approvals_reviewer\":\"user\"},\"padding\":\""
+        let suffix = "\"}"
+        let url = try transcript(prefix + String(repeating: "x", count: ApprovalObserverHookRunner.maximumTranscriptRecordBytes - prefix.utf8.count - suffix.utf8.count) + suffix + "\n")
+        XCTAssertEqual(ApprovalObserverHookRunner.transcriptReviewer(path: url.path, turnID: "target"), .user)
+    }
+
+    func testBlankSuffixAndNestedContextAreConservative() throws {
+        let blank = try transcript(context("target", "auto_review") + "\n")
+        XCTAssertEqual(ApprovalObserverHookRunner.transcriptReviewer(path: blank.path, turnID: "target"), .unknown)
+        let nested = try transcript("{\"nested\":" + context("target", "auto_review").trimmingCharacters(in: .newlines) + "}\n")
+        XCTAssertEqual(ApprovalObserverHookRunner.transcriptReviewer(path: nested.path, turnID: "target"), .unknown)
+    }
+
+    func testExactReviewersBeyondOneMiBWithinEightMiBResolve() throws {
+        let padding = "{\"padding\":\"" + String(repeating: "x", count: 2 * 1_024 * 1_024) + "\"}\n"
+        for reviewer in ["auto_review", "user"] {
+            let url = try transcript(context("target", reviewer) + padding + context("tail", "user"))
+            XCTAssertEqual(ApprovalObserverHookRunner.transcriptReviewer(path: url.path, turnID: "target").rawValue, reviewer)
+        }
+    }
+
+    func testWrongTurnWithinEightMiBIsNotSelected() throws {
+        let padding = "{\"padding\":\"" + String(repeating: "x", count: 2 * 1_024 * 1_024) + "\"}\n"
+        let url = try transcript(context("target", "auto_review") + padding + context("tail", "user"))
+        XCTAssertEqual(ApprovalObserverHookRunner.transcriptReviewer(path: url.path, turnID: "wrong"), .unknown)
+    }
+
+    func testNoMatchingTurnWithinEightMiBRemainsUnknown() throws {
+        let padding = "{\"padding\":\"" + String(repeating: "x", count: 2 * 1_024 * 1_024) + "\"}\n"
+        let url = try transcript(padding + context("other", "user"))
+        XCTAssertEqual(ApprovalObserverHookRunner.transcriptReviewer(path: url.path, turnID: "absent"), .unknown)
     }
 
     func testIncompleteFinalRecordDoesNotSuppressHumanAttention() throws {
