@@ -131,10 +131,10 @@ public enum ApprovalObserverHookRunner {
         }
     }
 
-    /// One bounded regular-file read; no polling, retry, or transcript content
-    /// escapes this function. Discard a cut first line; an incomplete final
-    /// record is conservative. The newest exact-turn context wins.
-    static let maximumTranscriptBytes = 1_048_576
+    /// Scan backward from one EOF snapshot. Memory is bounded per record, not
+    /// by distance to the context. No transcript content escapes this function.
+    static let transcriptChunkBytes = 64 * 1_024
+    static let maximumTranscriptRecordBytes = 8 * 1_024 * 1_024
 
     static func transcriptReviewer(path: String?, turnID: String) -> ApprovalReviewer {
         guard let path, path.hasPrefix("/"), !path.utf8.contains(0),
@@ -147,26 +147,45 @@ public enum ApprovalObserverHookRunner {
         var metadata = stat()
         guard fstat(descriptor, &metadata) == 0,
               metadata.st_mode & S_IFMT == S_IFREG, metadata.st_size > 0 else { return .unknown }
-        let count = Int(min(metadata.st_size, off_t(maximumTranscriptBytes)))
-        let offset = metadata.st_size - off_t(count)
-        var bytes = [UInt8](repeating: 0, count: count)
-        let received = bytes.withUnsafeMutableBytes { buffer in
-            pread(descriptor, buffer.baseAddress!, count, offset)
-        }
-        guard received == count, bytes.last == 0x0A else { return .unknown }
-        var lines = Data(bytes).split(separator: 0x0A, omittingEmptySubsequences: false)
-        if offset > 0, !lines.isEmpty { lines.removeFirst() }
-        // Remove the empty slice after the final newline.
-        if !lines.isEmpty { lines.removeLast() }
-        for line in lines.reversed() {
-            guard let object = try? JSONSerialization.jsonObject(with: Data(line)) as? [String: Any] else {
+        var offset = metadata.st_size
+        var bytes = [UInt8](repeating: 0, count: transcriptChunkBytes)
+        // Store bytes in reverse order to avoid repeatedly prepending/copying
+        // a record spanning many chunks. Reverse once when decoding it.
+        var record = [UInt8]()
+        func classifyRecord() -> ApprovalReviewer? {
+            guard let object = try? JSONSerialization.jsonObject(with: Data(record.reversed())) as? [String: Any] else {
                 return .unknown
             }
             guard object["type"] as? String == "turn_context",
                   let payload = object["payload"] as? [String: Any],
-                  payload["turn_id"] as? String == turnID else { continue }
+                  payload["turn_id"] as? String == turnID else { return nil }
             return (payload["approvals_reviewer"] as? String).flatMap(ApprovalReviewer.init(rawValue:)) ?? .unknown
         }
+        var atEOF = true
+        while offset > 0 {
+            let count = Int(min(offset, off_t(transcriptChunkBytes)))
+            offset -= off_t(count)
+            let received = bytes.withUnsafeMutableBytes { buffer in
+                pread(descriptor, buffer.baseAddress!, count, offset)
+            }
+            // A short read (including truncation) cannot establish a reviewer.
+            guard received == count else { return .unknown }
+            for index in (0..<count).reversed() {
+                let byte = bytes[index]
+                if atEOF {
+                    guard byte == 0x0A else { return .unknown }
+                    atEOF = false
+                } else if byte == 0x0A {
+                    if let reviewer = classifyRecord() { return reviewer }
+                    record.removeAll(keepingCapacity: true)
+                } else {
+                    guard record.count < maximumTranscriptRecordBytes else { return .unknown }
+                    record.append(byte)
+                }
+            }
+        }
+        // The first record starts at byte zero, with no preceding newline.
+        if let reviewer = classifyRecord() { return reviewer }
         return .unknown
     }
 
