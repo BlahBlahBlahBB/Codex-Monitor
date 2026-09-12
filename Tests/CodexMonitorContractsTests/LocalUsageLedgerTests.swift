@@ -65,8 +65,8 @@ final class LocalUsageLedgerTests: XCTestCase {
         ])
         let snapshot = await ledger.snapshot(now: fixture.day(12, 12))
         XCTAssertEqual(snapshot.days.count, 30)
-        XCTAssertEqual(snapshot.day(named: "2026-08-11")?.totalTokens, 0)
-        XCTAssertEqual(snapshot.day(named: "2026-08-12")?.totalTokens, 30)
+        XCTAssertEqual(snapshot.day(named: fixture.dateKey(for: fixture.day(11, 12)))?.totalTokens, 0)
+        XCTAssertEqual(snapshot.day(named: fixture.dateKey(for: fixture.day(12, 12)))?.totalTokens, 30)
         XCTAssertEqual(snapshot.today?.models.reduce(0) { $0 + $1.totalTokens }, snapshot.today?.totalTokens)
         XCTAssertEqual(snapshot.last30TokenTotal, snapshot.days.reduce(0) { $0 + $1.totalTokens })
     }
@@ -260,6 +260,7 @@ private final class LedgerFixture {
     let root: URL
     let databaseURL: URL
     var calendar: Calendar
+    let anchorDay: Date
     private let model: String
 
     init(model: String = "gpt-5.6-terra") throws {
@@ -268,6 +269,7 @@ private final class LedgerFixture {
         self.model = model
         calendar = Calendar(identifier: .gregorian)
         calendar.timeZone = try XCTUnwrap(TimeZone(identifier: "Asia/Shanghai"))
+        anchorDay = calendar.startOfDay(for: Date())
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
     }
 
@@ -300,7 +302,12 @@ private final class LedgerFixture {
     }
 
     func day(_ day: Int, _ hour: Int, minute: Int = 0) -> Date {
-        calendar.date(from: DateComponents(year: 2026, month: 8, day: day, hour: hour, minute: minute))!
+        let fixtureDay = calendar.date(byAdding: .day, value: day - 12, to: anchorDay)!
+        return calendar.date(bySettingHour: hour, minute: minute, second: 0, of: fixtureDay)!
+    }
+
+    func dateKey(for date: Date) -> String {
+        LocalUsageDateKey.value(for: date, calendar: calendar)
     }
 
     func token(total: Int64, last: Int64?, breakdown: TokenUsageBreakdown? = nil, modelOverride: String? = "__fixture_default__", at: Date, thread: String = "thread", turn: String = "turn", session: String = "session", offset: UInt64 = 1) -> DesktopObservation {

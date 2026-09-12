@@ -1339,8 +1339,7 @@ final class MonitorProductIntegrationTests: XCTestCase {
     }
 
     func testAccountUsageProviderMapsAuthoritativeReadShapesAndQuotaRemaining() async throws {
-        var calendar = Calendar(identifier: .gregorian)
-        calendar.timeZone = TimeZone(secondsFromGMT: 0)!
+        let calendar = Calendar.autoupdatingCurrent
         let observedAt = Date()
         let account: JSONValue = .object(["account": .object(["type": .string("chatgpt"), "planType": .string("pro"), "email": .string("user@example.test")])])
         let limits: JSONValue = .object([
@@ -1348,9 +1347,7 @@ final class MonitorProductIntegrationTests: XCTestCase {
             "rateLimitsByLimitId": .object(["codex": .object(["primary": .object(["usedPercent": .number(70), "windowDurationMins": .number(60), "resetsAt": .number(1_725_000_500)]), "secondary": .null])]),
             "rateLimitResetCredits": .object(["availableCount": .number(2)])
         ])
-        let date = DateFormatter()
-        date.calendar = calendar; date.locale = Locale(identifier: "en_US_POSIX"); date.timeZone = calendar.timeZone; date.dateFormat = "yyyy-MM-dd"
-        let today = date.string(from: observedAt)
+        let today = LocalUsageDateKey.value(for: observedAt, calendar: calendar)
         let usage: JSONValue = .object(["summary": .object(["lifetimeTokens": .number(900)]), "dailyUsageBuckets": .array([.object(["startDate": .string(today), "tokens": .number(45)])])])
 
         let mapped = try AccountUsageProvider.snapshot(accountResponse: account, rateLimitsResponse: limits, usageResponse: usage, observedAt: observedAt, calendar: calendar)
@@ -1369,7 +1366,7 @@ final class MonitorProductIntegrationTests: XCTestCase {
         await runtime.ingest(account: mapped)
         let snapshot = await runtime.snapshot()
         XCTAssertEqual(MonitorDisplayValue.orbQuota(snapshot), "30%")
-        XCTAssertEqual(MonitorDisplayValue.todayUsage(snapshot), "45 Token")
+        XCTAssertEqual(MonitorDisplayValue.todayUsage(snapshot, now: observedAt, calendar: calendar), "45 Token")
     }
 
     func testMW1TwoKeyedPrimaryWindowsArePreservedForPresentation() async throws {
