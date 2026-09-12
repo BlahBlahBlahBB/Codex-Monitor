@@ -120,20 +120,23 @@ struct CircularVisualEffectView: NSViewRepresentable {
     let blendingMode: NSVisualEffectView.BlendingMode
     let state: NSVisualEffectView.State
     let shadowInset: CGFloat
+    let liquidPath: LiquidOrbPath?
 
-    init(material: NSVisualEffectView.Material, blendingMode: NSVisualEffectView.BlendingMode, state: NSVisualEffectView.State, shadowInset: CGFloat = 0) {
+    init(material: NSVisualEffectView.Material, blendingMode: NSVisualEffectView.BlendingMode, state: NSVisualEffectView.State, shadowInset: CGFloat = 0, liquidPath: LiquidOrbPath? = nil) {
         self.material = material
         self.blendingMode = blendingMode
         self.state = state
         self.shadowInset = max(0, shadowInset)
+        self.liquidPath = liquidPath
     }
 
     func makeNSView(context: Context) -> CircularVisualEffectHost {
-        CircularVisualEffectHost(material: material, blendingMode: blendingMode, state: state, shadowInset: shadowInset)
+        CircularVisualEffectHost(material: material, blendingMode: blendingMode, state: state, shadowInset: shadowInset, liquidPath: liquidPath)
     }
 
     func updateNSView(_ view: CircularVisualEffectHost, context: Context) {
         view.configure(material: material, blendingMode: blendingMode, state: state)
+        view.updateLiquidPath(liquidPath)
     }
 }
 
@@ -145,10 +148,13 @@ final class CircularVisualEffectHost: NSView {
     private var configuredBlendingMode: NSVisualEffectView.BlendingMode?
     private var configuredState: NSVisualEffectView.State?
     private let shadowInset: CGFloat
+    private var liquidPath: LiquidOrbPath?
+    private var maskNeedsUpdate = true
     private(set) var maskGenerationCount = 0
 
-    init(material: NSVisualEffectView.Material, blendingMode: NSVisualEffectView.BlendingMode, state: NSVisualEffectView.State, shadowInset: CGFloat = 0) {
+    init(material: NSVisualEffectView.Material, blendingMode: NSVisualEffectView.BlendingMode, state: NSVisualEffectView.State, shadowInset: CGFloat = 0, liquidPath: LiquidOrbPath? = nil) {
         self.shadowInset = max(0, shadowInset)
+        self.liquidPath = liquidPath
         super.init(frame: .zero)
         wantsLayer = true
         layer?.backgroundColor = NSColor.clear.cgColor
@@ -172,16 +178,35 @@ final class CircularVisualEffectHost: NSView {
 
     override func layout() {
         super.layout()
-        let glassBounds = bounds.insetBy(dx: shadowInset, dy: shadowInset)
+        applyLiquidPath()
+    }
+
+    /// The AppKit material and SwiftUI layers receive the same immutable path
+    /// from one physics presentation. Apply it synchronously, rather than
+    /// deferring to a later layout pass that would render a stale mask.
+    func updateLiquidPath(_ liquidPath: LiquidOrbPath?) {
+        self.liquidPath = liquidPath
+        maskNeedsUpdate = true
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        applyLiquidPath()
+        CATransaction.commit()
+    }
+
+    private func applyLiquidPath() {
+        // Dynamic material uses the existing 110pt host as its full clipping
+        // bounds. At rest its mask is still the original 90pt circle.
+        let glassBounds = liquidPath == nil ? bounds.insetBy(dx: shadowInset, dy: shadowInset) : bounds
         effectView.frame = glassBounds
-        layer?.shadowPath = CGPath(ellipseIn: glassBounds, transform: nil)
+        layer?.shadowPath = liquidPath.map { translatedPath($0.cgPath, in: glassBounds) } ?? CGPath(ellipseIn: glassBounds, transform: nil)
         let size = effectView.bounds.size
         let scale = window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 1
-        guard size != lastMaskSize || scale != lastBackingScale else { return }
+        guard size != lastMaskSize || scale != lastBackingScale || maskNeedsUpdate else { return }
         lastMaskSize = size
         lastBackingScale = scale
-        effectView.maskImage = circleMaskImage(for: size)
+        effectView.maskImage = maskImage(for: size, path: liquidPath.map { translatedPath($0.cgPath, in: effectView.bounds) })
         maskGenerationCount += 1
+        maskNeedsUpdate = false
     }
 
     func configure(material: NSVisualEffectView.Material, blendingMode: NSVisualEffectView.BlendingMode, state: NSVisualEffectView.State) {
@@ -194,6 +219,10 @@ final class CircularVisualEffectHost: NSView {
         configuredState = state
     }
 
+    private func translatedPath(_ path: CGPath, in bounds: CGRect) -> CGPath {
+        LiquidOrbRenderTransform.appKitPath(path, in: bounds)
+    }
+
     var maskGenerationCountForTesting: Int { maskGenerationCount }
     var circularShadowPathForTesting: CGPath? { layer?.shadowPath }
     var circularShadowOpacityForTesting: Float { layer?.shadowOpacity ?? 0 }
@@ -204,7 +233,7 @@ final class CircularVisualEffectHost: NSView {
     /// `NSVisualEffectView` owns a separate compositing path, so a regular
     /// CALayer mask does not reliably clip its material. Its documented
     /// `maskImage` API applies this opaque circular image at every size.
-    private func circleMaskImage(for size: NSSize) -> NSImage? {
+    private func maskImage(for size: NSSize, path: CGPath?) -> NSImage? {
         guard size.width > 0, size.height > 0 else { return nil }
         let image = NSImage(size: size)
         image.lockFocus()
@@ -212,38 +241,37 @@ final class CircularVisualEffectHost: NSView {
 
         NSColor.clear.setFill()
         NSRect(origin: .zero, size: size).fill()
-        let diameter = min(size.width, size.height)
-        let circle = NSRect(
-            x: (size.width - diameter) / 2,
-            y: (size.height - diameter) / 2,
-            width: diameter,
-            height: diameter
-        )
         NSColor.white.setFill()
-        NSBezierPath(ovalIn: circle).fill()
+        if let path {
+            NSGraphicsContext.current?.cgContext.addPath(path)
+            NSGraphicsContext.current?.cgContext.fillPath()
+        } else {
+            let diameter = min(size.width, size.height)
+            NSBezierPath(ovalIn: NSRect(x: (size.width - diameter) / 2, y: (size.height - diameter) / 2, width: diameter, height: diameter)).fill()
+        }
         return image
     }
 }
 
 private struct PersistentOrbMaterial: View {
-    let size: CGFloat
+    let presentation: LiquidOrbPresentation
     @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
 
     @ViewBuilder var body: some View {
         if reduceTransparency {
-            Circle()
+            LiquidOrbShape(path: presentation.masterPath, referenceDiameter: presentation.contour.diameter)
                 .fill(Color(nsColor: .windowBackgroundColor))
-                .frame(width: size, height: size)
         } else {
             CircularVisualEffectView(
                 material: .hudWindow,
                 blendingMode: .behindWindow,
                 state: .active,
-                shadowInset: FloatingOrbSurfaceConfiguration.shadowInset
+                shadowInset: FloatingOrbSurfaceConfiguration.shadowInset,
+                liquidPath: presentation.masterPath
             )
             .frame(
-                width: size + FloatingOrbSurfaceConfiguration.shadowInset * 2,
-                height: size + FloatingOrbSurfaceConfiguration.shadowInset * 2
+                width: presentation.contour.diameter + FloatingOrbSurfaceConfiguration.shadowInset * 2,
+                height: presentation.contour.diameter + FloatingOrbSurfaceConfiguration.shadowInset * 2
             )
         }
     }
@@ -253,7 +281,7 @@ private struct PersistentOrbMaterial: View {
 /// depth without adding a border, a second ring, or a rectangular shadow.
 /// The highlight is deliberately omitted when transparency is reduced.
 private struct OrbDepthHighlight: View {
-    let size: CGFloat
+    let presentation: LiquidOrbPresentation
     @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
 
     @ViewBuilder
@@ -261,16 +289,15 @@ private struct OrbDepthHighlight: View {
         if reduceTransparency {
             EmptyView()
         } else {
-            Circle()
+            LiquidOrbShape(path: presentation.masterPath, referenceDiameter: presentation.contour.diameter)
                 .fill(
                     RadialGradient(
                         colors: [Color.white.opacity(0.06), .clear],
                         center: .topLeading,
                         startRadius: 0,
-                        endRadius: max(1, size * 0.82)
+                        endRadius: max(1, presentation.contour.diameter * 0.82)
                     )
                 )
-                .frame(width: size, height: size)
                 .allowsHitTesting(false)
         }
     }
@@ -293,18 +320,19 @@ struct MonitorOrbView: View {
     let snapshot: MonitorRuntimeSnapshot?
     let presentation: VisualStatePresentation
     let size: CGFloat
+    var liquidPresentation: LiquidOrbPresentation?
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         let ringWidth = max(5.6, min(13.5, size * (7 / 90)))
-        let ringDiameter = size * 0.90
         let valueSize = max(13, min(30, size * (24 / 90)))
+        let liquid = reduceMotion ? .rest(diameter: Double(size)) : (liquidPresentation ?? .rest(diameter: Double(size)))
 
         ZStack {
-            PersistentOrbMaterial(size: size)
-            OrbDepthHighlight(size: size)
-            Circle()
+            PersistentOrbMaterial(presentation: liquid)
+            OrbDepthHighlight(presentation: liquid)
+            LiquidOrbShape(path: liquid.ringPath, referenceDiameter: liquid.contour.diameter)
                 .stroke(presentation.orbTone.color, style: StrokeStyle(lineWidth: ringWidth, lineCap: .round))
-                .frame(width: ringDiameter, height: ringDiameter)
                 .presentationBreathing(presentation.breathes, steadyOpacity: 0.88)
             Text(MonitorDisplayValue.orbQuota(snapshot))
                 .font(.system(size: valueSize, weight: .semibold))
@@ -312,7 +340,16 @@ struct MonitorOrbView: View {
                 .foregroundStyle(.primary)
                 .tracking(-0.15)
                 .minimumScaleFactor(0.72)
+                .offset(
+                    x: LiquidOrbRenderTransform.swiftUITranslation(liquid.contentTransform.translation).width,
+                    y: LiquidOrbRenderTransform.swiftUITranslation(liquid.contentTransform.translation).height
+                )
+                .scaleEffect(liquid.contentTransform.scale)
+                .rotationEffect(.degrees(liquid.contentTransform.rotationDegrees))
         }
+        // LiquidOrbDynamics is the sole animation source. Per-frame snapshot
+        // changes must render immediately rather than acquire a SwiftUI tween.
+        .transaction { $0.animation = nil }
         .frame(
             width: size + FloatingOrbSurfaceConfiguration.shadowInset * 2,
             height: size + FloatingOrbSurfaceConfiguration.shadowInset * 2
@@ -320,6 +357,17 @@ struct MonitorOrbView: View {
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(String(format: L10n.tr("accessibility.orb"), MonitorDisplayValue.state(presentation), MonitorDisplayValue.orbQuota(snapshot)))
         .accessibilityHint(L10n.tr("accessibility.orbHint"))
+    }
+}
+
+private struct LiquidOrbShape: Shape {
+    let path: LiquidOrbPath
+    let referenceDiameter: Double
+
+    func path(in rect: CGRect) -> Path {
+        let side = min(CGFloat(referenceDiameter), rect.width, rect.height)
+        let target = CGRect(x: rect.midX - side / 2, y: rect.midY - side / 2, width: side, height: side)
+        return Path(LiquidOrbRenderTransform.swiftUIPath(path.cgPath, in: target))
     }
 }
 
