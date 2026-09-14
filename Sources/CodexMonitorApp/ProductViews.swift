@@ -650,7 +650,7 @@ struct NativeSettingsWindowView: View {
         case .privacy:
             PrivacySettingsDetail(preferences: preferences)
         case .advanced:
-            AdvancedSettingsDetail(actions: actions)
+            AdvancedSettingsDetail(preferences: preferences, actions: actions)
         case .about:
             AboutSettingsDetail()
         }
@@ -854,11 +854,17 @@ private struct PrivacySettingsDetail: View {
 }
 
 private struct AdvancedSettingsDetail: View {
+    @ObservedObject var preferences: MonitorPreferences
     let actions: SettingsSystemActions
     @State private var exportState: ExportState = .idle
 
     var body: some View {
         SettingsDetail(title: L10n.tr("settings.advanced")) {
+            SettingsRow(title: L10n.tr("settings.soundEnabled")) {
+                Toggle("", isOn: $preferences.soundEnabled)
+                    .labelsHidden()
+                    .toggleStyle(.switch)
+            }
             SettingsRow(title: L10n.tr("settings.refresh")) { Button(L10n.tr("settings.refresh"), action: actions.refresh).buttonStyle(.bordered) }
             SettingsRow(title: L10n.tr("settings.exportDiagnostics")) {
                 Button(L10n.tr("settings.exportDiagnostics")) {

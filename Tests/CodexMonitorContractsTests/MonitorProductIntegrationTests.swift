@@ -24,6 +24,7 @@ final class MonitorProductIntegrationTests: XCTestCase {
         preferences.pauseMonitoring = true
         preferences.waitingApprovalNotifications = true
         preferences.taskCompletedNotifications = true
+        preferences.soundEnabled = true
         preferences.hideAccountInfo = true
         preferences.interfaceLanguage = .english
         preferences.orbSize = 240
@@ -39,10 +40,28 @@ final class MonitorProductIntegrationTests: XCTestCase {
         XCTAssertTrue(restored.pauseMonitoring)
         XCTAssertTrue(restored.waitingApprovalNotifications)
         XCTAssertTrue(restored.taskCompletedNotifications)
+        XCTAssertTrue(restored.soundEnabled)
         XCTAssertTrue(restored.hideAccountInfo)
         XCTAssertEqual(restored.interfaceLanguage, .english)
         XCTAssertEqual(restored.orbSize, 180)
         XCTAssertEqual(restored.orbOrigin, CGPoint(x: 225, y: 340))
+    }
+
+    func testSoundPreferenceDefaultsOffAndPersistsExplicitValues() {
+        let suite = "CodexMonitorTests.soundPreference.\(UUID().uuidString)"
+        guard let defaults = UserDefaults(suiteName: suite) else {
+            return XCTFail("Could not create isolated preferences")
+        }
+        defer { defaults.removePersistentDomain(forName: suite) }
+
+        XCTAssertFalse(MonitorPreferences(defaults: defaults).soundEnabled)
+
+        let enabled = MonitorPreferences(defaults: defaults)
+        enabled.soundEnabled = true
+        XCTAssertTrue(MonitorPreferences(defaults: defaults).soundEnabled)
+
+        enabled.soundEnabled = false
+        XCTAssertFalse(MonitorPreferences(defaults: defaults).soundEnabled)
     }
 
     func testFreshFloatingOrbDefaultAndTransparentHostContract() {
@@ -108,11 +127,13 @@ final class MonitorProductIntegrationTests: XCTestCase {
         ]
         let popoverKeys = ["label.account", "label.plan", "label.quota", "label.resetDate", "label.quotaReset", "label.resetCredit", "quota.window.daily", "quota.window.weekly", "quota.window.monthly"]
         let usageKeys = ["label.session", "label.currentSession", "label.sessionToken", "label.tokenUsage", "label.todayToken", "label.last30DaysToken"]
-        let settingsKeys = ["settings.general", "settings.floating", "settings.notifications", "settings.privacy", "settings.advanced", "settings.about", "settings.exportDiagnostics", "settings.diagnosticsExported", "settings.diagnosticsExportFailed"]
+        let settingsKeys = ["settings.general", "settings.floating", "settings.notifications", "settings.privacy", "settings.advanced", "settings.about", "settings.soundEnabled", "settings.exportDiagnostics", "settings.diagnosticsExported", "settings.diagnosticsExportFailed"]
         for key in contextMenuKeys + popoverKeys + usageKeys + settingsKeys {
             XCTAssertNotEqual(L10n.tr(key, languageCode: "zh-Hans"), key, "missing zh-Hans string: \(key)")
             XCTAssertNotEqual(L10n.tr(key, languageCode: "en"), key, "missing English string: \(key)")
         }
+        XCTAssertEqual(L10n.tr("settings.soundEnabled", languageCode: "zh-Hans"), "提示音")
+        XCTAssertEqual(L10n.tr("settings.soundEnabled", languageCode: "en"), "Sound")
     }
 
     func testSettingsCleanupRemovesDeprecatedRowsAndKeepsApprovedPlacement() throws {
@@ -139,6 +160,8 @@ final class MonitorProductIntegrationTests: XCTestCase {
         let aboutStart = try XCTUnwrap(source.range(of: "private struct AboutSettingsDetail: View {", range: advancedStart.upperBound..<source.endIndex))
         let advanced = String(source[advancedStart.lowerBound..<aboutStart.lowerBound])
 
+        XCTAssertTrue(advanced.contains("SettingsRow(title: L10n.tr(\"settings.soundEnabled\"))"))
+        XCTAssertTrue(advanced.contains("Toggle(\"\", isOn: $preferences.soundEnabled)"))
         XCTAssertTrue(advanced.contains("SettingsRow(title: L10n.tr(\"settings.refresh\"))"))
         XCTAssertTrue(advanced.contains("SettingsRow(title: L10n.tr(\"settings.exportDiagnostics\"))"))
         XCTAssertFalse(advanced.contains("settings.experimentalApprovalYellow"))
@@ -427,33 +450,49 @@ final class MonitorProductIntegrationTests: XCTestCase {
     }
 
     func testApprovalOutboxDeliveryUsesOneDeterministicRequestPerJournalIdentity() async {
-        let suite = "CodexMonitorTests.approvalNotification.\(UUID().uuidString)"
-        let preferences = MonitorPreferences(defaults: UserDefaults(suiteName: suite)!)
-        defer { UserDefaults.standard.removePersistentDomain(forName: suite) }
-        preferences.waitingApprovalNotifications = true
-        let delivery = NotificationDeliveryRecorder()
-        let controller = MonitorNotificationController(delivery: delivery, responseHandlerInstaller: {})
+        for soundEnabled in [false, true] {
+            let suite = "CodexMonitorTests.approvalNotification.\(UUID().uuidString)"
+            let defaults = UserDefaults(suiteName: suite)!
+            defer { defaults.removePersistentDomain(forName: suite) }
+            let preferences = MonitorPreferences(defaults: defaults)
+            preferences.waitingApprovalNotifications = true
+            preferences.soundEnabled = soundEnabled
+            let delivery = NotificationDeliveryRecorder()
+            let controller = MonitorNotificationController(delivery: delivery, responseHandlerInstaller: {})
 
-        let first = approvalNotificationIntent(eventID: 91, title: "Authoritative task title")
-        let firstDelivery = await controller.deliverApprovalOutboxIntent(first, preferences: preferences)
-        XCTAssertEqual(firstDelivery, .confirmed)
-        let duplicateDelivery = await controller.deliverApprovalOutboxIntent(first, preferences: preferences)
-        XCTAssertEqual(duplicateDelivery, .confirmed)
-        let second = approvalNotificationIntent(eventID: 92, title: "Second real approval")
-        let secondDelivery = await controller.deliverApprovalOutboxIntent(second, preferences: preferences)
-        XCTAssertEqual(secondDelivery, .confirmed)
+            let first = approvalNotificationIntent(eventID: 91, title: "Authoritative task title")
+            let firstDelivery = await controller.deliverApprovalOutboxIntent(first, preferences: preferences)
+            XCTAssertEqual(firstDelivery, .confirmed)
+            let duplicateDelivery = await controller.deliverApprovalOutboxIntent(first, preferences: preferences)
+            XCTAssertEqual(duplicateDelivery, .confirmed)
+            let second = approvalNotificationIntent(eventID: 92, title: "Second real approval")
+            let secondDelivery = await controller.deliverApprovalOutboxIntent(second, preferences: preferences)
+            XCTAssertEqual(secondDelivery, .confirmed)
 
-        XCTAssertEqual(delivery.notifications.count, 2)
-        XCTAssertEqual(delivery.notifications.map(\.kind), [.waitingApproval, .waitingApproval])
-        XCTAssertEqual(delivery.notifications.map(\.content.body), ["Authoritative task title", "Second real approval"])
-        XCTAssertNotEqual(first.requestIdentifier, second.requestIdentifier)
-        XCTAssertEqual(first.requestIdentifier, ApprovalNotificationOutboxIntent.requestIdentifier(sourceID: first.sourceID, journalEventID: first.journalEventID))
+            XCTAssertEqual(delivery.notifications.count, 2)
+            XCTAssertEqual(delivery.notifications.map(\.kind), [.waitingApproval, .waitingApproval])
+            XCTAssertEqual(delivery.notifications.map(\.content.body), ["Authoritative task title", "Second real approval"])
+            XCTAssertTrue(delivery.notifications.allSatisfy { $0.soundEnabled == soundEnabled })
+            for notification in delivery.notifications {
+                let systemContent = UserNotificationCenterDelivery.makeContent(for: notification)
+                XCTAssertEqual(systemContent.categoryIdentifier, MonitorTaskNotification.categoryIdentifier)
+                XCTAssertEqual(systemContent.userInfo[MonitorTaskNotification.kindUserInfoKey] as? String, MonitorTaskNotificationKind.waitingApproval.rawValue)
+                if soundEnabled {
+                    XCTAssertNotNil(systemContent.sound)
+                } else {
+                    XCTAssertNil(systemContent.sound)
+                }
+            }
+            XCTAssertNotEqual(first.requestIdentifier, second.requestIdentifier)
+            XCTAssertEqual(first.requestIdentifier, ApprovalNotificationOutboxIntent.requestIdentifier(sourceID: first.sourceID, journalEventID: first.journalEventID))
+        }
     }
 
     func testApprovalNotificationDisabledAndWaitingSnapshotsDoNotDeliver() async {
         let suite = "CodexMonitorTests.approvalNotificationDisabled.\(UUID().uuidString)"
         let preferences = MonitorPreferences(defaults: UserDefaults(suiteName: suite)!)
         defer { UserDefaults.standard.removePersistentDomain(forName: suite) }
+        preferences.soundEnabled = true
         let delivery = NotificationDeliveryRecorder()
         let controller = MonitorNotificationController(delivery: delivery, responseHandlerInstaller: {})
         let suppressed = await controller.deliverApprovalOutboxIntent(approvalNotificationIntent(eventID: 93, title: "Suppressed task"), preferences: preferences)
@@ -470,8 +509,21 @@ final class MonitorProductIntegrationTests: XCTestCase {
             snapshot: snapshot,
             desktopSourceAvailable: true,
             waitingApprovalEnabled: true,
-            taskCompletedEnabled: true
+            taskCompletedEnabled: false
         ))
+
+        let runtime = MonitorRuntimeStore(engine: RuntimeStateEngine(initialPhase: .live), initialPhase: .live)
+        let source = SourceID("disabled-completion-notification")!
+        let thread = NamespacedID(sourceID: source, entityKind: .thread, rawID: "disabled-completion-thread")!
+        let turn = NamespacedID(sourceID: source, entityKind: .turn, rawID: "disabled-completion-turn")!
+        let now = Date(timeIntervalSince1970: 1_900_000_000)
+        await runtime.registerDesktopThread(DesktopThreadSnapshot(threadID: thread, conversationName: "Disabled completion", model: nil, reasoningEffort: nil, updatedAtMilliseconds: nil, tokensUsed: nil))
+        await runtime.ingest(.rollout(RolloutRecordEnvelope(threadID: thread, turnID: turn, itemID: nil, kind: .taskStarted, activity: nil, tokenSnapshot: nil, model: nil, reasoningEffort: nil, observedAt: now, fileOffset: 0)))
+        let working = await runtime.snapshot()
+        await runtime.ingest(.rollout(RolloutRecordEnvelope(threadID: thread, turnID: turn, itemID: nil, kind: .taskCompletedSuccess, activity: nil, tokenSnapshot: nil, model: nil, reasoningEffort: nil, observedAt: now, fileOffset: 1)))
+        let completed = await runtime.snapshot()
+        await controller.receive(snapshot: working, preferences: preferences)
+        await controller.receive(snapshot: completed, preferences: preferences)
         XCTAssertTrue(delivery.notifications.isEmpty)
     }
 
@@ -481,30 +533,46 @@ final class MonitorProductIntegrationTests: XCTestCase {
     }
 
     func testCompletionNotificationPresentationIsUnchangedAndNowCarriesTheCodexClickCategory() async throws {
-        let suite = "CodexMonitorTests.completionNotificationCategory.\(UUID().uuidString)"
-        let preferences = MonitorPreferences(defaults: UserDefaults(suiteName: suite)!)
-        defer { UserDefaults.standard.removePersistentDomain(forName: suite) }
-        preferences.taskCompletedNotifications = true
-        let delivery = NotificationDeliveryRecorder()
-        let controller = MonitorNotificationController(delivery: delivery, responseHandlerInstaller: {})
-        let runtime = MonitorRuntimeStore(engine: RuntimeStateEngine(initialPhase: .live), initialPhase: .live)
-        let source = SourceID("completion-notification-category")!
-        let thread = NamespacedID(sourceID: source, entityKind: .thread, rawID: "completion-thread")!
-        let turn = NamespacedID(sourceID: source, entityKind: .turn, rawID: "completion-turn")!
-        let now = Date(timeIntervalSince1970: 1_900_000_000)
-        await runtime.registerDesktopThread(DesktopThreadSnapshot(threadID: thread, conversationName: "Existing completion title", model: nil, reasoningEffort: nil, updatedAtMilliseconds: nil, tokensUsed: nil))
-        await runtime.ingest(.rollout(RolloutRecordEnvelope(threadID: thread, turnID: turn, itemID: nil, kind: .taskStarted, activity: nil, tokenSnapshot: nil, model: nil, reasoningEffort: nil, observedAt: now, fileOffset: 0)))
-        let working = await runtime.snapshot()
-        await runtime.ingest(.rollout(RolloutRecordEnvelope(threadID: thread, turnID: turn, itemID: nil, kind: .taskCompletedSuccess, activity: nil, tokenSnapshot: nil, model: nil, reasoningEffort: nil, observedAt: now, fileOffset: 1)))
-        let completed = await runtime.snapshot()
+        for soundEnabled in [false, true] {
+            let suite = "CodexMonitorTests.completionNotificationCategory.\(UUID().uuidString)"
+            let defaults = UserDefaults(suiteName: suite)!
+            defer { defaults.removePersistentDomain(forName: suite) }
+            let preferences = MonitorPreferences(defaults: defaults)
+            preferences.taskCompletedNotifications = true
+            preferences.soundEnabled = soundEnabled
+            let delivery = NotificationDeliveryRecorder()
+            let controller = MonitorNotificationController(delivery: delivery, responseHandlerInstaller: {})
+            let runtime = MonitorRuntimeStore(engine: RuntimeStateEngine(initialPhase: .live), initialPhase: .live)
+            let source = SourceID("completion-notification-category")!
+            let thread = NamespacedID(sourceID: source, entityKind: .thread, rawID: "completion-thread")!
+            let turn = NamespacedID(sourceID: source, entityKind: .turn, rawID: "completion-turn")!
+            let now = Date(timeIntervalSince1970: 1_900_000_000)
+            await runtime.registerDesktopThread(DesktopThreadSnapshot(threadID: thread, conversationName: "Existing completion title", model: nil, reasoningEffort: nil, updatedAtMilliseconds: nil, tokensUsed: nil))
+            await runtime.ingest(.rollout(RolloutRecordEnvelope(threadID: thread, turnID: turn, itemID: nil, kind: .taskStarted, activity: nil, tokenSnapshot: nil, model: nil, reasoningEffort: nil, observedAt: now, fileOffset: 0)))
+            let working = await runtime.snapshot()
+            await runtime.ingest(.rollout(RolloutRecordEnvelope(threadID: thread, turnID: turn, itemID: nil, kind: .taskCompletedSuccess, activity: nil, tokenSnapshot: nil, model: nil, reasoningEffort: nil, observedAt: now, fileOffset: 1)))
+            let completed = await runtime.snapshot()
 
-        await controller.receive(snapshot: working, preferences: preferences)
-        await controller.receive(snapshot: completed, preferences: preferences)
+            await controller.receive(snapshot: working, preferences: preferences)
+            await controller.receive(snapshot: completed, preferences: preferences)
 
-        XCTAssertEqual(delivery.notifications.count, 1)
-        let delivered = try XCTUnwrap(delivery.notifications.first)
-        XCTAssertEqual(delivered.kind, .completed)
-        XCTAssertEqual(delivered.content, MonitorNotificationContent.completed(snapshot: completed))
+            XCTAssertEqual(delivery.notifications.count, 1)
+            let delivered = try XCTUnwrap(delivery.notifications.first)
+            XCTAssertEqual(delivered.kind, .completed)
+            XCTAssertEqual(delivered.content, MonitorNotificationContent.completed(snapshot: completed))
+            XCTAssertEqual(delivered.soundEnabled, soundEnabled)
+            let systemContent = UserNotificationCenterDelivery.makeContent(for: delivered)
+            XCTAssertEqual(systemContent.title, delivered.content.title)
+            XCTAssertEqual(systemContent.subtitle, delivered.content.subtitle)
+            XCTAssertEqual(systemContent.body, delivered.content.body)
+            XCTAssertEqual(systemContent.categoryIdentifier, MonitorTaskNotification.categoryIdentifier)
+            XCTAssertEqual(systemContent.userInfo[MonitorTaskNotification.kindUserInfoKey] as? String, MonitorTaskNotificationKind.completed.rawValue)
+            if soundEnabled {
+                XCTAssertNotNil(systemContent.sound)
+            } else {
+                XCTAssertNil(systemContent.sound)
+            }
+        }
     }
 
     func testTaskNotificationClicksActivateOnlyKnownCodexMonitorNotifications() {

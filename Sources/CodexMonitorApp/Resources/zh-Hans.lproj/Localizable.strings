@@ -116,6 +116,7 @@
 "settings.pauseMonitoring" = "暂停监控";
 "settings.waitingApprovalNotification" = "等待授权通知";
 "settings.taskCompletedNotification" = "任务完成通知";
+"settings.soundEnabled" = "提示音";
 "settings.hideAccountInfo" = "隐藏账户信息";
 "settings.approvalDetection" = "审批状态检测";
 "settings.approvalRequestLocal" = "本地审批请求事件检测";

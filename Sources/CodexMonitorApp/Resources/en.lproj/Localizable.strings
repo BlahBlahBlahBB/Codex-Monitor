@@ -116,6 +116,7 @@
 "settings.pauseMonitoring" = "Pause Monitoring";
 "settings.waitingApprovalNotification" = "Waiting Approval Notification";
 "settings.taskCompletedNotification" = "Task Completed Notification";
+"settings.soundEnabled" = "Sound";
 "settings.hideAccountInfo" = "Hide Account Info";
 "settings.approvalDetection" = "Approval detection";
 "settings.approvalRequestLocal" = "Local request-event detection";
