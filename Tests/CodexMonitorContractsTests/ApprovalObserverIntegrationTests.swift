@@ -13,6 +13,7 @@ final class ApprovalObserverIntegrationTests: XCTestCase {
 
         let activated = await fixture.integration().activate()
         XCTAssertTrue(activated)
+        XCTAssertTrue(fixture.source.isActive)
         let hooksEnabled = await fixture.fake.hooksEnabled()
         XCTAssertTrue(hooksEnabled)
 
@@ -273,7 +274,7 @@ final class ApprovalObserverIntegrationTests: XCTestCase {
         XCTAssertEqual(ownedCount, 0)
     }
 
-    func testMalformedInlineHooksAndTrustFailureNeverShowActive() async throws {
+    func testMalformedInlineHooksAndTrustFailureKeepJournalSourceActive() async throws {
         let fixture = try makeFixture()
         defer { fixture.cleanup() }
         await fixture.fake.setHooksValue(.string("not-an-inline-hook-object"))
@@ -282,7 +283,7 @@ final class ApprovalObserverIntegrationTests: XCTestCase {
         XCTAssertFalse(malformedActivated)
         let malformedHealth = await malformedIntegration.health()
         XCTAssertEqual(malformedHealth.state, .unavailable)
-        XCTAssertFalse(fixture.source.isActive)
+        XCTAssertTrue(fixture.source.isActive)
 
         await fixture.fake.setHooksValue(.object([:]))
         await fixture.fake.setFailTrustWrites(true)
@@ -291,7 +292,30 @@ final class ApprovalObserverIntegrationTests: XCTestCase {
         XCTAssertFalse(trustActivated)
         let trustHealth = await trustFailure.health()
         XCTAssertEqual(trustHealth.reason, "trustWriteFailed")
-        XCTAssertFalse(fixture.source.isActive)
+        XCTAssertTrue(fixture.source.isActive)
+    }
+
+    func testOldReleaseHookMigrationFailureKeepsJournalSourceActiveAndReadable() async throws {
+        let fixture = try makeFixture()
+        defer { fixture.cleanup() }
+        let integration = fixture.integration()
+
+        let initialActivation = await integration.activate()
+        XCTAssertTrue(initialActivation)
+        fixture.source.setActive(false)
+
+        try Data("#!/bin/sh\n# new observer release\nexit 0\n".utf8).write(to: fixture.executable, options: .atomic)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: fixture.executable.path)
+        await fixture.fake.setFailHookWrites(true)
+
+        let migrationActivation = await integration.activate()
+        XCTAssertFalse(migrationActivation)
+        XCTAssertTrue(fixture.source.isActive)
+
+        let input = Data("{\"hook_event_name\":\"PermissionRequest\",\"session_id\":\"reader-session\",\"turn_id\":\"reader-turn\"}".utf8)
+        XCTAssertTrue(ApprovalObserverHookRunner.run(input: input, paths: fixture.paths, keyMaterial: Data("reader-test-key".utf8)))
+        let records = try fixture.source.readRecords()
+        XCTAssertEqual(HookApprovalJournalReader().ingest(records).events.count, 1)
     }
 
     func testOversizedObserverPayloadFailsOpenWithoutWriting() throws {
@@ -421,6 +445,7 @@ final class ApprovalObserverIntegrationTests: XCTestCase {
         private var writes: [RecordedWrite] = []
         private var rejectedSnapshots: [JSONValue] = []
         private var failTrust = false
+        private var failHookWrites = false
         private var unsupported = false
         private var pendingConflict: PendingConflict?
         private var readConfigGate: AsyncGate?
@@ -451,6 +476,9 @@ final class ApprovalObserverIntegrationTests: XCTestCase {
             }
             if failTrust && edits.contains(where: { $0.keyPath.hasPrefix("hooks.state.") }) {
                 throw Failure.trustWrite
+            }
+            if failHookWrites && edits.contains(where: { $0.keyPath.hasPrefix("hooks.") }) {
+                throw ApprovalObserverIntegrationError.configurationConflict
             }
             for edit in edits { try apply(edit) }
             writes.append(RecordedWrite(expectedVersion: expectedVersion, edits: edits))
@@ -505,6 +533,7 @@ final class ApprovalObserverIntegrationTests: XCTestCase {
         }
         func scheduleConflictAddingUserHook(command: String, revision: String) { pendingConflict = PendingConflict(command: command, revision: revision) }
         func setFailTrustWrites(_ value: Bool) { failTrust = value }
+        func setFailHookWrites(_ value: Bool) { failHookWrites = value }
         func setUnsupported(_ value: Bool) { unsupported = value }
         func setHooksValue(_ value: JSONValue) {
             var root = configuration.objectValue ?? [:]

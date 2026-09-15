@@ -640,6 +640,10 @@ actor ApprovalObserverIntegration {
 
     @discardableResult
     private func performActivate(generation: UInt64) async -> Bool {
+        // Journal consumption is independent of installing this release's
+        // Hook command. A compatible app-owned command may already be
+        // writing evidence while a release migration is unavailable.
+        journalSource.setActive(true)
         var previousReceipt: AppOwnedApprovalObserverReceipt?
         do {
             try ensureCurrent(generation: generation, enabled: true)
@@ -718,7 +722,6 @@ actor ApprovalObserverIntegration {
             healthValue = ApprovalObserverIntegrationHealth(state: .active, reason: nil, ownedHandlerCount: finalOwned.count)
             return true
         } catch {
-            journalSource.setActive(false)
             let wasSuperseded = (error as? ApprovalObserverIntegrationError) == .superseded
             let wasStale = wasSuperseded || generation != intentGeneration || !desiredEnabled
             await codex.close()
