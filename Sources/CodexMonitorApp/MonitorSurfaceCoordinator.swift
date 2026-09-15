@@ -12,25 +12,24 @@ final class MonitorSurfaceCoordinator: NSObject {
     private let localization: LocalizationController
     private let refreshMonitoring: () -> Void
     private let setMonitoringPaused: (Bool) -> Void
-    private let reconcileApprovalObserver: (Bool) -> Void
+    private let activateApprovalObserver: () -> Void
     private let ownership = MonitorSurfaceOwnership()
     private let loginItem = LoginItemController()
     private let notifications = MonitorNotificationController()
     private var preferencesObserver: AnyCancellable?
-    private var approvalPreferenceObserver: AnyCancellable?
     private var statusItemController: MonitorStatusItemController?
     private var floatingController: FloatingStatusPanelController?
     private var usageWindowController: UsageWindowController?
     private var settingsWindowController: SettingsWindowController?
     private var diagnosticsWindowController: DiagnosticsWindowController?
 
-    init(model: MonitorAppModel, preferences: MonitorPreferences, localization: LocalizationController, refreshMonitoring: @escaping () -> Void, setMonitoringPaused: @escaping (Bool) -> Void, reconcileApprovalObserver: @escaping (Bool) -> Void) {
+    init(model: MonitorAppModel, preferences: MonitorPreferences, localization: LocalizationController, refreshMonitoring: @escaping () -> Void, setMonitoringPaused: @escaping (Bool) -> Void, activateApprovalObserver: @escaping () -> Void) {
         self.model = model
         self.preferences = preferences
         self.localization = localization
         self.refreshMonitoring = refreshMonitoring
         self.setMonitoringPaused = setMonitoringPaused
-        self.reconcileApprovalObserver = reconcileApprovalObserver
+        self.activateApprovalObserver = activateApprovalObserver
     }
 
     func start() {
@@ -50,14 +49,9 @@ final class MonitorSurfaceCoordinator: NSObject {
         floatingController?.configure(model: model, preferences: preferences)
         notifications.start(model: model, preferences: preferences)
 
-        approvalPreferenceObserver = preferences.$waitingApprovalNotifications
-            .removeDuplicates()
-            .sink { [weak self] enabled in
-                self?.reconcileApprovalObserver(enabled)
-            }
-        if preferences.waitingApprovalNotifications {
-            reconcileApprovalObserver(true)
-        }
+        // Approval lifecycle observation is runtime infrastructure. The
+        // notification preference gates only delivery through the outbox.
+        activateApprovalObserver()
 
         preferencesObserver = preferences.objectWillChange.sink { [weak self] _ in
             // Published sends before mutation; schedule after the value lands.
@@ -80,8 +74,6 @@ final class MonitorSurfaceCoordinator: NSObject {
     func stop() {
         preferencesObserver?.cancel()
         preferencesObserver = nil
-        approvalPreferenceObserver?.cancel()
-        approvalPreferenceObserver = nil
         notifications.stop()
         floatingController?.closeAll()
         statusItemController?.invalidate()

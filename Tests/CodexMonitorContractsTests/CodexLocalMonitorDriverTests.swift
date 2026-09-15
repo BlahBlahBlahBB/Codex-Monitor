@@ -227,6 +227,59 @@ final class CodexLocalMonitorDriverTests: XCTestCase {
         }
     }
 
+    func testSuppressedApprovalDeliveryStillConsumesLifecycleAndNeverReplaysAfterEnabling() async throws {
+        let fixture = try DriverFixture(turn: "t1", terminal: false)
+        defer { fixture.cleanup() }
+        let resolver = try XCTUnwrap(KeyedHookApprovalIdentityDeriver(keyMaterial: Data("suppressed-lifecycle".utf8)))
+        let owner = try XCTUnwrap(resolver.owner(sourceRawID: "codex-desktop-local", sessionRawID: "thread-a", turnRawID: "t1"))
+        let checkpoint = InMemoryApprovalCheckpointStore()
+        let delivery = ApprovalOutboxDispositionRecorder(disposition: .suppressed)
+        let runtime = MonitorRuntimeStore()
+        let driver = fixture.driver(
+            runtime: runtime,
+            resolver: resolver,
+            approvalCheckpointStore: checkpoint,
+            approvalNotificationDelivery: { intent in await delivery.deliver(intent) }
+        )
+
+        await driver.refreshOnce()
+        fixture.appendFreshTurnStartForThreadA()
+        try fixture.appendPermissionRequest(owner: owner, eventID: 7)
+        await driver.refreshOnce()
+
+        let waiting = await runtime.snapshot()
+        XCTAssertEqual(waiting.currentState, .waitingApproval)
+        XCTAssertEqual(waiting.waitingApprovalCount, 1)
+        let attemptedWhileOff = await delivery.attempted()
+        let confirmedWhileOff = await delivery.confirmed()
+        XCTAssertEqual(attemptedWhileOff.map(\.journalEventID), [HookApprovalJournalEventID(7)!])
+        XCTAssertTrue(confirmedWhileOff.isEmpty)
+        XCTAssertTrue(checkpoint.latest().notificationOutbox.isEmpty)
+
+        let resolution = try XCTUnwrap(HookApprovalJournalRecord(
+            journalEventID: HookApprovalJournalEventID(8)!,
+            kind: .postToolUse,
+            sourceID: owner.sourceID,
+            sessionID: owner.sessionID,
+            turnID: owner.turnID,
+            observedAtMilliseconds: 8
+        ))
+        fixture.journalSource.records.append(try JSONEncoder().encode(resolution))
+        await driver.refreshOnce()
+
+        let resolved = await runtime.snapshot()
+        XCTAssertEqual(resolved.currentState, .thinking)
+        XCTAssertEqual(resolved.waitingApprovalCount, 0)
+        XCTAssertTrue(checkpoint.latest().notificationOutbox.isEmpty)
+
+        await delivery.setDisposition(.confirmed)
+        await driver.refreshOnce()
+        let attemptedAfterEnable = await delivery.attempted()
+        let confirmedAfterEnable = await delivery.confirmed()
+        XCTAssertEqual(attemptedAfterEnable.map(\.journalEventID), [HookApprovalJournalEventID(7)!])
+        XCTAssertTrue(confirmedAfterEnable.isEmpty)
+    }
+
     func testNotificationUsesExactRequestReviewerEvenWhenSameTurnHasHumanPending() async throws {
         let fixture = try DriverFixture(turn: "t1", terminal: false)
         defer { fixture.cleanup() }
@@ -489,6 +542,31 @@ private actor ApprovalOutboxDeliveryRecorder {
     }
 
     func submitted() -> [ApprovalNotificationOutboxIntent] { values }
+}
+
+private actor ApprovalOutboxDispositionRecorder {
+    private var currentDisposition: ApprovalNotificationDeliveryDisposition
+    private var attemptedValues: [ApprovalNotificationOutboxIntent] = []
+    private var confirmedValues: [ApprovalNotificationOutboxIntent] = []
+
+    init(disposition: ApprovalNotificationDeliveryDisposition) {
+        currentDisposition = disposition
+    }
+
+    func deliver(_ intent: ApprovalNotificationOutboxIntent) -> ApprovalNotificationDeliveryDisposition {
+        attemptedValues.append(intent)
+        if currentDisposition == .confirmed {
+            confirmedValues.append(intent)
+        }
+        return currentDisposition
+    }
+
+    func setDisposition(_ disposition: ApprovalNotificationDeliveryDisposition) {
+        currentDisposition = disposition
+    }
+
+    func attempted() -> [ApprovalNotificationOutboxIntent] { attemptedValues }
+    func confirmed() -> [ApprovalNotificationOutboxIntent] { confirmedValues }
 }
 
 private final class InMemoryApprovalCheckpointStore: ApprovalLifecycleCheckpointStoring, @unchecked Sendable {

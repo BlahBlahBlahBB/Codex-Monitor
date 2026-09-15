@@ -60,6 +60,18 @@ final class CrossMachineValidationTests: XCTestCase {
         XCTAssertFalse(desktopDriver.contains("ProcessInfo.processInfo.environment[\"HOME\"]"))
     }
 
+    func testApprovalObserverLifecycleIsIndependentOfNotificationDeliveryPreference() throws {
+        let root = projectRoot
+        let coordinator = try String(contentsOf: root.appendingPathComponent("Sources/CodexMonitorApp/MonitorSurfaceCoordinator.swift"), encoding: .utf8)
+        let appDelegate = try String(contentsOf: root.appendingPathComponent("Sources/CodexMonitorApp/CodexMonitorApp.swift"), encoding: .utf8)
+
+        XCTAssertTrue(coordinator.contains("activateApprovalObserver()"))
+        XCTAssertFalse(coordinator.contains("approvalPreferenceObserver"))
+        XCTAssertFalse(coordinator.contains("waitingApprovalNotifications"))
+        XCTAssertTrue(appDelegate.contains("_ = await approvalIntegration.reconcile(enabled: true)"))
+        XCTAssertFalse(appDelegate.contains("preferences.waitingApprovalNotifications = false"))
+    }
+
     func testFreshAccountAbsenceAndSourceRecoveryStaySafeWithoutRestart() async throws {
         let runtime = MonitorRuntimeStore(initialPhase: .live)
 
