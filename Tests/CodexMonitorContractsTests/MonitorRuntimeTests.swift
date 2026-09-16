@@ -409,6 +409,71 @@ final class MonitorRuntimeTests: XCTestCase {
         XCTAssertEqual(snapshot.currentState, .thinking)
     }
 
+    func testBootstrapAwaitingFreshActiveThreadPreventsBackgroundTerminalFromBecomingRepresentative() async {
+        let clock = RuntimeSnapshotTestClock()
+        let store = makeStore(clock: clock)
+        let activeThread = id(.thread, "active-user-thread")
+        let activeTurn = id(.turn, "active-user-turn")
+        let backgroundThread = id(.thread, "background-thread")
+        let backgroundTurn = id(.turn, "background-turn")
+        let activeHydration = RolloutCheckpointHydration(activeTurnID: activeTurn, turnStartedAt: clock.now(), activeItemID: nil, activeItemCategory: nil, latestActiveState: .thinking, latestActiveStateAt: clock.now(), terminal: nil, authoritativeTokenTotal: nil)
+        let backgroundTerminal = ReconciledTerminal(turnID: backgroundTurn, eventID: "background-terminal", state: .completed, authoritativeEventAt: clock.now())!
+        let backgroundHydration = RolloutCheckpointHydration(activeTurnID: nil, turnStartedAt: nil, activeItemID: nil, activeItemCategory: nil, latestActiveState: nil, latestActiveStateAt: nil, terminal: backgroundTerminal, authoritativeTokenTotal: nil)
+        let checkpoint = ApprovalLifecycleCheckpoint(cursor: nil, unresolved: [])
+        let active = LocalRuntimeReconciliationOwner.thread(snapshot: DesktopThreadSnapshot(threadID: activeThread, conversationName: "Current", model: nil, reasoningEffort: nil, updatedAtMilliseconds: nil, tokensUsed: nil), hydration: activeHydration, approval: checkpoint, approvalHealth: .availableKnownNotWaiting, runtimeSourceAvailable: true, observedAt: clock.now(), activityAdmission: .requireFreshLiveEvidence)
+        let background = LocalRuntimeReconciliationOwner.thread(snapshot: DesktopThreadSnapshot(threadID: backgroundThread, conversationName: "Background", model: nil, reasoningEffort: nil, updatedAtMilliseconds: nil, tokensUsed: nil), hydration: backgroundHydration, approval: checkpoint, approvalHealth: .availableKnownNotWaiting, runtimeSourceAvailable: true, observedAt: clock.now(), activityAdmission: .requireFreshLiveEvidence)
+
+        await store.beginReconciliation()
+        await store.installReconciliation([active, background], desktopHealth: DesktopCycleHealth(processRunning: true, stateDBReadable: true))
+
+        let snapshot = await store.snapshot()
+        XCTAssertEqual(snapshot.currentState, .idle)
+        XCTAssertEqual(snapshot.currentThread?.threadID, activeThread)
+        XCTAssertNil(snapshot.currentThread?.activeTurnID)
+        XCTAssertEqual(snapshot.threads.first(where: { $0.threadID == backgroundThread })?.state, .completed)
+    }
+
+    func testBootstrapAwaitingFreshActiveThreadResumesOnMatchingLiveActivityWithoutCompletedIntermediate() async {
+        let clock = RuntimeSnapshotTestClock()
+        let store = makeStore(clock: clock)
+        let activeThread = id(.thread, "active-user-thread")
+        let activeTurn = id(.turn, "active-user-turn")
+        let backgroundThread = id(.thread, "background-thread")
+        let backgroundTurn = id(.turn, "background-turn")
+        let checkpoint = ApprovalLifecycleCheckpoint(cursor: nil, unresolved: [])
+        let active = LocalRuntimeReconciliationOwner.thread(snapshot: DesktopThreadSnapshot(threadID: activeThread, conversationName: "Current", model: nil, reasoningEffort: nil, updatedAtMilliseconds: nil, tokensUsed: nil), hydration: RolloutCheckpointHydration(activeTurnID: activeTurn, turnStartedAt: clock.now(), activeItemID: nil, activeItemCategory: nil, latestActiveState: .thinking, latestActiveStateAt: clock.now(), terminal: nil, authoritativeTokenTotal: nil), approval: checkpoint, approvalHealth: .availableKnownNotWaiting, runtimeSourceAvailable: true, observedAt: clock.now(), activityAdmission: .requireFreshLiveEvidence)
+        let terminal = ReconciledTerminal(turnID: backgroundTurn, eventID: "background-terminal", state: .completed, authoritativeEventAt: clock.now())!
+        let background = LocalRuntimeReconciliationOwner.thread(snapshot: DesktopThreadSnapshot(threadID: backgroundThread, conversationName: "Background", model: nil, reasoningEffort: nil, updatedAtMilliseconds: nil, tokensUsed: nil), hydration: RolloutCheckpointHydration(activeTurnID: nil, turnStartedAt: nil, activeItemID: nil, activeItemCategory: nil, latestActiveState: nil, latestActiveStateAt: nil, terminal: terminal, authoritativeTokenTotal: nil), approval: checkpoint, approvalHealth: .availableKnownNotWaiting, runtimeSourceAvailable: true, observedAt: clock.now(), activityAdmission: .requireFreshLiveEvidence)
+
+        await store.beginReconciliation()
+        await store.installReconciliation([active, background], desktopHealth: DesktopCycleHealth(processRunning: true, stateDBReadable: true))
+        let initial = await store.snapshot()
+        XCTAssertEqual(initial.currentState, .idle)
+
+        clock.advance(1)
+        await store.ingest(event(activeThread, activeTurn, .activity, activity: .tool, clock: clock))
+        let resumed = await store.snapshot()
+        XCTAssertEqual(resumed.currentState, .working)
+        XCTAssertEqual(resumed.currentThread?.threadID, activeThread)
+        XCTAssertEqual(resumed.currentThread?.activeTurnID, activeTurn)
+    }
+
+    func testBootstrapStillProjectsSingleRelevantTerminalAsCompleted() async {
+        let clock = RuntimeSnapshotTestClock()
+        let store = makeStore(clock: clock)
+        let thread = id(.thread, "completed-thread")
+        let turn = id(.turn, "completed-turn")
+        let terminal = ReconciledTerminal(turnID: turn, eventID: "completed-terminal", state: .completed, authoritativeEventAt: clock.now())!
+        let rebuilt = LocalRuntimeReconciliationOwner.thread(snapshot: DesktopThreadSnapshot(threadID: thread, conversationName: "Completed", model: nil, reasoningEffort: nil, updatedAtMilliseconds: nil, tokensUsed: nil), hydration: RolloutCheckpointHydration(activeTurnID: nil, turnStartedAt: nil, activeItemID: nil, activeItemCategory: nil, latestActiveState: nil, latestActiveStateAt: nil, terminal: terminal, authoritativeTokenTotal: nil), approval: ApprovalLifecycleCheckpoint(cursor: nil, unresolved: []), approvalHealth: .availableKnownNotWaiting, runtimeSourceAvailable: true, observedAt: clock.now(), activityAdmission: .requireFreshLiveEvidence)
+
+        await store.beginReconciliation()
+        await store.installReconciliation([rebuilt], desktopHealth: DesktopCycleHealth(processRunning: true, stateDBReadable: true))
+
+        let snapshot = await store.snapshot()
+        XCTAssertEqual(snapshot.currentState, .completed)
+        XCTAssertEqual(snapshot.currentThread?.threadID, thread)
+    }
+
     func testUnfreshMetadataCannotSupplyConversationPresentationTitle() async {
         let clock = RuntimeSnapshotTestClock()
         let store = makeStore(clock: clock)
