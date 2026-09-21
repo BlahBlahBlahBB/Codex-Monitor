@@ -27,6 +27,8 @@ final class CrossMachineValidationTests: XCTestCase {
                 XCTAssertTrue(body.contains("project_root=\"$(cd \"$(dirname \"$0\")/..\" && pwd)\""))
                 XCTAssertTrue(body.contains("cp \"$executable\""))
                 XCTAssertTrue(body.contains("ditto \"$resource_bundle\""))
+                XCTAssertTrue(body.contains("Add :UIBuildRevision string $build_revision"))
+                XCTAssertTrue(body.contains("git -C \"$project_root\" rev-parse HEAD"))
             }
             for value in developerBindings {
                 XCTAssertFalse(body.contains(value), "production input must not contain \(value): \(url.lastPathComponent)")

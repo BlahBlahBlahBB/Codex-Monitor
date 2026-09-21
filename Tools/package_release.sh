@@ -7,11 +7,13 @@ set -euo pipefail
 project_root="$(cd "$(dirname "$0")/.." && pwd)"
 product_name="Codex Monitor"
 bundle_identifier="${BUNDLE_IDENTIFIER:-com.codexmonitor.app}"
-marketing_version="${VERSION:-1.0.1}"
-build_number="${BUILD:-101}"
-# Defaults preserve the 1.0.2 preview artifact convention. RC/release builds
+marketing_version="${VERSION:-1.0.9}"
+build_number="${BUILD:-109}"
+# Defaults preserve the 1.0.9 preview artifact convention. RC/release builds
 # use the same pipeline and set RELEASE_LABEL (for example, RC1).
 release_label="${RELEASE_LABEL:-Preview}"
+build_revision="${UI_BUILD_REVISION:-$(git -C "$project_root" rev-parse HEAD)}"
+build_timestamp="${UI_BUILD_TIMESTAMP:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}"
 frozen_sdk_version="26.5"
 icon_source="$project_root/icon/signal-capsule-mac.icns"
 release_root="${RELEASE_ROOT:-$project_root/Release}"
@@ -27,7 +29,7 @@ dmg_staging="$release_root/dmg-root"
 signing_identity="${SIGNING_IDENTITY:-${RELEASE_SIGNING_IDENTITY:-}}"
 
 [[ "$marketing_version" =~ '^[0-9]+(\.[0-9]+){1,2}([-.][0-9A-Za-z.]+)?$' ]] || {
-  print -u2 "VERSION must be a valid marketing version (for example, 1.0.1): $marketing_version"
+  print -u2 "VERSION must be a valid marketing version (for example, 1.0.9): $marketing_version"
   exit 1
 }
 [[ "$build_number" == <-> ]] || {
@@ -170,6 +172,8 @@ plutil -create xml1 "$info_plist"
 /usr/libexec/PlistBuddy -c "Add :LSUIElement bool true" "$info_plist"
 /usr/libexec/PlistBuddy -c "Add :NSHighResolutionCapable bool true" "$info_plist"
 /usr/libexec/PlistBuddy -c "Add :CodexMonitorReleaseChannel string $release_label" "$info_plist"
+/usr/libexec/PlistBuddy -c "Add :UIBuildRevision string $build_revision" "$info_plist"
+/usr/libexec/PlistBuddy -c "Add :UIBuildTimestamp string $build_timestamp" "$info_plist"
 
 if [[ -n "$signing_identity" ]]; then
   signing_status="Developer ID signing requested"
