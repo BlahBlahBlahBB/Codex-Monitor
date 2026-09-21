@@ -3,7 +3,7 @@
 
 一个原生 macOS Codex 辅助工具，通过菜单栏状态胶囊、桌面悬浮球、Quick View、用量和设置等界面，为 Codex 提供轻量、快速、低打扰的桌面辅助体验。
 
-> **当前版本：Codex Monitor 1.0.8 Preview**
+> **当前版本：Codex Monitor 1.0.9 Preview**
 >
 > Codex Monitor 当前为 Preview，不是 Stable Public Release，也不是 OpenAI 官方产品。部分能力依赖 Codex 的本地接口与本地数据结构，Codex 更新可能暂时影响个别能力；当数据源不可用时，应用会优先显示 Unknown / Unavailable，而不是伪造状态。
 
@@ -13,11 +13,11 @@
 
 ### macOS · Apple Silicon
 
-[![下载 Codex Monitor 1.0.8 Preview](https://img.shields.io/badge/下载-1.0.8%20Preview-black?style=for-the-badge&logo=apple)](https://github.com/BlahBlahBlahBB/Codex-Monitor/releases/download/v1.0.8-preview/Codex-Monitor-1.0.8-Preview-macOS-arm64.dmg)
+[![下载 Codex Monitor 1.0.9 Preview](https://img.shields.io/badge/下载-1.0.9%20Preview-black?style=for-the-badge&logo=apple)](https://github.com/BlahBlahBlahBB/Codex-Monitor/releases/download/v1.0.9-preview/Codex-Monitor-1.0.9-Preview-macOS-arm64.dmg)
 
-- [查看 v1.0.8-preview Release](https://github.com/BlahBlahBlahBB/Codex-Monitor/releases/tag/v1.0.8-preview)
-- DMG SHA256：`d175254e39796faba2c200783887512ff975be27ee72633957c48892a7b89475`
-- DMG 大小：`3,577,235 bytes`
+- [查看 v1.0.9-preview Release](https://github.com/BlahBlahBlahBB/Codex-Monitor/releases/tag/v1.0.9-preview)
+- DMG SHA256：`57736cf628edb71d9048ff16d3f20f45beba952bc8d58df860f8c5b59d3b349f`
+- DMG 大小：`3,582,545 bytes`
 
 > 当前 Preview 为 **arm64 / Apple Silicon only**，采用 ad-hoc 签名，尚未使用 Developer ID、Apple Notarization 或 Stapling。macOS Gatekeeper 可能阻止或警告该 Preview 包；它目前用于 Preview / testing，而不是无警告的正式公开发行。
 
@@ -27,7 +27,7 @@
 
 ### 首次安装
 
-1. 建议直接从本页 GitHub Release 下载 `Codex-Monitor-1.0.8-Preview-macOS-arm64.dmg`
+1. 建议直接从本页 GitHub Release 下载 `Codex-Monitor-1.0.9-Preview-macOS-arm64.dmg`
 2. 打开 DMG
 3. 将 `Codex Monitor.app` 拖入 `/Applications`
 4. 从“应用程序”启动 Codex Monitor
@@ -50,27 +50,23 @@
 
 <br>
 
-## ✨ 1.0.8 Preview 重点更新
+## ✨ 1.0.9 Preview 重点更新
 
-- 新增可选的系统默认**提示音**开关；关闭时通知保持静音，开启时使用 macOS 系统默认通知音
-- 审批生命周期观察与“等待审批通知”开关彻底解耦：即使关闭审批通知，Monitor 仍继续消费审批事件并维护黄色 Orb 状态
-- 提升 Approval journal 在 Observer 安装 / 迁移期间的可靠性：即使 Hook 迁移暂时失败，只要兼容 journal 仍在写入，reader 也会保持 active
-- 修复启动时状态合并问题：已完成的后台任务不再错误覆盖仍在运行的当前用户任务，避免任务进行中提前出现绿色 Orb 和“已完成”通知
-- 改进真实人工审批生命周期：
-  - `reviewer=user` 的 pending approval 会进入黄色 Orb
-  - 用户点击“允许一次 / 拒绝”后，黄色状态会立即恢复到正常任务状态
-  - 任务真正完成后才进入绿色完成状态并发送“已完成”通知
-- 保持通知点击激活 Codex 的既有行为；审批与完成通知继续采用原生 `UNUserNotificationCenter`
-- 延续 multi-window quota、Account、Usage、runtime-state、task-title 与 diagnostics export 等既有能力
+- 加固长时间运行任务中的 active-thread arbitration，避免当前活跃线程因短暂 evidence gap 被错误淘汰
+- developer / user / system context record 不再被错误视为 rollout-format failure，从而避免 active → idle → active 的错误状态跳变
+- bounded recent-thread discovery 压力下会继续保留并 exact re-read 已知 active thread
+- stale approval 只能在 exact thread + exact turn owner 下恢复，其他线程的历史 pending approval 不再污染当前代表线程
+- 修复此前观察到的 false-yellow 路径：活跃任务不会再因为 representative thread 错切而继承其他线程的黄色审批状态
+- 真实 `reviewer=user` PermissionRequest 仍会正常显示黄色等待审批 Orb；resolution / terminal 后会正确清除
+- 发布产物新增精确 Git revision 与 UTC build timestamp provenance，便于后续跨机器诊断与安装包追溯
 
-自动化回归：**410 executed / 0 failures / 4 expected skips**。
+自动化回归：**416 executed / 0 failures / 4 expected skips**。
 
-Premature Completion 真实 Human QA：**PASS**。Approval lifecycle / 黄色 Orb 恢复真实 Human QA：**PASS**。
+Runtime arbitration / false-yellow 完整组合 regression：**PASS**。最终同一 DMG 的 packaged smoke QA：**PASS**。
 
-Packaged App、ApprovalObserver helper strict codesign 与 DMG read-only mount：**PASS**。
+真实 `reviewer=user` 审批 → Yellow → resolution 清除：**PASS**。Artifact provenance verification 与 SHA-256 校验：**PASS**。
 
-> 已知 Preview 限制：Approval Hook 在 Codex thread / session 创建时加载。Codex Monitor 首次安装/启用审批监听之前已经存在的旧对话，后续人工审批可能不会发出可供 Monitor 消费的 Hook event。**新建一个 Codex 对话即可启用审批监控，无需重启 Codex。**
-
+> 当前 Preview 仍采用 ad-hoc 签名，尚未使用 Developer ID、Apple Notarization 或 Stapling。macOS Gatekeeper 可能要求用户在首次启动时手动允许。
 <br>
 
 ## 📑 简介
@@ -175,13 +171,13 @@ Advanced 中可选择开启系统默认**提示音**。提示音关闭时通知�
 
 ## ⚠️ Preview 数据源说明
 
-Codex Monitor 1.0.8 Preview 当前会读取本机 Codex 的本地集成数据面。
+Codex Monitor 1.0.9 Preview 当前会读取本机 Codex 的本地集成数据面。
 
 其中部分 Account 能力使用 Codex app-server 的本地 transport；Desktop runtime / session observation、approval attention 也依赖 Codex 的本地 SQLite / rollout / Hook 等实现细节，这些本地 schema 与事件目前不应被视为稳定 public contract。
 
 因此：
 
-- 1.0.8 定位为 **Preview-only**
+- 1.0.9 定位为 **Preview-only**
 - Codex 更新可能暂时影响某个单独 capability
 - capability 缺失时应用应安全降级
 - 当前不应被描述为 stable production-supported Codex integration
@@ -228,7 +224,7 @@ swift test
 Preview release packaging：
 
 ```bash
-VERSION=1.0.8 BUILD=108 RELEASE_LABEL=Preview ./Tools/package_release.sh
+VERSION=1.0.9 BUILD=109 RELEASE_LABEL=Preview ./Tools/package_release.sh
 ```
 
 在未提供 `SIGNING_IDENTITY` 时，脚本生成明确标记的 ad-hoc local Preview；Developer ID / notarization 流程当前尚未启用。
@@ -237,7 +233,7 @@ VERSION=1.0.8 BUILD=108 RELEASE_LABEL=Preview ./Tools/package_release.sh
 
 ## 📌 Release scope
 
-Codex Monitor 1.0.8 Preview 当前验证范围：
+Codex Monitor 1.0.9 Preview 当前验证范围：
 
 - macOS 13+
 - Apple Silicon / arm64
@@ -245,13 +241,11 @@ Codex Monitor 1.0.8 Preview 当前验证范围：
 - 不同 HOME / username，包括空格与 Unicode
 - 不同 Codex Desktop 本地 Account transport topology
 - multi-window quota 与既有 Account / Usage / runtime 行为保持不变
-- packaged app 与 bundled ApprovalObserver helper 校验：PASS
-- `reviewer=user` 的真实人工审批：黄色 Orb / 等待审批 / resolution recovery Human QA PASS
-- “等待审批通知”关闭时审批观察继续运行，黄色 Orb 生命周期不依赖通知开关
-- “帮我审批”自动处理且未进入真实人工等待状态的请求不会产生黄色审批误报
-- 任务运行中重启 / 启动 Monitor：不会被无关后台 terminal 提前投影为 COMPLETED，Human QA PASS
-- 真正 task completion 后绿色 Orb 与完成通知顺序正确，Human QA PASS
-- 安装/启用 Observer 前已经存在的旧 Codex thread 可能没有 Hook event；新建对话即可恢复，无需重启 Codex
-- 等待审批 / 完成通知与点击激活 Codex：保持既有验证行为
-- signed ApprovalObserver helper 与 Hook/config 完整性契约保持不变
-- Release Gate：410 executed / 0 failures / 4 expected skips
+- packaged app 与 bundled ApprovalObserver helper strict codesign：PASS
+- active/thread arbitration 在 tool-heavy、context-message 与 bounded-discovery 压力下保持正确 representative：PASS
+- foreign / stale approval 不跨 thread / turn 泄漏到当前 Orb：PASS
+- `reviewer=user` 的真实人工审批：黄色 Orb / resolution recovery same-binary Human QA PASS
+- auto-reviewed approval 不进入人工 Yellow attention
+- 真正 task completion 后绿色 Orb 与完成通知顺序保持正确
+- artifact embedded Git revision 与 UTC build timestamp provenance：PASS
+- Release Gate：416 executed / 0 failures / 4 expected skips
