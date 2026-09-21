@@ -8,7 +8,7 @@ project_root="$(cd "$(dirname "$0")/.." && pwd)"
 product_name="Codex Monitor"
 bundle_identifier="${BUNDLE_IDENTIFIER:-com.codexmonitor.app}"
 marketing_version="${VERSION:-1.0.9}"
-build_number="${BUILD:-109}"
+build_number="${BUILD:-110}"
 # Defaults preserve the 1.0.9 preview artifact convention. RC/release builds
 # use the same pipeline and set RELEASE_LABEL (for example, RC1).
 release_label="${RELEASE_LABEL:-Preview}"

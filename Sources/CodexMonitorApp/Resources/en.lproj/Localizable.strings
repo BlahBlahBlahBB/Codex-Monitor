@@ -129,6 +129,7 @@
 "settings.productName" = "Product";
 "settings.version" = "Version";
 "settings.build" = "Build";
+"settings.author" = "Author";
 "settings.exportDiagnostics" = "Export Diagnostics";
 "settings.diagnosticsExporting" = "Exporting diagnostics…";
 "settings.diagnosticsExported" = "Diagnostics exported";

@@ -129,6 +129,7 @@
 "settings.productName" = "产品";
 "settings.version" = "版本";
 "settings.build" = "构建";
+"settings.author" = "作者";
 "settings.exportDiagnostics" = "导出诊断";
 "settings.diagnosticsExporting" = "正在导出诊断…";
 "settings.diagnosticsExported" = "诊断已导出";

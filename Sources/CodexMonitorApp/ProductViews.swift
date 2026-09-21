@@ -924,6 +924,13 @@ private struct AboutSettingsDetail: View {
             SettingsRow(title: L10n.tr("settings.productName")) { Text("Codex Monitor").foregroundStyle(.secondary) }
             SettingsRow(title: L10n.tr("settings.version")) { Text(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.0").foregroundStyle(.secondary).monospacedDigit() }
             SettingsRow(title: L10n.tr("settings.build")) { Text(Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "dev").foregroundStyle(.secondary).monospacedDigit() }
+            SettingsRow(title: L10n.tr("settings.author")) {
+                Link(
+                    "BlahBlahBlahBB",
+                    destination: URL(string: "https://github.com/BlahBlahBlahBB/Codex-Monitor")!
+                )
+                .foregroundStyle(.blue)
+            }
         }
     }
 }
