@@ -16,8 +16,8 @@
 [![下载 Codex Monitor 1.0.9 Preview](https://img.shields.io/badge/下载-1.0.9%20Preview-black?style=for-the-badge&logo=apple)](https://github.com/BlahBlahBlahBB/Codex-Monitor/releases/download/v1.0.9-preview/Codex-Monitor-1.0.9-Preview-macOS-arm64.dmg)
 
 - [查看 v1.0.9-preview Release](https://github.com/BlahBlahBlahBB/Codex-Monitor/releases/tag/v1.0.9-preview)
-- DMG SHA256：`57736cf628edb71d9048ff16d3f20f45beba952bc8d58df860f8c5b59d3b349f`
-- DMG 大小：`3,582,545 bytes`
+- DMG SHA256：`b35379039e4168314496499f767127233ea59f1db39ba8557f5b00a208011dab`
+- DMG 大小：`3,582,565 bytes`
 
 > 当前 Preview 为 **arm64 / Apple Silicon only**，采用 ad-hoc 签名，尚未使用 Developer ID、Apple Notarization 或 Stapling。macOS Gatekeeper 可能阻止或警告该 Preview 包；它目前用于 Preview / testing，而不是无警告的正式公开发行。
 
@@ -58,6 +58,7 @@
 - 真正需要人工审批时，悬浮球仍会正常变黄；批准或拒绝后会及时恢复
 - 加强长任务、频繁工具调用和多对话同时存在时的状态判断，减少错误切换
 - 安装包现在会记录对应的源码版本和构建时间，方便确认版本来源和后续排查问题
+- “关于”页面新增作者信息，点击 `BlahBlahBlahBB` 可直接打开项目 GitHub 页面
 
 本次版本已完成 **416 项自动化测试，0 失败，4 项按预期跳过**。
 
@@ -221,7 +222,7 @@ swift test
 Preview release packaging：
 
 ```bash
-VERSION=1.0.9 BUILD=109 RELEASE_LABEL=Preview ./Tools/package_release.sh
+VERSION=1.0.9 BUILD=110 RELEASE_LABEL=Preview ./Tools/package_release.sh
 ```
 
 在未提供 `SIGNING_IDENTITY` 时，脚本生成明确标记的 ad-hoc local Preview；Developer ID / notarization 流程当前尚未启用。
@@ -245,4 +246,5 @@ Codex Monitor 1.0.9 Preview 当前验证范围：
 - auto-reviewed approval 不进入人工 Yellow attention
 - 真正 task completion 后绿色 Orb 与完成通知顺序保持正确
 - artifact embedded Git revision 与 UTC build timestamp provenance：PASS
+- About / Author link：中文、英文与 GitHub 跳转 QA PASS
 - Release Gate：416 executed / 0 failures / 4 expected skips
