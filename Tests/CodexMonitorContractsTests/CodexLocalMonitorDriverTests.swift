@@ -137,6 +137,152 @@ final class CodexLocalMonitorDriverTests: XCTestCase {
         XCTAssertEqual(snapshot.currentThread?.threadID.rawID, "thread-a")
     }
 
+    func testContextRecordsCannotCreateActiveIdleActiveArbitrationGap() async throws {
+        let fixture = try DriverFixture(turn: "historical-a", terminal: false, includeSecondThread: true)
+        defer { fixture.cleanup() }
+        let runtime = MonitorRuntimeStore()
+        let driver = fixture.driver(runtime: runtime, resolver: nil)
+
+        await driver.refreshOnce()
+        fixture.appendFreshTurnStartAndContextMessagesForThreadA()
+        await driver.refreshOnce()
+
+        let snapshot = await runtime.snapshot()
+        XCTAssertEqual(snapshot.currentThread?.threadID.rawID, "thread-a")
+        XCTAssertEqual(snapshot.currentThread?.activeTurnID?.rawID, "t1")
+        XCTAssertEqual(snapshot.currentState, .thinking)
+        XCTAssertNotEqual(snapshot.currentState, .idle)
+    }
+
+    func testToolProgressWithoutPermissionRequestCannotCreateYellowPresentation() async throws {
+        let fixture = try DriverFixture(turn: "t1", terminal: false)
+        defer { fixture.cleanup() }
+        let resolver = try XCTUnwrap(KeyedHookApprovalIdentityDeriver(keyMaterial: Data("tool-progress".utf8)))
+        let owner = try XCTUnwrap(resolver.owner(sourceRawID: "codex-desktop-local", sessionRawID: "thread-a", turnRawID: "t1"))
+        let runtime = MonitorRuntimeStore()
+        let driver = fixture.driver(runtime: runtime, resolver: resolver)
+
+        await driver.refreshOnce()
+        fixture.appendFreshTurnStartForThreadA()
+        await driver.refreshOnce()
+        let completion = try XCTUnwrap(HookApprovalJournalRecord(
+            journalEventID: .init(1)!,
+            kind: .postToolUse,
+            sourceID: owner.sourceID,
+            sessionID: owner.sessionID,
+            turnID: owner.turnID,
+            observedAtMilliseconds: 2
+        ))
+        fixture.journalSource.records = [try JSONEncoder().encode(completion)]
+        await driver.refreshOnce()
+
+        let snapshot = await runtime.snapshot()
+        XCTAssertNotEqual(snapshot.currentState, .waitingApproval)
+        XCTAssertEqual(snapshot.waitingApprovalCount, 0)
+        XCTAssertNotEqual(VisualStatePresentation.forSnapshot(snapshot).orbTone, .yellow)
+    }
+
+    func testActiveToolHeavyContextThreadSurvivesBoundedDiscoveryAndForeignStaleApprovalCannotTurnOrbYellow() async throws {
+        let fixture = try DriverFixture(turn: "historical-a", terminal: false, includeSecondThread: true)
+        defer { fixture.cleanup() }
+        let resolver = try XCTUnwrap(KeyedHookApprovalIdentityDeriver(keyMaterial: Data("full-arbitration".utf8)))
+        // Thread B carries durable, historical approval evidence for a turn
+        // that is not its live rollout turn. This is the stale side of the
+        // former false-yellow arbitration chain.
+        let staleB = try XCTUnwrap(resolver.owner(sourceRawID: "codex-desktop-local", sessionRawID: "thread-b", turnRawID: "b-stale"))
+        try fixture.persist(owner: staleB, health: .available)
+        let runtime = MonitorRuntimeStore()
+        let driver = fixture.driver(runtime: runtime, resolver: resolver)
+
+        await driver.refreshOnce()
+        // Keep B inside the active-reader set while its stale checkpoint
+        // evidence is present, so bounded discovery cannot hide the cross-
+        // thread arbitration case by simply dropping B.
+        fixture.appendFreshTurnStartForThreadB()
+        await driver.refreshOnce()
+        fixture.appendFreshToolHeavyContextTurnForThreadA()
+        await driver.refreshOnce()
+
+        func assertAIsRepresentativeAndNotYellow() async throws {
+            let snapshot = await runtime.snapshot()
+            let a = try XCTUnwrap(snapshot.threads.first { $0.threadID.rawID == "thread-a" })
+            let b = try XCTUnwrap(snapshot.threads.first { $0.threadID.rawID == "thread-b" })
+            XCTAssertEqual(a.activeTurnID?.rawID, "t1")
+            XCTAssertEqual(a.state, .working)
+            XCTAssertNotEqual(b.state, .waitingApproval)
+            XCTAssertEqual(snapshot.currentThread?.threadID.rawID, "thread-a")
+            XCTAssertEqual(snapshot.currentState, .working)
+            XCTAssertEqual(snapshot.waitingApprovalCount, 0)
+            XCTAssertNotEqual(VisualStatePresentation.forSnapshot(snapshot).orbTone, .yellow)
+        }
+
+        try await assertAIsRepresentativeAndNotYellow()
+        try fixture.addNewerIdleThreads(count: 12)
+        await driver.refreshOnce()
+        try await assertAIsRepresentativeAndNotYellow()
+        await driver.refreshOnce()
+        try await assertAIsRepresentativeAndNotYellow()
+
+        // A real, exact human PermissionRequest on A must still take over the
+        // presentation as yellow despite B's unrelated stale checkpoint row.
+        let liveA = try XCTUnwrap(resolver.owner(sourceRawID: "codex-desktop-local", sessionRawID: "thread-a", turnRawID: "t1"))
+        let request = try XCTUnwrap(HookApprovalJournalRecord(
+            journalEventID: .init(2)!,
+            kind: .permissionRequest,
+            sourceID: liveA.sourceID,
+            sessionID: liveA.sessionID,
+            turnID: liveA.turnID,
+            observedAtMilliseconds: 2,
+            reviewer: .user
+        ))
+        fixture.journalSource.records.append(try JSONEncoder().encode(request))
+        await driver.refreshOnce()
+        let approved = await runtime.snapshot()
+        XCTAssertEqual(approved.currentThread?.threadID.rawID, "thread-a")
+        XCTAssertEqual(approved.currentState, .waitingApproval)
+        XCTAssertTrue(approved.userAttentionRequired)
+        XCTAssertEqual(VisualStatePresentation.forSnapshot(approved).orbTone, .yellow)
+
+        let resolution = try XCTUnwrap(HookApprovalJournalRecord(
+            journalEventID: .init(3)!,
+            kind: .postToolUse,
+            sourceID: liveA.sourceID,
+            sessionID: liveA.sessionID,
+            turnID: liveA.turnID,
+            observedAtMilliseconds: 3
+        ))
+        fixture.journalSource.records.append(try JSONEncoder().encode(resolution))
+        await driver.refreshOnce()
+        try await assertAIsRepresentativeAndNotYellow()
+
+        fixture.appendSuccessfulTerminalForThreadA()
+        await driver.refreshOnce()
+        let terminal = await runtime.snapshot()
+        XCTAssertEqual(terminal.threads.first { $0.threadID.rawID == "thread-a" }?.state, .completed)
+        XCTAssertEqual(terminal.currentThread?.threadID.rawID, "thread-b")
+        XCTAssertEqual(terminal.currentState, .thinking)
+        XCTAssertEqual(terminal.waitingApprovalCount, 0)
+        XCTAssertNotEqual(VisualStatePresentation.forSnapshot(terminal).orbTone, .yellow)
+    }
+
+    func testBoundedRecentDiscoveryCannotEvictKnownActiveThread() async throws {
+        let fixture = try DriverFixture(turn: "historical-a", terminal: false)
+        defer { fixture.cleanup() }
+        let runtime = MonitorRuntimeStore()
+        let driver = fixture.driver(runtime: runtime, resolver: nil)
+
+        await driver.refreshOnce()
+        fixture.appendFreshTurnStartForThreadA()
+        await driver.refreshOnce()
+        try fixture.addNewerIdleThreads(count: 12)
+        await driver.refreshOnce()
+
+        let snapshot = await runtime.snapshot()
+        XCTAssertEqual(snapshot.currentThread?.threadID.rawID, "thread-a")
+        XCTAssertEqual(snapshot.currentThread?.activeTurnID?.rawID, "t1")
+        XCTAssertEqual(snapshot.currentState, .thinking)
+    }
+
 
     func testSourceUserRequestProducesYellowAndOneNotification() async throws {
         try await verifySourceRequest(reviewer: "user", attention: true)
@@ -523,7 +669,57 @@ private final class DriverFixture {
         let line = "{\"type\":\"event_msg\",\"payload\":{\"type\":\"task_started\",\"turn_id\":\"t1\",\"started_at\":2}}\n"
         if let handle = try? FileHandle(forWritingTo: threadARollout) { defer { try? handle.close() }; handle.seekToEndOfFile(); try? handle.write(contentsOf: Data(line.utf8)) }
     }
+    func appendFreshTurnStartAndContextMessagesForThreadA() {
+        let lines = [
+            "{\"type\":\"event_msg\",\"payload\":{\"type\":\"task_started\",\"turn_id\":\"t1\",\"started_at\":2}}",
+            "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"developer\",\"id\":\"developer-context\"}}",
+            "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"user\",\"id\":\"user-context\"}}"
+        ].joined(separator: "\n") + "\n"
+        if let handle = try? FileHandle(forWritingTo: threadARollout) {
+            defer { try? handle.close() }
+            handle.seekToEndOfFile()
+            try? handle.write(contentsOf: Data(lines.utf8))
+        }
+    }
+    func appendFreshToolHeavyContextTurnForThreadA() {
+        let lines = [
+            "{\"type\":\"event_msg\",\"payload\":{\"type\":\"task_started\",\"turn_id\":\"t1\",\"started_at\":2}}",
+            "{\"type\":\"response_item\",\"payload\":{\"type\":\"function_call\",\"call_id\":\"tool-a\"}}",
+            "{\"type\":\"response_item\",\"payload\":{\"type\":\"function_call_output\",\"call_id\":\"tool-a\"}}",
+            "{\"type\":\"response_item\",\"payload\":{\"type\":\"custom_tool_call\",\"call_id\":\"tool-b\"}}",
+            "{\"type\":\"response_item\",\"payload\":{\"type\":\"custom_tool_call_output\",\"call_id\":\"tool-b\"}}",
+            "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"developer\",\"id\":\"developer-context\"}}",
+            "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"user\",\"id\":\"user-context\"}}",
+            "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"system\",\"id\":\"system-context\"}}",
+            "{\"type\":\"response_item\",\"payload\":{\"type\":\"function_call\",\"call_id\":\"tool-c\"}}"
+        ].joined(separator: "\n") + "\n"
+        if let handle = try? FileHandle(forWritingTo: threadARollout) {
+            defer { try? handle.close() }
+            handle.seekToEndOfFile()
+            try? handle.write(contentsOf: Data(lines.utf8))
+        }
+    }
+    func appendSuccessfulTerminalForThreadA() {
+        let line = "{\"timestamp\":\"2030-01-01T00:00:00Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"task_complete\",\"turn_id\":\"t1\",\"completed_at\":1893456000}}\n"
+        if let handle = try? FileHandle(forWritingTo: threadARollout) {
+            defer { try? handle.close() }
+            handle.seekToEndOfFile()
+            try? handle.write(contentsOf: Data(line.utf8))
+        }
+    }
     func appendFreshTurnStartForThreadB() { guard let threadBRollout else { return }; let line = "{\"type\":\"event_msg\",\"payload\":{\"type\":\"task_started\",\"turn_id\":\"b1\",\"started_at\":2}}\n"; if let handle = try? FileHandle(forWritingTo: threadBRollout) { defer { try? handle.close() }; handle.seekToEndOfFile(); try? handle.write(contentsOf: Data(line.utf8)) } }
+    func addNewerIdleThreads(count: Int) throws {
+        let database = root.appendingPathComponent("state_5.sqlite")
+        var db: OpaquePointer?
+        guard sqlite3_open(database.path, &db) == SQLITE_OK else { throw POSIXError(.EIO) }
+        defer { sqlite3_close(db) }
+        for index in 0..<count {
+            let id = "newer-idle-\(index)"
+            let rollout = root.appendingPathComponent("sessions/\(id).jsonl")
+            try Data("{\"type\":\"session_meta\",\"payload\":{\"id\":\"\(id)\"}}\n".utf8).write(to: rollout)
+            try sql(db, "INSERT INTO threads VALUES ('\(id)', '\(rollout.path)', 'idle-\(index)', 'gpt-test', 'high', \(100 + index), 0)")
+        }
+    }
     func cleanup() { try? FileManager.default.removeItem(at: root) }
 }
 

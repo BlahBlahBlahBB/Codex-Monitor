@@ -76,6 +76,10 @@ public actor CodexLocalMonitorDriver {
     private var approvalNotificationOutbox: [String: ApprovalNotificationOutboxIntent]
     private var durableApprovalNotificationOutbox: [String: ApprovalNotificationOutboxIntent]
     private var trackedThreads = Set<NamespacedID>()
+    /// Exact live turn ownership learned from admitted rollout records. This is
+    /// used only to keep a known-active reader inside the bounded discovery
+    /// set; an authoritative terminal or process boundary removes the latch.
+    private var activeTurnByThread: [NamespacedID: NamespacedID] = [:]
     private var loopTask: Task<Void, Never>?
     private var sleepObservers: [NSObjectProtocol] = []
     private var livenessObservers: [NSObjectProtocol] = []
@@ -159,6 +163,7 @@ public actor CodexLocalMonitorDriver {
         desktop.shutdown()
         approvalReader.shutdown()
         trackedThreads.removeAll()
+        activeTurnByThread.removeAll()
         ledgerLiveObservationStartedAt = nil
         knownLedgerSessionKeys.removeAll()
         verifiedLiveSessionStartKeys.removeAll()
@@ -209,6 +214,7 @@ public actor CodexLocalMonitorDriver {
             let health = DesktopCycleHealth(processRunning: false, stateDBReadable: false, removedThreadIDs: Array(trackedThreads))
             for threadID in trackedThreads { desktop.forget(threadID: threadID) }
             trackedThreads.removeAll()
+            activeTurnByThread.removeAll()
             hasSuccessfulStateDBRead = false
             await installReconciliation([], health: health, caller: "bootstrap.codexProcessNotRunning")
             await runtime.markSourceUnavailable(.approvalLocal)
@@ -269,19 +275,32 @@ public actor CodexLocalMonitorDriver {
             let removed = Array(trackedThreads)
             for threadID in trackedThreads { desktop.forget(threadID: threadID) }
             trackedThreads.removeAll()
+            activeTurnByThread.removeAll()
             hasSuccessfulStateDBRead = false
             await applyDesktopCycle(registrations: [], observations: [], health: DesktopCycleHealth(processRunning: false, stateDBReadable: false, removedThreadIDs: removed), caller: "pollIncrementally.codexProcessNotRunning")
             return
         }
         do {
-            let records = try stateReader.recentThreads()
+            var records = try stateReader.recentThreads()
             hasSuccessfulStateDBRead = true
             let approval = pollApproval()
             let hook = hookApprovalSourceIsActive() ? pollHookJournal() : nil
+            // Falling outside a bounded recent-thread window is not deletion.
+            // Re-read exact rows for turns that this process has authoritatively
+            // observed as active so unrelated newer idle rows cannot evict them.
+            let recent = Set(records.map { $0.snapshot.threadID })
+            for threadID in Array(activeTurnByThread.keys) where !recent.contains(threadID) {
+                if let exact = try stateReader.thread(rawID: threadID.rawID) {
+                    records.append(exact)
+                } else {
+                    activeTurnByThread.removeValue(forKey: threadID)
+                }
+            }
             let current = Set(records.map { $0.snapshot.threadID })
             let archived = trackedThreads.subtracting(current)
             for threadID in archived { desktop.forget(threadID: threadID) }
             trackedThreads.subtract(archived)
+            for threadID in archived { activeTurnByThread.removeValue(forKey: threadID) }
             var registrations = Dictionary(uniqueKeysWithValues: records
                 .filter { trackedThreads.contains($0.snapshot.threadID) }
                 .map { ($0.snapshot.threadID, $0.snapshot) })
@@ -305,6 +324,8 @@ public actor CodexLocalMonitorDriver {
             }
             for threadID in failed { desktop.forget(threadID: threadID) }
             trackedThreads.subtract(failed)
+            for threadID in failed { activeTurnByThread.removeValue(forKey: threadID) }
+            updateActiveTurnOwnership(from: observations)
             let completeFromSessionStart = completeFromSessionStartSessions(in: observations)
             await applyDesktopCycle(registrations: registrations.values.sorted(by: { $0.threadID.rawID < $1.threadID.rawID }), observations: observations, health: DesktopCycleHealth(processRunning: true, stateDBReadable: true, failedThreadIDs: Array(failed), removedThreadIDs: Array(archived)), caller: "pollIncrementally.stateDBRead", completeFromSessionStartSessions: completeFromSessionStart)
             if observations.contains(where: { observation in
@@ -538,6 +559,22 @@ public actor CodexLocalMonitorDriver {
         await runtime.applyDesktopCycle(registrations: registrations, observations: observations, health: health)
         await usageLedger?.ingest(registrations: registrations, observations: observations, completeFromSessionStartSessions: completeFromSessionStartSessions)
         await recordDesktopUnavailableTransition(from: previous, to: runtime.snapshot(), health: health, caller: caller)
+    }
+
+    private func updateActiveTurnOwnership(from observations: [DesktopObservation]) {
+        for observation in observations {
+            guard case let .rollout(record) = observation, let turnID = record.turnID else { continue }
+            switch record.kind {
+            case .taskStarted:
+                activeTurnByThread[record.threadID] = turnID
+            case .taskCompletedSuccess, .taskCompletedFailure, .turnAbortedInterrupted:
+                if activeTurnByThread[record.threadID] == turnID {
+                    activeTurnByThread.removeValue(forKey: record.threadID)
+                }
+            case .activity, .tokenCount, .turnContext, .sessionMeta:
+                break
+            }
+        }
     }
 
     /// One bounded, read-only pass establishes 30-day ledger history from the

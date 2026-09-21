@@ -281,7 +281,16 @@ public final class StateDBReader: @unchecked Sendable {
         let required: Set<String> = ["id", "rollout_path", "model", "reasoning_effort", "updated_at", "tokens_used"]
         guard required.isSubset(of: columns) else { throw StateDBError.schemaMismatch }
         let conversationName = columns.contains("name") ? "name" : "NULL"
-        let sql = "SELECT id, rollout_path, \(conversationName), model, reasoning_effort, updated_at, tokens_used FROM threads ORDER BY updated_at DESC LIMIT ?"
+        // `updated_at` is not unique. Without a stable tie-breaker, two rows
+        // updated in the same source tick can exchange positions at the bounded
+        // discovery edge and make a live reader appear to have been removed.
+        // Prefer the source's creation order when this schema exposes it, then
+        // use the opaque primary key for a deterministic final ordering.
+        let creationOrder: String
+        if columns.contains("created_at_ms") { creationOrder = "created_at_ms DESC, " }
+        else if columns.contains("created_at") { creationOrder = "created_at DESC, " }
+        else { creationOrder = "" }
+        let sql = "SELECT id, rollout_path, \(conversationName), model, reasoning_effort, updated_at, tokens_used FROM threads ORDER BY updated_at DESC, \(creationOrder)id ASC LIMIT ?"
         var statement: OpaquePointer?
         guard sqlite3_prepare_v2(database, sql, -1, &statement, nil) == SQLITE_OK, let statement else { throw stateError(for: database) }
         defer { sqlite3_finalize(statement) }
@@ -625,7 +634,22 @@ public final class RolloutIncrementalReader: @unchecked Sendable {
             guard let turn = activeTurnID, let item = payload["call_id"] as? String else { return [.capabilityUnavailable(threadID: binding.threadID, capability: .rolloutFormat)] }
             return [envelope(.activity, turn: turn, itemRaw: item, activity: .fileChange)]
         case ("response_item", "message"):
-            guard payload["role"] as? String == "assistant", let turn = activeTurnID, let item = payload["id"] as? String else { return [.capabilityUnavailable(threadID: binding.threadID, capability: .rolloutFormat)] }
+            // Developer/user/system messages are ordinary turn context. They
+            // are not assistant activity, but neither are they evidence that
+            // the rollout format or active turn became unavailable. Treating
+            // them as a format failure used to disconnect the active thread
+            // for one poll and let an unrelated idle thread win arbitration.
+            guard let role = payload["role"] as? String else {
+                return [.capabilityUnavailable(threadID: binding.threadID, capability: .rolloutFormat)]
+            }
+            guard role == "assistant" else {
+                return ["developer", "user", "system"].contains(role)
+                    ? []
+                    : [.capabilityUnavailable(threadID: binding.threadID, capability: .rolloutFormat)]
+            }
+            guard let turn = activeTurnID, let item = payload["id"] as? String else {
+                return [.capabilityUnavailable(threadID: binding.threadID, capability: .rolloutFormat)]
+            }
             return [envelope(.activity, turn: turn, itemRaw: item, activity: .agentResponse)]
         default:
             return []

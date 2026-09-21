@@ -100,6 +100,64 @@ final class DesktopLocalAdapterTests: XCTestCase {
         XCTAssertFalse(observations.contains { $0.kind == .taskCompletedSuccess || $0.kind == .taskCompletedFailure || $0.kind == .turnAbortedInterrupted })
     }
 
+    func testTurnContextMessagesDoNotDisconnectActiveThreadOrPromoteForeignIdle() async throws {
+        let activeFile = try fixture.rollout("thread-a", lines: [
+            fixture.session("thread-a"),
+            fixture.started("turn-a"),
+            fixture.contextMessage(role: "developer", id: "developer-context"),
+            fixture.contextMessage(role: "user", id: "user-context"),
+            fixture.itemCompleted("turn-a")
+        ])
+        let idleFile = try fixture.rollout("thread-b", lines: [fixture.session("thread-b")])
+        try fixture.addThread("thread-a", rollout: activeFile)
+        try fixture.addThread("thread-b", rollout: idleFile)
+        let adapter = try fixture.adapter()
+        let active = try adapter.open(threadRawID: "thread-a")
+        let idle = try adapter.open(threadRawID: "thread-b")
+        let activeObservations = try adapter.poll(threadID: active.threadID).observations
+        let idleObservations = try adapter.poll(threadID: idle.threadID).observations
+
+        XCTAssertFalse(activeObservations.containsUnavailable(.rolloutFormat))
+        XCTAssertFalse(activeObservations.rollouts.contains { [.taskCompletedSuccess, .taskCompletedFailure, .turnAbortedInterrupted].contains($0.kind) })
+
+        let runtime = MonitorRuntimeStore(engine: RuntimeStateEngine(initialPhase: .live), initialPhase: .live)
+        await runtime.applyDesktopCycle(
+            registrations: [active, idle],
+            observations: activeObservations + idleObservations,
+            health: DesktopCycleHealth(processRunning: true, stateDBReadable: true)
+        )
+        let snapshot = await runtime.snapshot()
+        XCTAssertEqual(snapshot.currentThread?.threadID, active.threadID)
+        XCTAssertEqual(snapshot.currentThread?.activeTurnID?.rawID, "turn-a")
+        XCTAssertEqual(snapshot.currentState, .thinking)
+    }
+
+    func testIntermediateToolCompletionKeepsOverallTurnActive() async throws {
+        let file = try fixture.rollout("thread-a", lines: [
+            fixture.session("thread-a"),
+            fixture.started("turn-a"),
+            fixture.tool("call-a"),
+            fixture.toolOutput("call-a"),
+            fixture.itemCompleted("turn-a")
+        ])
+        try fixture.addThread("thread-a", rollout: file)
+        let adapter = try fixture.adapter()
+        let thread = try adapter.open(threadRawID: "thread-a")
+        let observations = try adapter.poll(threadID: thread.threadID).observations
+        let runtime = MonitorRuntimeStore(engine: RuntimeStateEngine(initialPhase: .live), initialPhase: .live)
+
+        await runtime.applyDesktopCycle(
+            registrations: [thread],
+            observations: observations,
+            health: DesktopCycleHealth(processRunning: true, stateDBReadable: true)
+        )
+        let snapshot = await runtime.snapshot()
+        XCTAssertEqual(snapshot.currentThread?.activeTurnID?.rawID, "turn-a")
+        XCTAssertEqual(snapshot.currentState, .thinking)
+        XCTAssertNotEqual(snapshot.currentState, .completed)
+        XCTAssertNotEqual(snapshot.currentState, .idle)
+    }
+
     func testNumericTaskCompleteWithoutErrorFieldIsSuccessTerminal() throws {
         let file = try fixture.rollout("thread-a", lines: [fixture.session("thread-a"), fixture.started("turn-a"), fixture.completeWithoutError("turn-a")])
         try fixture.addThread("thread-a", rollout: file)
@@ -624,6 +682,7 @@ private final class LocalFixture {
     func completeWithoutError(_ turn: String) -> String { "{\"timestamp\":\"2030-01-01T00:00:00Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"task_complete\",\"turn_id\":\"\(turn)\",\"completed_at\":1893456000}}" }
     func itemCompleted(_ turn: String) -> String { "{\"type\":\"event_msg\",\"payload\":{\"type\":\"item_completed\",\"turn_id\":\"\(turn)\"}}" }
     func toolOutput(_ id: String) -> String { "{\"type\":\"response_item\",\"payload\":{\"type\":\"function_call_output\",\"call_id\":\"\(id)\"}}" }
+    func contextMessage(role: String, id: String) -> String { "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"\(role)\",\"id\":\"\(id)\"}}" }
 
     private func executeDatabase(_ sql: String) throws {
         var db: OpaquePointer?; guard sqlite3_open(database.path, &db) == SQLITE_OK else { throw POSIXError(.EIO) }; defer { sqlite3_close(db) }
