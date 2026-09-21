@@ -52,19 +52,16 @@
 
 ## ✨ 1.0.9 Preview 重点更新
 
-- 加固长时间运行任务中的 active-thread arbitration，避免当前活跃线程因短暂 evidence gap 被错误淘汰
-- developer / user / system context record 不再被错误视为 rollout-format failure，从而避免 active → idle → active 的错误状态跳变
-- bounded recent-thread discovery 压力下会继续保留并 exact re-read 已知 active thread
-- stale approval 只能在 exact thread + exact turn owner 下恢复，其他线程的历史 pending approval 不再污染当前代表线程
-- 修复此前观察到的 false-yellow 路径：活跃任务不会再因为 representative thread 错切而继承其他线程的黄色审批状态
-- 真实 `reviewer=user` PermissionRequest 仍会正常显示黄色等待审批 Orb；resolution / terminal 后会正确清除
-- 发布产物新增精确 Git revision 与 UTC build timestamp provenance，便于后续跨机器诊断与安装包追溯
+- 修复长时间任务偶尔被误判为“空闲”的问题，运行中的任务状态现在更稳定
+- 修复没有真实审批时悬浮球偶尔变黄的问题，只有真的需要你处理审批时才会显示黄色
+- 不同 Codex 对话之间的状态隔离更严格，不会再误拿其他对话留下的审批状态
+- 真正需要人工审批时，悬浮球仍会正常变黄；批准或拒绝后会及时恢复
+- 加强长任务、频繁工具调用和多对话同时存在时的状态判断，减少错误切换
+- 安装包现在会记录对应的源码版本和构建时间，方便确认版本来源和后续排查问题
 
-自动化回归：**416 executed / 0 failures / 4 expected skips**。
+本次版本已完成 **416 项自动化测试，0 失败，4 项按预期跳过**。
 
-Runtime arbitration / false-yellow 完整组合 regression：**PASS**。最终同一 DMG 的 packaged smoke QA：**PASS**。
-
-真实 `reviewer=user` 审批 → Yellow → resolution 清除：**PASS**。Artifact provenance verification 与 SHA-256 校验：**PASS**。
+最终发布的同一份 DMG 也完成了实际启动、运行状态、人工审批与恢复流程测试，均为 **PASS**。
 
 > 当前 Preview 仍采用 ad-hoc 签名，尚未使用 Developer ID、Apple Notarization 或 Stapling。macOS Gatekeeper 可能要求用户在首次启动时手动允许。
 <br>
