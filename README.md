@@ -3,7 +3,7 @@
 
 一个原生 macOS Codex 辅助工具，通过菜单栏状态胶囊、桌面悬浮球、Quick View、用量和设置等界面，为 Codex 提供轻量、快速、低打扰的桌面辅助体验。
 
-> **当前版本：Codex Monitor 1.0.9 Preview**
+> **当前版本：Codex Monitor 1.0.10 Preview**
 >
 > Codex Monitor 当前为 Preview，不是 Stable Public Release，也不是 OpenAI 官方产品。部分能力依赖 Codex 的本地接口与本地数据结构，Codex 更新可能暂时影响个别能力；当数据源不可用时，应用会优先显示 Unknown / Unavailable，而不是伪造状态。
 
@@ -13,11 +13,11 @@
 
 ### macOS · Apple Silicon
 
-[![下载 Codex Monitor 1.0.9 Preview](https://img.shields.io/badge/下载-1.0.9%20Preview-black?style=for-the-badge&logo=apple)](https://github.com/BlahBlahBlahBB/Codex-Monitor/releases/download/v1.0.9-preview/Codex-Monitor-1.0.9-Preview-macOS-arm64.dmg)
+[![下载 Codex Monitor 1.0.10 Preview](https://img.shields.io/badge/下载-1.0.10%20Preview-black?style=for-the-badge&logo=apple)](https://github.com/BlahBlahBlahBB/Codex-Monitor/releases/download/v1.0.10-preview/Codex-Monitor-1.0.10-Preview-macOS-arm64.dmg)
 
-- [查看 v1.0.9-preview Release](https://github.com/BlahBlahBlahBB/Codex-Monitor/releases/tag/v1.0.9-preview)
-- DMG SHA256：`b35379039e4168314496499f767127233ea59f1db39ba8557f5b00a208011dab`
-- DMG 大小：`3,582,565 bytes`
+- [查看 v1.0.10-preview Release](https://github.com/BlahBlahBlahBB/Codex-Monitor/releases/tag/v1.0.10-preview)
+- DMG SHA256：`3e2c4607d66348bc2d5593ba38e90df545411fecfa89289d05a0368894e2da41`
+- DMG 大小：`3,625,176 bytes`
 
 > 当前 Preview 为 **arm64 / Apple Silicon only**，采用 ad-hoc 签名，尚未使用 Developer ID、Apple Notarization 或 Stapling。macOS Gatekeeper 可能阻止或警告该 Preview 包；它目前用于 Preview / testing，而不是无警告的正式公开发行。
 
@@ -27,11 +27,10 @@
 
 ### 首次安装
 
-1. 建议直接从本页 GitHub Release 下载 `Codex-Monitor-1.0.9-Preview-macOS-arm64.dmg`
+1. 建议直接从本页 GitHub Release 下载 `Codex-Monitor-1.0.10-Preview-macOS-arm64.dmg`
 2. 打开 DMG
 3. 将 `Codex Monitor.app` 拖入 `/Applications`
 4. 从“应用程序”启动 Codex Monitor
-5. 如果你在安装/首次启用审批监听之前已经打开了 Codex 对话，请新建一个 Codex 对话后再使用审批监控；无需重启 Codex
 
 > 建议直接从 GitHub Release 下载，不要通过聊天或协作应用二次转发安装包。部分沙箱化应用可能为转存文件附加更严格的隔离属性，导致 macOS 无法走常规的“仍要打开 / Open Anyway”流程。
 
@@ -42,7 +41,6 @@
 3. 将新版 `Codex Monitor.app` 拖入 `/Applications`
 4. macOS 提示时选择“替换”
 5. 再从 `/Applications/Codex Monitor.app` 启动
-6. 如果升级前已有打开中的 Codex 对话，需要新建一个对话才能加载新的审批 Hook；无需重启 Codex
 
 请避免同时在 `/Applications` 中保留多个正式版 Codex Monitor 副本。多个使用相同 Bundle ID 的副本可能造成 macOS LaunchServices 启动路径或版本识别混淆。
 
@@ -50,21 +48,18 @@
 
 <br>
 
-## ✨ 1.0.9 Preview 重点更新
+## ✨ 1.0.10 Preview 重点更新
 
-- 修复长时间任务偶尔被误判为“空闲”的问题，运行中的任务状态现在更稳定
-- 修复没有真实审批时悬浮球偶尔变黄的问题，只有真的需要你处理审批时才会显示黄色
-- 不同 Codex 对话之间的状态隔离更严格，不会再误拿其他对话留下的审批状态
-- 真正需要人工审批时，悬浮球仍会正常变黄；批准或拒绝后会及时恢复
-- 加强长任务、频繁工具调用和多对话同时存在时的状态判断，减少错误切换
-- 安装包现在会记录对应的源码版本和构建时间，方便确认版本来源和后续排查问题
-- “关于”页面新增作者信息，点击 `BlahBlahBlahBB` 可直接打开项目 GitHub 页面
+- 恢复当前 Codex Desktop bundled CLI 布局下的实时 quota 读取，并在官方 Account socket 不可用时使用受信任的 bundled app-server fallback
+- 防止 held、stale 或 unavailable quota 被展示为当前额度，强化 reset 边界与 authoritative refresh 处理
+- 阻止仅有 refresh-attempt 活动时产生虚假的 Account presentation 更新
+- 改进 Account refresh diagnostic attribution 与隐私边界
+- 修复 StateDB/WAL diagnostic dedup，避免不同失败被错误合并
 
-本次版本已完成 **416 项自动化测试，0 失败，4 项按预期跳过**。
+自动化回归：**455 executed / 451 passed / 4 expected opt-in skips / 0 failures**。
 
-最终发布的同一份 DMG 也完成了实际启动、运行状态、人工审批与恢复流程测试，均为 **PASS**。
+Packaged App、DMG verify、Real QA 与最终 Release-app smoke：**PASS**。
 
-> 当前 Preview 仍采用 ad-hoc 签名，尚未使用 Developer ID、Apple Notarization 或 Stapling。macOS Gatekeeper 可能要求用户在首次启动时手动允许。
 <br>
 
 ## 📑 简介
@@ -102,7 +97,6 @@ Codex Monitor 采用 Capability-driven（能力驱动）架构。只有当底层
 - 单击快速打开只读状态速览
 - 显示当前会话名称、运行状态与 Session Token（能力可用时）
 - 真实人工审批等待时显示黄色呼吸状态与“等待审批”
-- 当前任务真正完成后显示绿色完成状态，不再由无关后台 task 的 terminal 状态提前覆盖
 
 ### Account / Usage / Quota
 
@@ -126,9 +120,7 @@ Codex Monitor 不会用推测值替代未知值；例如 Quota 无法确认时�
 
 点击等待审批或完成通知会激活 Codex。
 
-等待审批通知只在可确认需要人工处理的审批请求上触发；由 Codex“帮我审批”自动处理、没有进入真实 `reviewer=user` 人工等待状态的请求不会产生黄色审批提醒。通知权限或“等待审批通知”开关不会影响悬浮球本身的黄色审批状态。
-
-Advanced 中可选择开启系统默认**提示音**。提示音关闭时通知静音；开启时使用 macOS 系统默认通知音，不内置自定义音频。
+等待审批通知只在可确认需要人工处理的审批请求上触发；`auto_review` 不会产生误报等待通知。通知权限不会影响悬浮球本身的黄色审批状态。
 
 通知正文只使用经过安全展示链处理的 conversation name，不回退到 raw prompt、文件路径或内部 transcript。
 
@@ -138,7 +130,6 @@ Advanced 中可选择开启系统默认**提示音**。提示音关闭时通知�
 - 用户偏好持久化
 - 悬浮球相关设置
 - 通知与显示设置
-- Advanced：提示音 / Sound
 - Advanced：立即刷新 / Refresh Now
 - Advanced：导出诊断 / Export Diagnostics
 
@@ -169,13 +160,13 @@ Advanced 中可选择开启系统默认**提示音**。提示音关闭时通知�
 
 ## ⚠️ Preview 数据源说明
 
-Codex Monitor 1.0.9 Preview 当前会读取本机 Codex 的本地集成数据面。
+Codex Monitor 1.0.10 Preview 当前会读取本机 Codex 的本地集成数据面。
 
 其中部分 Account 能力使用 Codex app-server 的本地 transport；Desktop runtime / session observation、approval attention 也依赖 Codex 的本地 SQLite / rollout / Hook 等实现细节，这些本地 schema 与事件目前不应被视为稳定 public contract。
 
 因此：
 
-- 1.0.9 定位为 **Preview-only**
+- 1.0.10 定位为 **Preview-only**
 - Codex 更新可能暂时影响某个单独 capability
 - capability 缺失时应用应安全降级
 - 当前不应被描述为 stable production-supported Codex integration
@@ -199,11 +190,10 @@ Codex Monitor 1.0.9 Preview 当前会读取本机 Codex 的本地集成数据面
 - Account / Desktop Local 能力隔离
 - Approval lifecycle 的 exact owner / turn 关联
 - 审批 reviewer 的 exact-turn、distance-independent 查找
-- Approval journal reader 与 notification preference 解耦
 - 审批通知的 exactly-once 与 restart recovery
 - Quota 与 Account refresh 的 coherent snapshot / fail-closed 行为
 - 不把 Unknown 错误表达为真实 `0%`
-- 不让历史 runtime activity 或无关 background terminal 冒充当前 live task completion
+- 不让历史 runtime activity 冒充当前 live activity
 
 <br>
 
@@ -222,7 +212,7 @@ swift test
 Preview release packaging：
 
 ```bash
-VERSION=1.0.9 BUILD=110 RELEASE_LABEL=Preview ./Tools/package_release.sh
+VERSION=1.0.10 BUILD=111 RELEASE_LABEL=Preview ./Tools/package_release.sh
 ```
 
 在未提供 `SIGNING_IDENTITY` 时，脚本生成明确标记的 ad-hoc local Preview；Developer ID / notarization 流程当前尚未启用。
@@ -231,7 +221,7 @@ VERSION=1.0.9 BUILD=110 RELEASE_LABEL=Preview ./Tools/package_release.sh
 
 ## 📌 Release scope
 
-Codex Monitor 1.0.9 Preview 当前验证范围：
+Codex Monitor 1.0.10 Preview 当前验证范围：
 
 - macOS 13+
 - Apple Silicon / arm64
@@ -239,12 +229,11 @@ Codex Monitor 1.0.9 Preview 当前验证范围：
 - 不同 HOME / username，包括空格与 Unicode
 - 不同 Codex Desktop 本地 Account transport topology
 - multi-window quota 与既有 Account / Usage / runtime 行为保持不变
-- packaged app 与 bundled ApprovalObserver helper strict codesign：PASS
-- active/thread arbitration 在 tool-heavy、context-message 与 bounded-discovery 压力下保持正确 representative：PASS
-- foreign / stale approval 不跨 thread / turn 泄漏到当前 Orb：PASS
-- `reviewer=user` 的真实人工审批：黄色 Orb / resolution recovery same-binary Human QA PASS
-- auto-reviewed approval 不进入人工 Yellow attention
-- 真正 task completion 后绿色 Orb 与完成通知顺序保持正确
-- artifact embedded Git revision 与 UTC build timestamp provenance：PASS
-- About / Author link：中文、英文与 GitHub 跳转 QA PASS
-- Release Gate：416 executed / 0 failures / 4 expected skips
+- packaged app 与 bundled ApprovalObserver helper 校验：PASS
+- reviewer=`user` 的真实人工审批流保持 1.0.6 已验证行为
+- reviewer=`auto_review` 的误报抑制流保持 1.0.6 已验证行为
+- 历史真实长 transcript reviewer 回放：`auto_review` PASS
+- 超长 transcript、跨 chunk、exact/latest turn_context、畸形/截断/超限记录测试：PASS
+- 等待审批 / 完成通知与点击激活 Codex：保持既有验证行为
+- signed ApprovalObserver helper 与 Hook/config 完整性契约保持不变
+- Release Gate：455 executed / 451 passed / 4 expected opt-in skips / 0 failures
