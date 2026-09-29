@@ -15,6 +15,8 @@
 
 [![下载 Codex Monitor 1.0.10 Preview](https://img.shields.io/badge/下载-1.0.10%20Preview-black?style=for-the-badge&logo=apple)](https://github.com/BlahBlahBlahBB/Codex-Monitor/releases/download/v1.0.10-preview/Codex-Monitor-1.0.10-Preview-macOS-arm64.dmg)
 
+**[⬇️ 直接下载 Codex Monitor 1.0.10 Preview DMG](https://github.com/BlahBlahBlahBB/Codex-Monitor/releases/download/v1.0.10-preview/Codex-Monitor-1.0.10-Preview-macOS-arm64.dmg)**
+
 - [查看 v1.0.10-preview Release](https://github.com/BlahBlahBlahBB/Codex-Monitor/releases/tag/v1.0.10-preview)
 - DMG SHA256：`3e2c4607d66348bc2d5593ba38e90df545411fecfa89289d05a0368894e2da41`
 - DMG 大小：`3,625,176 bytes`
