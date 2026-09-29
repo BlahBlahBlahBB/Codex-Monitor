@@ -3,7 +3,7 @@
 
 一个原生 macOS Codex 辅助工具，通过菜单栏状态胶囊、桌面悬浮球、Quick View、用量和设置等界面，为 Codex 提供轻量、快速、低打扰的桌面辅助体验。
 
-> **当前版本：Codex Monitor 1.0.7 Preview**
+> **当前版本：Codex Monitor 1.0.10 Preview**
 >
 > Codex Monitor 当前为 Preview，不是 Stable Public Release，也不是 OpenAI 官方产品。部分能力依赖 Codex 的本地接口与本地数据结构，Codex 更新可能暂时影响个别能力；当数据源不可用时，应用会优先显示 Unknown / Unavailable，而不是伪造状态。
 
@@ -13,11 +13,11 @@
 
 ### macOS · Apple Silicon
 
-[![下载 Codex Monitor 1.0.7 Preview](https://img.shields.io/badge/下载-1.0.7%20Preview-black?style=for-the-badge&logo=apple)](https://github.com/BlahBlahBlahBB/Codex-Monitor/releases/download/v1.0.7-preview/Codex-Monitor-1.0.7-RC1-macOS-arm64.dmg)
+[![下载 Codex Monitor 1.0.10 Preview](https://img.shields.io/badge/下载-1.0.10%20Preview-black?style=for-the-badge&logo=apple)](https://github.com/BlahBlahBlahBB/Codex-Monitor/releases/download/v1.0.10-preview/Codex-Monitor-1.0.10-Preview-macOS-arm64.dmg)
 
-- [查看 v1.0.7-preview Release](https://github.com/BlahBlahBlahBB/Codex-Monitor/releases/tag/v1.0.7-preview)
-- DMG SHA256：`2666bc4287002fd1517af1a6c1c57b2cf723f8e0206eb8e77ea2f41a5030af83`
-- DMG 大小：`3,549,710 bytes`
+- [查看 v1.0.10-preview Release](https://github.com/BlahBlahBlahBB/Codex-Monitor/releases/tag/v1.0.10-preview)
+- DMG SHA256：`3e2c4607d66348bc2d5593ba38e90df545411fecfa89289d05a0368894e2da41`
+- DMG 大小：`3,625,176 bytes`
 
 > 当前 Preview 为 **arm64 / Apple Silicon only**，采用 ad-hoc 签名，尚未使用 Developer ID、Apple Notarization 或 Stapling。macOS Gatekeeper 可能阻止或警告该 Preview 包；它目前用于 Preview / testing，而不是无警告的正式公开发行。
 
@@ -27,7 +27,7 @@
 
 ### 首次安装
 
-1. 建议直接从本页 GitHub Release 下载 `Codex-Monitor-1.0.7-RC1-macOS-arm64.dmg`
+1. 建议直接从本页 GitHub Release 下载 `Codex-Monitor-1.0.10-Preview-macOS-arm64.dmg`
 2. 打开 DMG
 3. 将 `Codex Monitor.app` 拖入 `/Applications`
 4. 从“应用程序”启动 Codex Monitor
@@ -48,24 +48,17 @@
 
 <br>
 
-## ✨ 1.0.7 Preview 重点更新
+## ✨ 1.0.10 Preview 重点更新
 
-- 修复长 transcript 下 Approval Attention reviewer 识别可能失效的问题：reviewer 查找不再依赖 `turn_context` 距 transcript EOF 的固定尾部窗口
-- ApprovalObserver 改为有界内存的反向精确扫描，继续保持 exact `turn_id` 与最新顶层 `turn_context` 匹配；单条 JSONL 记录保留 8 MiB 安全上限，未知或异常输入继续保守返回 `unknown`
-- 修复真实 `auto_review` turn 因上下文距离过远被误判为 `unknown`，进而可能触发黄色等待审批状态 / 等待审批通知的问题
-- 延续 1.0.6 的真实 **等待审批 / Waiting for approval** 状态、app-managed 审批集成与签名验证的 **ApprovalObserver** helper
-- 延续 **等待审批通知** 与 **完成通知**，点击通知可直接激活 Codex；通知仍采用 crash-safe、exactly-once 的持久化处理与重启恢复
-- Approval Attention Filter 继续使用 exact-turn reviewer 分类：`user` 保留真实人工审批提醒，`auto_review` 不产生等待审批误报；未知状态继续保守处理
-- Settings 保持已清理后的结构：移除实验性审批黄灯 Beta 与 Settings-only“打开 Codex”，将“导出诊断”和“立即刷新”统一保留在 Advanced
-- 延续既有 multi-window quota、Account、Usage、runtime-state、task-title 与 diagnostics export 行为
+- 恢复当前 Codex Desktop bundled CLI 布局下的实时 quota 读取，并在官方 Account socket 不可用时使用受信任的 bundled app-server fallback
+- 防止 held、stale 或 unavailable quota 被展示为当前额度，强化 reset 边界与 authoritative refresh 处理
+- 阻止仅有 refresh-attempt 活动时产生虚假的 Account presentation 更新
+- 改进 Account refresh diagnostic attribution 与隐私边界
+- 修复 StateDB/WAL diagnostic dedup，避免不同失败被错误合并
 
-自动化回归：**388 executed / 384 passed / 4 skipped / 0 failures**。
+自动化回归：**455 executed / 451 passed / 4 expected opt-in skips / 0 failures**。
 
-Packaged App、ApprovalObserver strict codesign、DMG verify 与 release smoke：**PASS**。包内 helper 对历史真实长 transcript 的只读回放结果为 `auto_review`。
-
-> 已知 Preview 限制：人工点击 Reject 后，黄色等待状态可能短暂维持，直到 Codex 发出可安全关联的后续 resolution event；这不会导致已拒绝的命令继续执行，也不会重复发送等待审批通知。
->
-> 1.0.7 不声称修复 Codex Desktop 0.153.3 自身的原生 Guardian / approval UI 行为，也不声称修复 Codex 进入 Guardian routing 但未保留 `PermissionRequest` Hook dispatch 的上游情况。
+Packaged App、DMG verify、Real QA 与最终 Release-app smoke：**PASS**。
 
 <br>
 
@@ -167,13 +160,13 @@ Codex Monitor 不会用推测值替代未知值；例如 Quota 无法确认时�
 
 ## ⚠️ Preview 数据源说明
 
-Codex Monitor 1.0.7 Preview 当前会读取本机 Codex 的本地集成数据面。
+Codex Monitor 1.0.10 Preview 当前会读取本机 Codex 的本地集成数据面。
 
 其中部分 Account 能力使用 Codex app-server 的本地 transport；Desktop runtime / session observation、approval attention 也依赖 Codex 的本地 SQLite / rollout / Hook 等实现细节，这些本地 schema 与事件目前不应被视为稳定 public contract。
 
 因此：
 
-- 1.0.7 定位为 **Preview-only**
+- 1.0.10 定位为 **Preview-only**
 - Codex 更新可能暂时影响某个单独 capability
 - capability 缺失时应用应安全降级
 - 当前不应被描述为 stable production-supported Codex integration
@@ -219,7 +212,7 @@ swift test
 Preview release packaging：
 
 ```bash
-VERSION=1.0.7 BUILD=107 RELEASE_LABEL=RC1 ./Tools/package_release.sh
+VERSION=1.0.10 BUILD=111 RELEASE_LABEL=Preview ./Tools/package_release.sh
 ```
 
 在未提供 `SIGNING_IDENTITY` 时，脚本生成明确标记的 ad-hoc local Preview；Developer ID / notarization 流程当前尚未启用。
@@ -228,7 +221,7 @@ VERSION=1.0.7 BUILD=107 RELEASE_LABEL=RC1 ./Tools/package_release.sh
 
 ## 📌 Release scope
 
-Codex Monitor 1.0.7 Preview 当前验证范围：
+Codex Monitor 1.0.10 Preview 当前验证范围：
 
 - macOS 13+
 - Apple Silicon / arm64
@@ -243,4 +236,4 @@ Codex Monitor 1.0.7 Preview 当前验证范围：
 - 超长 transcript、跨 chunk、exact/latest turn_context、畸形/截断/超限记录测试：PASS
 - 等待审批 / 完成通知与点击激活 Codex：保持既有验证行为
 - signed ApprovalObserver helper 与 Hook/config 完整性契约保持不变
-- Release Gate：388 executed / 384 passed / 4 skipped / 0 failures
+- Release Gate：455 executed / 451 passed / 4 expected opt-in skips / 0 failures
