@@ -21,6 +21,8 @@
 "activity.noSession" = "No session";
 "activity.currentTask" = "Current task";
 "update.updated" = "Updated %@";
+"account.updated" = "Data updated %@";
+"quota.current" = "Current quota";
 "runtime.unknown" = "Runtime Unknown";
 "quota.remaining" = "Remaining quota %@";
 "session.tokenQuota" = "Session Token %@ · Remaining quota %@";

@@ -489,6 +489,7 @@ enum MonitorDisplayValue {
     }
 
     static func remainingQuota(_ snapshot: MonitorRuntimeSnapshot?) -> String {
+        guard snapshot?.accountFreshness == .fresh else { return "--" }
         guard let selected = selectedQuotaWindow(snapshot) else {
             return availability(snapshot?.quota.primaryAvailability)
         }
@@ -641,9 +642,17 @@ enum MonitorDisplayValue {
     }
 
     static func update(_ snapshot: MonitorRuntimeSnapshot?) -> String {
-        guard let snapshot, snapshot.sourceHealth[.desktopLocal]?.availability == .available else { return L10n.tr("state.sourceUnavailable") }
+        guard let snapshot else { return L10n.tr("state.sourceUnavailable") }
         let formatter = DateFormatter()
         formatter.timeStyle = .short
+        // Account freshness is a separate authority lane. Never use the
+        // runtime snapshot capture time (or a failed refresh attempt) as the
+        // quota's data-update timestamp.
+        if let authoritativeAccountAt = snapshot.sourceHealth[.account]?.freshness.observedAt,
+           snapshot.accountFreshness != .unavailable {
+            return String(format: L10n.tr("account.updated"), formatter.string(from: authoritativeAccountAt))
+        }
+        guard snapshot.sourceHealth[.desktopLocal]?.availability == .available else { return L10n.tr("state.sourceUnavailable") }
         return String(format: L10n.tr("update.updated"), formatter.string(from: snapshot.capturedAt))
     }
 

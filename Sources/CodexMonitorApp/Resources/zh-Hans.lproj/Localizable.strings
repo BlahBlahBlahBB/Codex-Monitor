@@ -21,6 +21,8 @@
 "activity.noSession" = "暂无会话";
 "activity.currentTask" = "当前任务";
 "update.updated" = "更新于 %@";
+"account.updated" = "数据更新于 %@";
+"quota.current" = "当前额度";
 "runtime.unknown" = "运行时未知";
 "quota.remaining" = "剩余额度 %@";
 "session.tokenQuota" = "会话 Token %@ · 剩余额度 %@";

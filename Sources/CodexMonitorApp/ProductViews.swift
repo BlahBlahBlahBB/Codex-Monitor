@@ -64,6 +64,11 @@ struct MenuBarPopoverView: View {
                         MonitorPopoverRow(label: window.quotaRowLabel, value: window.remainingText)
                         MonitorPopoverRow(label: window.resetRowLabel, value: window.resetDateTime())
                     }
+                    if QuotaWindowPresentation.windows(from: snapshot).isEmpty,
+                       let snapshot,
+                       snapshot.accountFreshness != .fresh {
+                        MonitorPopoverRow(label: L10n.tr("quota.current"), value: "--")
+                    }
                     MonitorPopoverRow(label: L10n.tr("label.resetCredit"), value: MonitorDisplayValue.reset(snapshot))
                     if let quotaNotice = quotaNotice(snapshot) {
                         Text(quotaNotice)
@@ -911,7 +916,7 @@ private struct AdvancedSettingsDetail: View {
             case .failure(let failure):
                 switch failure {
                 case .downloadsUnavailable: L10n.tr("settings.diagnosticsDownloadsUnavailable")
-                case .writeFailed, .noAvailableFilename: L10n.tr("settings.diagnosticsExportFailed")
+                case .archiveCreationFailed, .writeFailed, .noAvailableFilename: L10n.tr("settings.diagnosticsExportFailed")
                 }
             }
         }

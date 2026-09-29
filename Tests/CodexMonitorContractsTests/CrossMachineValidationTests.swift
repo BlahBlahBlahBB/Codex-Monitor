@@ -78,9 +78,9 @@ final class CrossMachineValidationTests: XCTestCase {
         let runtime = MonitorRuntimeStore(initialPhase: .live)
 
         var snapshot = await runtime.snapshot()
-        XCTAssertEqual(snapshot.account.availability, .unknown)
+        XCTAssertEqual(snapshot.account.availability, .unavailable)
         XCTAssertNil(snapshot.account.accountKind)
-        XCTAssertEqual(snapshot.quota.primaryAvailability, .unknown)
+        XCTAssertEqual(snapshot.quota.primaryAvailability, .stale)
         XCTAssertNil(snapshot.quota.primary)
         XCTAssertEqual(MonitorDisplayValue.orbQuota(snapshot), "--")
         XCTAssertNotEqual(MonitorDisplayValue.remainingQuota(snapshot), "0%")
@@ -89,7 +89,7 @@ final class CrossMachineValidationTests: XCTestCase {
         // It must not invent a zero quota or a placeholder account.
         await runtime.markAccountRefreshDegraded()
         snapshot = await runtime.snapshot()
-        XCTAssertEqual(snapshot.account.availability, .unknown)
+        XCTAssertEqual(snapshot.account.availability, .unavailable)
         XCTAssertEqual(MonitorDisplayValue.orbQuota(snapshot), "--")
 
         await runtime.ingest(account: try accountSnapshot(email: "alice@example.test", usedPercent: 40, tokens: 45))

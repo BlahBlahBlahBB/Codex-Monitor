@@ -5,6 +5,135 @@ import CSQLite
 @testable import CodexMonitorApp
 
 final class CodexLocalMonitorDriverTests: XCTestCase {
+    func testStateDBTransientWALDiagnosticIsDeduplicatedThenReemittedAfterRecovery() async throws {
+        let fixture = try DriverFixture(turn: "t1", terminal: false)
+        defer { fixture.cleanup() }
+        let recorder = DriverDiagnosticRecorder()
+        let driver = fixture.driver(runtime: MonitorRuntimeStore(), resolver: nil, diagnosticRecorder: { recorder.record($0) })
+
+        await driver.refreshOnce() // valid main DB, WAL absent
+        recorder.clear()
+
+        var writer: OpaquePointer?
+        XCTAssertEqual(sqlite3_open_v2(fixture.database.path, &writer, SQLITE_OPEN_READWRITE | SQLITE_OPEN_FULLMUTEX, nil), SQLITE_OK)
+        guard let firstWriter = writer else { return XCTFail("Could not open WAL fixture writer") }
+        try sql(firstWriter, "PRAGMA journal_mode = WAL")
+        try sql(firstWriter, "UPDATE threads SET updated_at = 2 WHERE id = 'thread-a'")
+        let walURL = URL(fileURLWithPath: fixture.database.path + "-wal")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: walURL.path))
+        try FileManager.default.removeItem(at: walURL)
+
+        await driver.refreshOnce()
+        XCTAssertEqual(recorder.count(event: "STATE_DB_TRANSIENT_WAL_MISSING"), 1)
+        XCTAssertEqual(recorder.count(event: "STATE_DB_READ_FAILURE"), 0)
+        await driver.refreshOnce()
+        await driver.refreshOnce()
+        XCTAssertEqual(recorder.count(event: "STATE_DB_TRANSIENT_WAL_MISSING"), 1)
+
+        sqlite3_close(firstWriter)
+        writer = nil
+        var recoveryWriter: OpaquePointer?
+        XCTAssertEqual(sqlite3_open_v2(fixture.database.path, &recoveryWriter, SQLITE_OPEN_READWRITE | SQLITE_OPEN_FULLMUTEX, nil), SQLITE_OK)
+        guard let recoveryWriter else { return XCTFail("Could not reopen WAL fixture writer") }
+        try sql(recoveryWriter, "PRAGMA journal_mode = WAL")
+        try sql(recoveryWriter, "UPDATE threads SET updated_at = 3 WHERE id = 'thread-a'")
+        await driver.refreshOnce() // success clears the deduplication gate
+        try FileManager.default.removeItem(at: walURL)
+        await driver.refreshOnce()
+        XCTAssertEqual(recorder.count(event: "STATE_DB_TRANSIENT_WAL_MISSING"), 2)
+        XCTAssertEqual(recorder.count(event: "STATE_DB_READ_FAILURE"), 0)
+
+        sqlite3_close(recoveryWriter)
+        try FileManager.default.removeItem(at: fixture.database)
+        await driver.refreshOnce()
+        XCTAssertEqual(recorder.count(event: "STATE_DB_READ_FAILURE"), 1)
+        await driver.refreshOnce()
+        XCTAssertEqual(recorder.count(event: "STATE_DB_READ_FAILURE"), 1)
+    }
+
+    func testDistinctStateDBFailuresDoNotCollapseIntoOneDedupEpisode() async throws {
+        let fixture = try DriverFixture(turn: "t1", terminal: false)
+        defer { fixture.cleanup() }
+        let recorder = DriverDiagnosticRecorder()
+        let driver = fixture.driver(runtime: MonitorRuntimeStore(), resolver: nil, diagnosticRecorder: { recorder.record($0) })
+        await driver.refreshOnce()
+        recorder.clear()
+
+        var database: OpaquePointer?
+        XCTAssertEqual(sqlite3_open_v2(fixture.database.path, &database, SQLITE_OPEN_READWRITE | SQLITE_OPEN_FULLMUTEX, nil), SQLITE_OK)
+        guard let database else { return XCTFail("Could not open StateDB fixture") }
+        try sql(database, "PRAGMA user_version = 1")
+        sqlite3_close(database)
+        await driver.refreshOnce() // schemaMismatch
+
+        try FileManager.default.removeItem(at: fixture.database)
+        await driver.refreshOnce() // readOnlyOpenFailed: distinct fatal StateDBError
+
+        let failures = recorder.events().filter { $0["event"] == "STATE_DB_READ_FAILURE" }
+        XCTAssertEqual(failures.count, 2)
+        XCTAssertEqual(failures.map { $0["failure"] }, ["stateDB:schemaMismatch", "stateDB:readOnlyOpenFailed"])
+    }
+
+    func testStateDBTransitionChainSuppressesOnlyConsecutiveDuplicate() async throws {
+        let fixture = try DriverFixture(turn: "t1", terminal: false)
+        defer { fixture.cleanup() }
+        let recorder = DriverDiagnosticRecorder()
+        let driver = fixture.driver(runtime: MonitorRuntimeStore(), resolver: nil, diagnosticRecorder: { recorder.record($0) })
+        await driver.refreshOnce()
+        recorder.clear()
+
+        try fixture.setStateDBUserVersion(1)
+        await driver.refreshOnce() // A: schemaMismatch
+        try FileManager.default.removeItem(at: fixture.database)
+        await driver.refreshOnce() // B: readOnlyOpenFailed
+        await driver.refreshOnce() // B: exact duplicate, suppressed
+        try fixture.recreateStateDatabase()
+        try fixture.setStateDBUserVersion(1)
+        await driver.refreshOnce() // A: schemaMismatch, new transition
+
+        let failures = recorder.events().filter { $0["event"] == "STATE_DB_READ_FAILURE" }
+        XCTAssertEqual(failures.map { $0["failure"] }, [
+            "stateDB:schemaMismatch",
+            "stateDB:readOnlyOpenFailed",
+            "stateDB:schemaMismatch"
+        ])
+    }
+
+    func testStateDBSuccessResetsEpisodeBeforeDifferentFailure() async throws {
+        let fixture = try DriverFixture(turn: "t1", terminal: false)
+        defer { fixture.cleanup() }
+        let recorder = DriverDiagnosticRecorder()
+        let driver = fixture.driver(runtime: MonitorRuntimeStore(), resolver: nil, diagnosticRecorder: { recorder.record($0) })
+        await driver.refreshOnce()
+        recorder.clear()
+
+        try fixture.setStateDBUserVersion(1)
+        await driver.refreshOnce() // A: schemaMismatch
+        try fixture.setStateDBUserVersion(0)
+        await driver.refreshOnce() // production success resets the episode
+        try FileManager.default.removeItem(at: fixture.database)
+        await driver.refreshOnce() // B: readOnlyOpenFailed
+
+        let failures = recorder.events().filter { $0["event"] == "STATE_DB_READ_FAILURE" }
+        XCTAssertEqual(failures.map { $0["failure"] }, ["stateDB:schemaMismatch", "stateDB:readOnlyOpenFailed"])
+    }
+
+    func testStateDBDiagnosticFinalFieldsDoNotLeakFixturePathMarker() async throws {
+        let marker = "SYNTHETIC_STATEDB_PATH_MARKER"
+        let fixture = try DriverFixture(turn: "t1", terminal: false, diagnosticPathMarker: marker)
+        defer { fixture.cleanup() }
+        let recorder = DriverDiagnosticRecorder()
+        let driver = fixture.driver(runtime: MonitorRuntimeStore(), resolver: nil, diagnosticRecorder: { recorder.record($0) })
+        await driver.refreshOnce()
+        recorder.clear()
+
+        try FileManager.default.removeItem(at: fixture.database)
+        await driver.refreshOnce()
+
+        let emitted = try XCTUnwrap(recorder.events().first { $0["event"] == "STATE_DB_READ_FAILURE" })
+        XCTAssertFalse(emitted.values.joined(separator: "|").contains(marker))
+    }
+
     func testProductionDriverBootstrapRestoresExactPendingFromCheckpointRoundTrip() async throws {
         let fixture = try DriverFixture(turn: "t1", terminal: false)
         defer { fixture.cleanup() }
@@ -612,10 +741,12 @@ final class CodexLocalMonitorDriverTests: XCTestCase {
 
 private final class DriverFixture {
     let root: URL; let checkpoint: URL; let journalSource = FixtureJournalSource()
+    var database: URL { root.appendingPathComponent("state_5.sqlite") }
     private let threadARollout: URL
     private let threadBRollout: URL?
-    init(turn: String, terminal: Bool, includeSecondThread: Bool = false) throws {
-        root = FileManager.default.temporaryDirectory.appendingPathComponent("driver-hook-\(UUID().uuidString)")
+    init(turn: String, terminal: Bool, includeSecondThread: Bool = false, diagnosticPathMarker: String? = nil) throws {
+        let rootName = diagnosticPathMarker.map { "driver-hook-\($0)-\(UUID().uuidString)" } ?? "driver-hook-\(UUID().uuidString)"
+        root = FileManager.default.temporaryDirectory.appendingPathComponent(rootName)
         checkpoint = root.appendingPathComponent("checkpoint.json")
         let sessions = root.appendingPathComponent("sessions")
         try FileManager.default.createDirectory(at: sessions, withIntermediateDirectories: true)
@@ -645,8 +776,8 @@ private final class DriverFixture {
         let record = try XCTUnwrap(HookApprovalJournalRecord(journalEventID: eventID, kind: .permissionRequest, sourceID: owner.sourceID, sessionID: owner.sessionID, turnID: owner.turnID, observedAtMilliseconds: 1))
         journalSource.records = [try JSONEncoder().encode(record)]
     }
-    func driver(runtime: MonitorRuntimeStore, resolver: (any HookApprovalIdentityResolving)?, approvalCheckpointStore: (any ApprovalLifecycleCheckpointStoring)? = nil, processIsRunning: @escaping @Sendable () -> Bool = { true }, approvalNotificationDelivery: @escaping @Sendable (ApprovalNotificationOutboxIntent) async -> ApprovalNotificationDeliveryDisposition = { _ in .retry }) -> CodexLocalMonitorDriver {
-        CodexLocalMonitorDriver(runtime: runtime, codexRoot: root, hookJournalSource: journalSource, hookIdentityResolver: resolver, approvalCheckpointURL: checkpoint, approvalCheckpointStore: approvalCheckpointStore, processIsRunning: processIsRunning, approvalNotificationDelivery: approvalNotificationDelivery)
+    func driver(runtime: MonitorRuntimeStore, resolver: (any HookApprovalIdentityResolving)? , approvalCheckpointStore: (any ApprovalLifecycleCheckpointStoring)? = nil, processIsRunning: @escaping @Sendable () -> Bool = { true }, approvalNotificationDelivery: @escaping @Sendable (ApprovalNotificationOutboxIntent) async -> ApprovalNotificationDeliveryDisposition = { _ in .retry }, diagnosticRecorder: (@Sendable ([String: String]) -> Void)? = nil) -> CodexLocalMonitorDriver {
+        CodexLocalMonitorDriver(runtime: runtime, codexRoot: root, hookJournalSource: journalSource, hookIdentityResolver: resolver, approvalCheckpointURL: checkpoint, approvalCheckpointStore: approvalCheckpointStore, processIsRunning: processIsRunning, approvalNotificationDelivery: approvalNotificationDelivery, diagnosticRecorder: diagnosticRecorder)
     }
 
     func appendSourcePermissionRequest(reviewer: String, key: Data) throws {
@@ -720,12 +851,35 @@ private final class DriverFixture {
             try sql(db, "INSERT INTO threads VALUES ('\(id)', '\(rollout.path)', 'idle-\(index)', 'gpt-test', 'high', \(100 + index), 0)")
         }
     }
+    func setStateDBUserVersion(_ version: Int) throws {
+        var db: OpaquePointer?
+        guard sqlite3_open(database.path, &db) == SQLITE_OK else { throw POSIXError(.EIO) }
+        defer { sqlite3_close(db) }
+        try sql(db, "PRAGMA user_version = \(version)")
+    }
+    func recreateStateDatabase() throws {
+        var db: OpaquePointer?
+        guard sqlite3_open(database.path, &db) == SQLITE_OK else { throw POSIXError(.EIO) }
+        defer { sqlite3_close(db) }
+        try sql(db, "PRAGMA user_version = 0")
+        try sql(db, "CREATE TABLE threads (id TEXT PRIMARY KEY, rollout_path TEXT NOT NULL, title TEXT, model TEXT, reasoning_effort TEXT, updated_at INTEGER, tokens_used INTEGER)")
+        try sql(db, "INSERT INTO threads VALUES ('thread-a', '\(threadARollout.path)', 'safe', 'gpt-test', 'high', 1, 0)")
+    }
     func cleanup() { try? FileManager.default.removeItem(at: root) }
 }
 
 private final class FixtureJournalSource: HookApprovalJournalSource, @unchecked Sendable {
     var records: [Data] = []; var failReads = false
     func readRecords() throws -> [Data] { if failReads { throw POSIXError(.EIO) }; return records }
+}
+
+private final class DriverDiagnosticRecorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var fields: [[String: String]] = []
+    func record(_ value: [String: String]) { lock.lock(); defer { lock.unlock() }; fields.append(value) }
+    func clear() { lock.lock(); defer { lock.unlock() }; fields.removeAll() }
+    func count(event: String) -> Int { lock.lock(); defer { lock.unlock() }; return fields.count { $0["event"] == event } }
+    func events() -> [[String: String]] { lock.lock(); defer { lock.unlock() }; return fields }
 }
 private actor ApprovalOutboxDeliveryRecorder {
     private var requestIdentifiers = Set<String>()

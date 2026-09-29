@@ -168,7 +168,7 @@ public enum JSONRPCTransportError: Error, Sendable, Equatable {
     case protocolError(code: Int), transportFailure(TransportFailureCode), webSocketClosed(status: Int?, reason: String?)
 }
 
-public enum TransportFailureCode: String, Sendable, Equatable { case socketOpenFailed, socketSendFailed, socketReceiveFailed, nonTextFrame, incompleteFrame, socketClosed }
+public enum TransportFailureCode: String, Sendable, Equatable { case socketOpenFailed, processLaunchFailed, socketSendFailed, socketReceiveFailed, nonTextFrame, incompleteFrame, socketClosed }
 
 public enum SocketPathProvenance: Sendable, Equatable { case officialDefault, monitorOwnedRuntimeLaunch(RuntimeInstanceID), testHarness }
 

@@ -190,14 +190,24 @@ final class MonitorProductIntegrationTests: XCTestCase {
         XCTAssertTrue(FileManager.default.fileExists(atPath: first.path))
         XCTAssertTrue(FileManager.default.fileExists(atPath: second.path))
 
-        let archiveText = String(decoding: try Data(contentsOf: first), as: UTF8.self)
-        for expected in ["runtime-state.jsonl", "presentation.jsonl", "localization.jsonl", "settings.jsonl", "popover.jsonl", "usage-chart.jsonl", "orb-host.jsonl", "orb-layer-tree.txt", "preferences-sanitized.json", "build.txt"] {
+        let archiveText = try archiveToolOutput(["-Z1", first.path])
+        let expectedEntries = ["runtime-state.jsonl", "presentation.jsonl", "localization.jsonl", "settings.jsonl", "popover.jsonl", "usage-chart.jsonl", "orb-host.jsonl", "orb-layer-tree.txt", "preferences-sanitized.json", "build.txt"]
+        for expected in expectedEntries {
             XCTAssertTrue(archiveText.contains(expected), "missing archive entry: \(expected)")
         }
-        XCTAssertTrue(archiveText.contains("maintenanceExport"))
-        XCTAssertTrue(archiveText.contains("\"tokens\":\"42\""))
-        XCTAssertFalse(archiveText.contains("api_key"))
-        XCTAssertFalse(archiveText.contains("must-not-appear"))
+        XCTAssertNoThrow(try archiveToolOutput(["-t", first.path]))
+        XCTAssertTrue(try archiveToolOutput(["-lv", first.path]).contains("Defl:"), "export must use DEFLATE")
+        let rawEntryBytes = try expectedEntries.map { try archiveToolOutput(["-p", first.path, $0]).utf8.count }
+        let rawBytes = rawEntryBytes.reduce(0, +)
+        let zipBytes = try Data(contentsOf: first).count
+        let largestEntryBytes = rawEntryBytes.max() ?? 0
+        let compressionRatio = String(format: "%.4f", Double(zipBytes) / Double(rawBytes))
+        print("DIAGNOSTICS_EXPORT_STATS rawBytes=\(rawBytes) zipBytes=\(zipBytes) ratio=\(compressionRatio) largestEntryBytes=\(largestEntryBytes) entryCount=\(expectedEntries.count)")
+        let settings = try archiveToolOutput(["-p", first.path, "settings.jsonl"])
+        XCTAssertTrue(settings.contains("maintenanceExport"))
+        XCTAssertTrue(settings.contains("\"tokens\":\"42\""))
+        XCTAssertFalse(settings.contains("api_key"))
+        XCTAssertFalse(settings.contains("must-not-appear"))
 
         let unavailableDirectory = directory.appendingPathComponent("not-a-directory")
         try Data("file".utf8).write(to: unavailableDirectory)
@@ -207,6 +217,102 @@ final class MonitorProductIntegrationTests: XCTestCase {
         } catch {
             XCTAssertEqual(DiagnosticsExportFailure.sanitizedCode(for: error), .writeFailed)
         }
+    }
+
+    func testDiagnosticsRetainsTwoMillionRepeatedEventsWithinHardCap() async throws {
+        let diagnostics = MonitorDiagnostics(retentionPolicy: .init(perCategoryRecordLimit: 500, perCategoryByteLimit: 512 * 1024, totalByteLimit: 2 * 1024 * 1024))
+        await diagnostics.recordRepeated(.state, fields: ["event": "runtimeSnapshotApply", "accepted": "false", "changedFields": "none", "decisionReason": "unchanged"], count: 1_000_000)
+        await diagnostics.recordRepeated(.state, fields: ["event": "STATE_DB_TRANSIENT_WAL_MISSING", "caller": "stress", "error": "transient"], count: 1_000_000)
+        for event in ["freshToHeld", "heldToStale", "staleToFresh", "approvalTransition", "activeToIdleToActive"] {
+            await diagnostics.record(.state, ["event": event])
+        }
+        let statistics = await diagnostics.retentionStatistics()
+        let stateRetainedRecords = statistics.retainedRecordsByCategory["state", default: 0]
+        let retainedEventNames = statistics.retainedEventNames.sorted().joined(separator: ",")
+        print("DIAGNOSTICS_STRESS_STATS inputRuntimeSnapshotApply=1000000 inputTransientWAL=1000000 inputTotal=2000005 retainedRecords=\(statistics.retainedRecords) retainedBytes=\(statistics.retainedBytes) droppedRecords=\(statistics.droppedRecords) aggregatedEvents=\(statistics.aggregatedEvents) stateRetainedRecords=\(stateRetainedRecords) retainedEventNames=\(retainedEventNames) hardCapBytes=2097152")
+        XCTAssertLessThanOrEqual(statistics.retainedRecords, 500)
+        XCTAssertLessThanOrEqual(statistics.retainedBytes, 2 * 1024 * 1024)
+        XCTAssertEqual(statistics.aggregatedEvents, 2_000_005)
+        XCTAssertTrue(statistics.retainedEventNames.isSuperset(of: ["freshToHeld", "heldToStale", "staleToFresh", "approvalTransition", "activeToIdleToActive"]))
+    }
+
+    func testDiagnosticsEvictsNonAggregatableRecordsOldestFirstWithinHardCap() async throws {
+        let policy = DiagnosticRetentionPolicy()
+        let diagnostics = MonitorDiagnostics(retentionPolicy: policy)
+        let detail = String(repeating: "x", count: 220)
+        var injected = 0
+        for category in MonitorDiagnosticCategory.allCases {
+            for index in 0..<500 {
+                await diagnostics.record(category, [
+                    "event": "nonAggregatable.\(category.rawValue).\(index)",
+                    "detailA": detail, "detailB": detail, "detailC": detail,
+                    "detailD": detail, "detailE": detail
+                ])
+                injected += 1
+            }
+        }
+        await diagnostics.record(.state, ["event": "transition.tail"])
+        injected += 1
+
+        let statistics = await diagnostics.retentionStatistics()
+        let retainedState = statistics.retainedRecordsByCategory["state", default: 0]
+        print("DIAGNOSTICS_EVICTION_STATS injected=\(injected) retained=\(statistics.retainedRecords) dropped=\(statistics.droppedRecords) retainedBytes=\(statistics.retainedBytes) totalCapBytes=\(policy.totalByteLimit) retainedState=\(retainedState)")
+        XCTAssertLessThanOrEqual(statistics.retainedRecords, policy.perCategoryRecordLimit * MonitorDiagnosticCategory.allCases.count)
+        XCTAssertLessThanOrEqual(statistics.retainedBytes, policy.totalByteLimit)
+        XCTAssertEqual(statistics.droppedRecords + UInt64(statistics.retainedRecords), UInt64(injected))
+        XCTAssertGreaterThan(statistics.droppedRecords, 0)
+        XCTAssertFalse(statistics.retainedEventNames.contains("nonAggregatable.state.0"))
+        XCTAssertTrue(statistics.retainedEventNames.contains("transition.tail"))
+    }
+
+    func testDiagnosticsArchiveUsesDeflateAndPreservesUnicodeAndEmptyEntries() throws {
+        let entries = [
+            (name: "empty.txt", data: Data()),
+            (name: "诊断-✓.txt", data: Data(String(repeating: "compressible diagnostics data ", count: 400).utf8))
+        ]
+        let rawBytes = entries.reduce(0) { $0 + $1.data.count }
+        let archive = try DiagnosticsZIPArchive.make(entries: entries, date: Date())
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("CodexMonitorZIPTests-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let archiveURL = directory.appendingPathComponent("diagnostics.zip")
+        try archive.write(to: archiveURL)
+
+        XCTAssertNoThrow(try archiveToolOutput(["-t", archiveURL.path]))
+        let listing = try archiveToolOutput(["-Z1", archiveURL.path])
+        XCTAssertTrue(listing.contains("empty.txt"))
+        XCTAssertEqual(try archiveToolOutput(["-p", archiveURL.path, "empty.txt"]), "")
+        XCTAssertEqual(try archiveToolOutput(["-p", archiveURL.path, "诊断-✓.txt"]), String(decoding: entries[1].data, as: UTF8.self))
+        let verbose = try archiveToolOutput(["-lv", archiveURL.path])
+        XCTAssertTrue(verbose.contains("Defl:"), "archive must use DEFLATE")
+
+        let before = try temporaryDiagnosticsArchiveRoots()
+        XCTAssertThrowsError(try DiagnosticsZIPArchive.make(entries: [(name: "../escape", data: Data("x".utf8))], date: Date()))
+        XCTAssertEqual(try temporaryDiagnosticsArchiveRoots(), before)
+        let compressionRatio = String(format: "%.4f", Double(archive.count) / Double(rawBytes))
+        print("DIAGNOSTICS_ZIP_STATS rawBytes=\(rawBytes) zipBytes=\(archive.count) ratio=\(compressionRatio) entryCount=2")
+    }
+
+    func testDiagnosticsExportSanitizesAdversarialSensitiveFields() async throws {
+        let markers = [
+            "APIKEY_TEST_DO_NOT_LEAK", "BEARER_TEST_DO_NOT_LEAK", "COOKIE_TEST_DO_NOT_LEAK",
+            "EMAIL_TEST_DO_NOT_LEAK@example.com", "PROMPT_TEST_DO_NOT_LEAK", "CONVERSATION_TEST_DO_NOT_LEAK",
+            "TRANSCRIPT_TEST_DO_NOT_LEAK", "RAW_SERVER_ERROR_TEST_DO_NOT_LEAK", "/private/user/secret/path/TEST_DO_NOT_LEAK"
+        ]
+        let sensitiveFields = [
+            "apiKey": markers[0], "bearer": markers[1], "cookie": markers[2], "email": markers[3],
+            "prompt": markers[4], "conversation": markers[5], "transcript": markers[6],
+            "rawServerError": markers[7], "path": markers[8]
+        ]
+        let diagnostics = MonitorDiagnostics()
+        await diagnostics.record(.settings, sensitiveFields.merging(["event": "privacyAdversarial"]) { _, new in new })
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("CodexMonitorPrivacyTests-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let preferences = MonitorPreferences(defaults: UserDefaults(suiteName: "CodexMonitorTests.privacy.\(UUID().uuidString)")!)
+        let archive = try await diagnostics.export(preferences: DiagnosticPreferenceSnapshot(preferences), destinationDirectory: directory)
+        let extracted = try archiveToolOutput(["-p", archive.path])
+        for marker in markers { XCTAssertFalse(extracted.contains(marker), "leaked marker: \(marker)") }
     }
 
     func testRestoredFloatingWindowOriginStaysInsideAnAvailableScreen() {
@@ -1430,7 +1536,8 @@ final class MonitorProductIntegrationTests: XCTestCase {
         XCTAssertEqual(mapped.usage?.dailyBuckets?.count, 30)
         XCTAssertEqual(mapped.usage?.dailyBuckets?.last?.tokens, 45)
 
-        let runtime = MonitorRuntimeStore(initialPhase: .live)
+        let clock = FixedMonitorClock(observedAt)
+        let runtime = MonitorRuntimeStore(clock: clock, initialPhase: .live)
         await runtime.ingest(account: mapped)
         let snapshot = await runtime.snapshot()
         XCTAssertEqual(MonitorDisplayValue.orbQuota(snapshot), "30%")
@@ -1507,7 +1614,7 @@ final class MonitorProductIntegrationTests: XCTestCase {
         await provider.refreshOnce()
         await provider.refreshOnce()
         let retained = await runtime.snapshot()
-        XCTAssertEqual(QuotaWindowPresentation.windows(from: retained, languageCode: "en").map(\.displayLabel), ["5 hours", "1 week"])
+        XCTAssertEqual(QuotaWindowPresentation.windows(from: retained, languageCode: "en").map(\.displayLabel), [])
 
         await provider.refreshOnce()
         let replacement = await runtime.snapshot()
@@ -1694,8 +1801,8 @@ final class MonitorProductIntegrationTests: XCTestCase {
         await runtime.markAccountRefreshDegraded()
         let retained = await runtime.snapshot()
         XCTAssertEqual(retained.account.plan, "pro")
-        XCTAssertEqual(retained.quota.primary?.usedPercent, 40)
-        XCTAssertEqual(retained.usage.usage?.dailyBuckets?.last?.authoritativeTokens, 45)
+        XCTAssertNil(retained.quota.primary)
+        XCTAssertNil(retained.usage.usage)
         XCTAssertEqual(retained.sourceHealth[.account]?.freshness.state, .stale)
     }
 
@@ -1743,8 +1850,8 @@ final class MonitorProductIntegrationTests: XCTestCase {
         await provider.refreshOnce()
 
         let snapshot = await runtime.snapshot()
-        XCTAssertEqual(snapshot.quota.primary?.usedPercent, 4)
-        XCTAssertEqual(MonitorDisplayValue.orbQuota(snapshot), "96%")
+        XCTAssertNil(snapshot.quota.primary)
+        XCTAssertEqual(MonitorDisplayValue.orbQuota(snapshot), "--")
         XCTAssertEqual(snapshot.sourceHealth[.account]?.freshness.state, .stale)
     }
 
@@ -1764,14 +1871,17 @@ final class MonitorProductIntegrationTests: XCTestCase {
         let provider = AccountUsageProvider(runtime: runtime, refreshCycle: { await cycles.next() })
 
         await provider.refreshOnce()
+        let authoritative = await runtime.accountRefreshTimestamps().lastAuthoritative
         await provider.refreshOnce()
 
         let snapshot = await runtime.snapshot()
         XCTAssertEqual(snapshot.account.plan, "pro")
-        XCTAssertEqual(snapshot.quota.primary?.usedPercent, 4)
-        XCTAssertEqual(MonitorDisplayValue.orbQuota(snapshot), "96%")
-        XCTAssertEqual(snapshot.usage.usage?.dailyBuckets?.last?.authoritativeTokens, 45)
+        XCTAssertNil(snapshot.quota.primary)
+        XCTAssertEqual(MonitorDisplayValue.orbQuota(snapshot), "--")
+        XCTAssertNil(snapshot.usage.usage)
         XCTAssertEqual(snapshot.sourceHealth[.account]?.freshness.state, .stale)
+        let timestamps = await runtime.accountRefreshTimestamps()
+        XCTAssertEqual(timestamps.lastAuthoritative, authoritative)
         let calls = await cycles.callCount()
         XCTAssertEqual(calls, 3)
     }
@@ -1839,7 +1949,7 @@ final class MonitorProductIntegrationTests: XCTestCase {
         let cold = await runtime.snapshot()
         XCTAssertNil(cold.quota.primary)
         XCTAssertEqual(MonitorDisplayValue.orbQuota(cold), "--")
-        XCTAssertEqual(cold.quota.primaryAvailability, .unknown)
+        XCTAssertEqual(cold.quota.primaryAvailability, .stale)
         XCTAssertNotEqual(MonitorDisplayValue.remainingQuota(cold), "0%")
 
         await gate.resume()
@@ -1881,10 +1991,10 @@ final class MonitorProductIntegrationTests: XCTestCase {
         // an impossible Account B + Quota A composition.
         var snapshot = await runtime.snapshot()
         XCTAssertEqual(snapshot.account.plan, "pro")
-        XCTAssertEqual(snapshot.quota.primary?.usedPercent, 40)
-        XCTAssertEqual(snapshot.usage.usage?.dailyBuckets?.last?.authoritativeTokens, 45)
+        XCTAssertNil(snapshot.quota.primary)
+        XCTAssertNil(snapshot.usage.usage)
         XCTAssertEqual(snapshot.sourceHealth[.account]?.freshness.state, .stale)
-        await waitForObservedAccountSnapshot(observer.collector, quotaUsedPercent: 40, tokens: 45, freshness: .stale)
+        await waitForObservedAccountSnapshot(observer.collector, quotaUsedPercent: nil, tokens: nil, freshness: .stale)
 
         await gate.resume()
         await refresh.value
@@ -1920,19 +2030,19 @@ final class MonitorProductIntegrationTests: XCTestCase {
 
         let held = await runtime.snapshot()
         XCTAssertEqual(held.account.plan, "pro")
-        XCTAssertEqual(held.quota.primary?.usedPercent, 40)
-        XCTAssertEqual(held.usage.usage?.dailyBuckets?.last?.authoritativeTokens, 45)
+        XCTAssertNil(held.quota.primary)
+        XCTAssertNil(held.usage.usage)
 
         await gate.resume()
         await refresh.value
 
         let exhausted = await runtime.snapshot()
         XCTAssertEqual(exhausted.account.plan, "pro")
-        XCTAssertEqual(exhausted.quota.primary?.usedPercent, 40)
-        XCTAssertEqual(MonitorDisplayValue.orbQuota(exhausted), "60%")
-        XCTAssertEqual(exhausted.usage.usage?.dailyBuckets?.last?.authoritativeTokens, 45)
+        XCTAssertNil(exhausted.quota.primary)
+        XCTAssertEqual(MonitorDisplayValue.orbQuota(exhausted), "--")
+        XCTAssertNil(exhausted.usage.usage)
         XCTAssertEqual(exhausted.sourceHealth[.account]?.freshness.state, .stale)
-        await waitForObservedAccountSnapshot(observer.collector, quotaUsedPercent: 40, tokens: 45, freshness: .stale)
+        await waitForObservedAccountSnapshot(observer.collector, quotaUsedPercent: nil, tokens: nil, freshness: .stale)
         let calls = await cycles.callCount()
         XCTAssertEqual(calls, 3)
     }
@@ -2010,7 +2120,7 @@ final class MonitorProductIntegrationTests: XCTestCase {
         await refresh.value
 
         let snapshot = await runtime.snapshot()
-        XCTAssertEqual(snapshot.account.availability, .unknown)
+        XCTAssertEqual(snapshot.account.availability, .unavailable)
         XCTAssertNil(snapshot.quota.primary)
     }
 
@@ -2037,7 +2147,7 @@ final class MonitorProductIntegrationTests: XCTestCase {
         await refresh.value
 
         let snapshot = await runtime.snapshot()
-        XCTAssertEqual(snapshot.quota.primary?.usedPercent, 40)
+        XCTAssertNil(snapshot.quota.primary)
         XCTAssertEqual(snapshot.sourceHealth[.account]?.freshness.state, .stale)
         let calls = await cycles.callCount()
         XCTAssertEqual(calls, 2)
@@ -2141,7 +2251,7 @@ final class MonitorProductIntegrationTests: XCTestCase {
         await provider.refreshOnce()
         await provider.refreshOnce()
 
-        await waitForObservedAccountSnapshot(observer.collector, quotaUsedPercent: 40, tokens: 45, freshness: .stale)
+        await waitForObservedAccountSnapshot(observer.collector, quotaUsedPercent: nil, tokens: nil, freshness: .stale)
     }
 
     func testAuthoritativeZeroQuotaDoesNotRetryAndRemainsZero() async throws {
@@ -2180,11 +2290,39 @@ final class MonitorProductIntegrationTests: XCTestCase {
         await provider.refreshOnce()
 
         let snapshot = await runtime.snapshot()
+        XCTAssertEqual(snapshot.accountFreshness, .fresh)
         XCTAssertEqual(snapshot.account.plan, "plus")
         XCTAssertNil(snapshot.quota.primary)
         XCTAssertEqual(MonitorDisplayValue.orbQuota(snapshot), "--")
         let calls = await cycles.callCount()
         XCTAssertEqual(calls, 2)
+    }
+
+    func testAuthoritativeAbsentAccountAdmitsQuotaAndUsageAsFresh() async throws {
+        let absentAccount = AccountUsageProvider.assemble(
+            account: .success(.object([:])),
+            rateLimits: .success(rateLimitsRPC(usedPercent: 40)),
+            usage: .success(usageRPC(tokens: 99)),
+            observedAt: Date()
+        )
+        XCTAssertTrue(absentAccount.isAuthoritativeCycle)
+        XCTAssertTrue(absentAccount.diagnostics.degraded)
+
+        let cycles = AccountRefreshCycleSequence([.connected(absentAccount)])
+        let runtime = MonitorRuntimeStore(initialPhase: .live)
+        let provider = AccountUsageProvider(runtime: runtime, refreshCycle: { await cycles.next() })
+
+        await provider.refreshOnce()
+
+        let timestamps = await runtime.accountRefreshTimestamps()
+        let snapshot = await runtime.snapshot()
+        XCTAssertNotNil(timestamps.lastAuthoritative)
+        XCTAssertNil(timestamps.degradedSince)
+        XCTAssertNil(timestamps.lastFailure)
+        XCTAssertEqual(snapshot.accountFreshness, .fresh)
+        XCTAssertNil(snapshot.account.plan)
+        XCTAssertEqual(snapshot.quota.primary?.usedPercent, 40)
+        XCTAssertEqual(snapshot.usage.usage?.dailyBuckets?.last?.authoritativeTokens, 99)
     }
 
     func testCurrentCycleOnlyAccountSuccessDropsPreviousQuotaAndUsage() throws {
@@ -2260,7 +2398,7 @@ final class MonitorProductIntegrationTests: XCTestCase {
         XCTAssertEqual(degraded.account.plan, "pro")
         XCTAssertNil(degraded.quota.primary)
         XCTAssertEqual(MonitorDisplayValue.orbQuota(degraded), "--")
-        XCTAssertEqual(degraded.usage.usage?.dailyBuckets?.last?.authoritativeTokens, 99)
+        XCTAssertNil(degraded.usage.usage)
     }
 
     func testCurrentCycleOnlyQuotaAndUsageDropPreviousAccount() throws {
@@ -2400,7 +2538,7 @@ final class MonitorProductIntegrationTests: XCTestCase {
     private func waitForObservedAccountSnapshot(
         _ collector: AccountSnapshotCollector,
         quotaUsedPercent: Double?,
-        tokens: Int,
+        tokens: Int?,
         freshness: FreshnessState
     ) async {
         for _ in 0..<100 {
@@ -2607,7 +2745,8 @@ final class MonitorProductIntegrationTests: XCTestCase {
         )!
         let usage = UsagePresence(summaryAvailable: true, dailyBucketsAvailable: true, dailyBuckets: buckets)
         let account = AccountSnapshot(provenance: provenance, usage: usage)!
-        let runtime = MonitorRuntimeStore(initialPhase: .live)
+        let clock = FixedMonitorClock(now)
+        let runtime = MonitorRuntimeStore(clock: clock, initialPhase: .live)
         await runtime.ingest(account: account)
         return await runtime.snapshot()
     }
@@ -2750,7 +2889,7 @@ private actor AccountSnapshotCollector {
         snapshots.append(snapshot)
     }
 
-    func contains(quotaUsedPercent: Double?, tokens: Int, freshness: FreshnessState) -> Bool {
+    func contains(quotaUsedPercent: Double?, tokens: Int?, freshness: FreshnessState) -> Bool {
         snapshots.contains { snapshot in
             snapshot.quota.primary?.usedPercent == quotaUsedPercent
                 && snapshot.usage.usage?.dailyBuckets?.last?.authoritativeTokens == tokens
@@ -2766,4 +2905,29 @@ private actor AccountSnapshotCollector {
 private final class PermissionPresentationTestClock: StateEngineClock, MonitorRuntimeClock, @unchecked Sendable {
     private let value = Date(timeIntervalSince1970: 1_800_000_000)
     func now() -> Date { value }
+}
+
+private final class FixedMonitorClock: MonitorRuntimeClock, @unchecked Sendable {
+    private let value: Date
+    init(_ value: Date) { self.value = value }
+    func now() -> Date { value }
+}
+
+private func archiveToolOutput(_ arguments: [String]) throws -> String {
+    let process = Process()
+    let output = Pipe()
+    process.executableURL = URL(fileURLWithPath: "/usr/bin/unzip")
+    process.arguments = arguments
+    process.standardOutput = output
+    process.standardError = FileHandle.nullDevice
+    try process.run()
+    process.waitUntilExit()
+    guard process.terminationStatus == 0 else { throw POSIXError(.EIO) }
+    return String(decoding: output.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+}
+
+private func temporaryDiagnosticsArchiveRoots() throws -> Set<String> {
+    let temporaryDirectory = FileManager.default.temporaryDirectory
+    return Set(try FileManager.default.contentsOfDirectory(atPath: temporaryDirectory.path)
+        .filter { $0.hasPrefix("CodexMonitorDiagnostics-") })
 }

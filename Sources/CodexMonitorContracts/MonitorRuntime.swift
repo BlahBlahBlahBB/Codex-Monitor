@@ -10,6 +10,16 @@ public enum MonitorDataAvailability: String, Sendable, Equatable {
     case unknown
 }
 
+/// Account freshness is intentionally more precise than the generic UI
+/// availability vocabulary. A held value is known to be old, but remains
+/// temporarily visible while the producer performs its bounded recovery.
+public enum AccountFreshness: String, Sendable, Equatable {
+    case fresh
+    case temporarilyHeld
+    case stale
+    case unavailable
+}
+
 public enum MonitorUnavailabilityReason: String, Sendable, Equatable {
     case noCurrentThread
     case noObservedValue
@@ -167,6 +177,18 @@ public struct MonitorRuntimeSnapshot: Sendable, Equatable {
 
     public var userAttentionRequired: Bool { currentThread?.userAttentionRequired ?? false }
 
+    /// Derived from the account lane so older callers constructing snapshots
+    /// do not need another stored field. `temporarilyHeld` never means that a
+    /// failed refresh was admitted as fresh data.
+    public var accountFreshness: AccountFreshness {
+        guard let health = sourceHealth[.account] else { return .unavailable }
+        switch health.availability {
+        case .unavailable, .unknown: return .unavailable
+        case .stale: return .stale
+        case .available: return health.freshness.state == .fresh ? .fresh : .temporarilyHeld
+        }
+    }
+
     /// `capturedAt` and freshness assessment timestamps are sampling metadata,
     /// not presentation changes. UI bindings use this to avoid rerendering on
     /// a timer when the observable product state has not changed.
@@ -186,10 +208,24 @@ public struct MonitorRuntimeSnapshot: Sendable, Equatable {
         usage == other.usage &&
         quota == other.quota &&
         resetInformation == other.resetInformation &&
+        equivalentAccountAuthorityTime(to: other) &&
         sourceHealth.count == other.sourceHealth.count && sourceHealth.allSatisfy { entry in
             other.sourceHealth[entry.key].map { equivalent(entry.value, $0) } ?? false
         } &&
         capabilities == other.capabilities
+    }
+
+    private func equivalentAccountAuthorityTime(to other: MonitorRuntimeSnapshot) -> Bool {
+        authoritativeAccountObservedAt == other.authoritativeAccountObservedAt
+    }
+
+    /// This exception to normal timestamp suppression exists solely for the
+    /// user-visible Account "Data updated" value. An unavailable account lane
+    /// has no admitted authoritative observation, even when its source-health
+    /// timestamp was updated by a refresh attempt.
+    private var authoritativeAccountObservedAt: Date? {
+        guard accountFreshness != .unavailable else { return nil }
+        return sourceHealth[.account]?.freshness.observedAt
     }
 
     private func equivalent(_ lhs: MonitorThreadViewModel?, _ rhs: MonitorThreadViewModel?) -> Bool {
@@ -297,9 +333,15 @@ public struct MonitorRuntimeFreshnessPolicy: Sendable, Equatable {
     /// Account data is snapshot-only. This bound prevents a permanently old
     /// quota/usage payload from looking current when its producer is idle.
     public let maximumAccountAge: TimeInterval
+    /// The hold is deliberately short and centralized. AccountUsageProvider
+    /// normally refreshes once per minute, so two cadence intervals permit a
+    /// single retry/reconnect without representing a persistent failure as
+    /// live data.
+    public let temporaryHoldDuration: TimeInterval
 
-    public init(maximumAccountAge: TimeInterval = 300) {
+    public init(maximumAccountAge: TimeInterval = 300, temporaryHoldDuration: TimeInterval = 120) {
         self.maximumAccountAge = max(1, maximumAccountAge)
+        self.temporaryHoldDuration = max(1, temporaryHoldDuration)
     }
 }
 
@@ -334,6 +376,10 @@ public actor MonitorRuntimeStore {
     private var accountSnapshot: AccountSnapshot?
     private var accountSource: SourceState
     private var accountRefreshDegraded = false
+    private var accountDegradedSince: Date?
+    private var lastAuthoritativeAccountRefreshAt: Date?
+    private var lastRefreshAttemptAt: Date?
+    private var lastRefreshFailureAt: Date?
     private var desktopSource: SourceState
     private var approvalSource: SourceState
     private var approvalAccessibilitySource: SourceState
@@ -481,9 +527,15 @@ public actor MonitorRuntimeStore {
         engine.ingest(observation)
     }
 
-    public func ingest(account snapshot: AccountSnapshot, refreshDegraded: Bool = false) {
+    /// Authoritative account admission is mutually exclusive with a refresh
+    /// failure. Failures enter only through `markAccountRefreshDegraded()`.
+    public func ingest(account snapshot: AccountSnapshot) {
         accountSnapshot = snapshot
-        accountRefreshDegraded = refreshDegraded
+        accountRefreshDegraded = false
+        lastAuthoritativeAccountRefreshAt = snapshot.provenance.observedAt
+        lastRefreshAttemptAt = snapshot.provenance.observedAt
+        lastRefreshFailureAt = nil
+        accountDegradedSince = nil
         let freshness = snapshot.provenance.freshness
         accountSource = SourceState(availability: freshness.state == .fresh ? .available : monitorAvailability(for: freshness.state), observedAt: freshness.observedAt, reason: freshness.state == .fresh ? nil : monitorReason(for: freshness.state))
         publishSnapshot()
@@ -495,7 +547,21 @@ public actor MonitorRuntimeStore {
     /// blank Account, Plan, Usage, or Quota in the UI.
     public func markAccountRefreshDegraded() {
         accountRefreshDegraded = true
+        let now = clock.now()
+        lastRefreshAttemptAt = now
+        lastRefreshFailureAt = now
+        if accountDegradedSince == nil { accountDegradedSince = now }
         publishSnapshot()
+    }
+
+    /// Attempts are observable separately from authoritative admissions. A
+    /// retry or partial response must never overwrite the success timestamp.
+    public func recordAccountRefreshAttempt() {
+        lastRefreshAttemptAt = clock.now()
+    }
+
+    public func accountRefreshTimestamps() -> (lastAuthoritative: Date?, lastAttempt: Date?, lastFailure: Date?, degradedSince: Date?) {
+        (lastAuthoritativeAccountRefreshAt, lastRefreshAttemptAt, lastRefreshFailureAt, accountDegradedSince)
     }
 
     public func clearDesktopConversationNames() {
@@ -569,7 +635,10 @@ public actor MonitorRuntimeStore {
         let current = runtime.representativeThread.flatMap { candidate in threads.first { $0.threadID == candidate.threadID } }
         let account = freshAccount(at: now)
         let effectiveAccountSource = accountSourceForSnapshot(at: now)
-        let accountHealth = sourceHealth(for: .account, state: effectiveAccountSource, now: now, freshnessOverride: accountFreshness(at: now))
+        let accountHealth = sourceHealth(for: .account, state: effectiveAccountSource, now: now, freshnessOverride: accountFreshnessRecord(at: now))
+        let accountDataHealth = accountFreshness(at: now) == .fresh
+            ? accountHealth
+            : MonitorSourceHealth(source: .account, availability: .stale, freshness: accountHealth.freshness, reason: .sourceStale)
         let desktopHealth = desktopHealth(for: current, lane: desktopSource, now: now)
         let approvalHealth = sourceHealth(for: .approvalLocal, state: approvalSource, now: now)
         let approvalAccessibilityHealth = sourceHealth(for: .approvalAccessibility, state: approvalAccessibilitySource, now: now)
@@ -579,40 +648,76 @@ public actor MonitorRuntimeStore {
             desktop: desktopHealth,
             approval: approvalHealth,
             account: account,
-            accountSource: accountHealth,
+            accountSource: accountDataHealth,
             accountCapabilities: accountCapabilities
         )
         let accountView = MonitorRuntimeSnapshotBuilder.account(account, source: accountHealth)
-        let usage = MonitorRuntimeSnapshotBuilder.usage(account, source: accountHealth, capability: accountCapabilities.usage)
-        let quota = MonitorRuntimeSnapshotBuilder.quota(account, source: accountHealth, primaryCapability: accountCapabilities.primaryQuota, secondaryCapability: accountCapabilities.secondaryQuota)
-        let reset = MonitorRuntimeSnapshotBuilder.reset(account, source: accountHealth, countCapability: accountCapabilities.resetCount, detailsCapability: accountCapabilities.resetDetails)
+        let usage = MonitorRuntimeSnapshotBuilder.usage(account, source: accountDataHealth, capability: accountCapabilities.usage)
+        let quota = MonitorRuntimeSnapshotBuilder.quota(account, source: accountDataHealth, primaryCapability: accountCapabilities.primaryQuota, secondaryCapability: accountCapabilities.secondaryQuota)
+        let reset = MonitorRuntimeSnapshotBuilder.reset(account, source: accountDataHealth, countCapability: accountCapabilities.resetCount, detailsCapability: accountCapabilities.resetDetails)
         let semantic = desktopSemanticState(runtime, now: now)
         return MonitorRuntimeSnapshot(capturedAt: now, monitoringPhase: monitoringPhase, currentState: semantic.state, currentStateSince: semantic.since, currentActivity: semantic.activity, currentThread: current, currentSessionThread: MonitorSessionThreadAttribution(thread: current), activeThreadCount: runtime.activeThreadCount, waitingApprovalCount: runtime.waitingApprovalCount, approvalRequestObserved: runtime.approvalRequestObserved, threads: threads, sessionToken: current?.sessionToken, account: accountView, usage: usage, quota: quota, resetInformation: reset, sourceHealth: [.desktopLocal: desktopHealth, .approvalLocal: approvalHealth, .approvalAccessibility: approvalAccessibilityHealth, .account: accountHealth], capabilities: capabilities)
     }
 
     private func freshAccount(at now: Date) -> AccountSnapshot? {
-        guard let accountSnapshot, accountSource.availability == .available else { return nil }
-        // Age belongs to data freshness, not source availability. A
-        // last-known-good account snapshot remains displayable while the
-        // short-lived refresh route retries.
-        return accountSnapshot
+        guard let accountSnapshot else { return nil }
+        switch accountFreshness(at: now) {
+        case .fresh, .temporarilyHeld: return accountSnapshot
+        case .stale, .unavailable: return nil
+        }
     }
 
-    private func accountFreshness(at now: Date) -> Freshness? {
-        guard let accountSnapshot else { return nil }
+    private func accountFreshness(at now: Date) -> AccountFreshness {
+        guard let accountSnapshot else { return .unavailable }
         let observedAt = accountSnapshot.provenance.observedAt
-        let age = max(0, now.timeIntervalSince(observedAt))
-        if accountRefreshDegraded || age > freshnessPolicy.maximumAccountAge {
-            return Freshness(state: .stale, assessedAt: now, observedAt: observedAt, reason: "accountRefreshDegraded")
+        // A quota observed for a previous window cannot be held through its
+        // reset boundary, even if the normal transient-failure grace remains.
+        let observedWindows = accountSnapshot.rateLimitWindows.isEmpty
+            ? [accountSnapshot.primaryRateLimit, accountSnapshot.secondaryRateLimit].compactMap { $0 }
+            : accountSnapshot.rateLimitWindows
+        // Only enforce a boundary that was future-facing when this snapshot
+        // was admitted. A response may carry historical/expired auxiliary
+        // windows, which are not evidence that a newer primary window reset.
+        if observedWindows.contains(where: {
+            guard let reset = $0.resetsAt else { return false }
+            return reset > observedAt && reset <= now
+        }) {
+            return .stale
         }
-        return accountSnapshot.provenance.freshness
+        let age = max(0, now.timeIntervalSince(observedAt))
+        if age > freshnessPolicy.maximumAccountAge { return .stale }
+        if accountRefreshDegraded {
+            guard let degradedSince = accountDegradedSince,
+                  now.timeIntervalSince(degradedSince) <= freshnessPolicy.temporaryHoldDuration else { return .stale }
+            return .temporarilyHeld
+        }
+        return .fresh
+    }
+
+    private func accountFreshnessRecord(at now: Date) -> Freshness? {
+        guard let observedAt = lastAuthoritativeAccountRefreshAt ?? accountSnapshot?.provenance.observedAt else { return nil }
+        switch accountFreshness(at: now) {
+        case .fresh:
+            return Freshness(state: .fresh, assessedAt: now, observedAt: observedAt)
+        case .temporarilyHeld, .stale:
+            return Freshness(state: .stale, assessedAt: now, observedAt: observedAt, reason: "accountRefreshNotAuthoritative")
+        case .unavailable:
+            return Freshness(state: .unknown, assessedAt: now, observedAt: observedAt, reason: "accountUnavailable")
+        }
     }
 
     private func accountSourceForSnapshot(at now: Date) -> SourceState {
-        // Source health is determined by the account route, not by the age of
-        // its last successful payload. Age is carried by accountFreshness and
-        // must not turn an otherwise readable source into UI-unavailable.
-        return accountSource
+        let freshness = accountFreshness(at: now)
+        switch freshness {
+        case .fresh:
+            return accountSource
+        case .temporarilyHeld:
+            return SourceState(availability: .available, observedAt: lastAuthoritativeAccountRefreshAt ?? accountSource.observedAt, reason: .sourceStale)
+        case .stale:
+            return SourceState(availability: .stale, observedAt: lastAuthoritativeAccountRefreshAt ?? accountSource.observedAt, reason: .sourceStale)
+        case .unavailable:
+            return SourceState(availability: .unavailable, observedAt: lastRefreshAttemptAt ?? accountSource.observedAt, reason: .sourceUnavailable)
+        }
     }
 
     private func sourceHealth(for source: MonitorRuntimeSource, state: SourceState, fallback: Freshness? = nil, now: Date, freshnessOverride: Freshness? = nil) -> MonitorSourceHealth {

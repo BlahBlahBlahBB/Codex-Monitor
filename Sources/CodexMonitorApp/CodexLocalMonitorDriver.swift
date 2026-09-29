@@ -66,6 +66,7 @@ public actor CodexLocalMonitorDriver {
     private let hookIdentityResolver: (any HookApprovalIdentityResolving)?
     private let hookApprovalSourceIsActive: @Sendable () -> Bool
     private let approvalNotificationDelivery: @Sendable (ApprovalNotificationOutboxIntent) async -> ApprovalNotificationDeliveryDisposition
+    private let diagnosticRecorder: @Sendable ([String: String]) -> Void
     private let processIsRunning: @Sendable () -> Bool
     private let usageLedger: LocalUsageLedgerProvider?
     private let sessionRoots: [URL]
@@ -80,6 +81,11 @@ public actor CodexLocalMonitorDriver {
     /// used only to keep a known-active reader inside the bounded discovery
     /// set; an authoritative terminal or process boundary removes the latch.
     private var activeTurnByThread: [NamespacedID: NamespacedID] = [:]
+    private var lastArbitrationDiagnosticSignature: String?
+    /// Repeating an unchanged transient SQLite condition every two seconds
+    /// adds no reconstruction value. The next different condition or a
+    /// successful read clears this gate.
+    private var lastStateDBDiagnosticSignature: String?
     private var loopTask: Task<Void, Never>?
     private var sleepObservers: [NSObjectProtocol] = []
     private var livenessObservers: [NSObjectProtocol] = []
@@ -99,13 +105,14 @@ public actor CodexLocalMonitorDriver {
     private var knownLedgerSessionKeys = Set<String>()
     private var verifiedLiveSessionStartKeys = Set<String>()
 
-    public init(runtime: MonitorRuntimeStore, usageLedger: LocalUsageLedgerProvider? = nil, codexRoot: URL = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".codex", isDirectory: true), hookJournalSource: (any HookApprovalJournalSource)? = nil, hookIdentityResolver: (any HookApprovalIdentityResolving)? = nil, approvalCheckpointURL: URL? = nil, approvalCheckpointStore: (any ApprovalLifecycleCheckpointStoring)? = nil, processIsRunning: (@Sendable () -> Bool)? = nil, hookApprovalSourceIsActive: @escaping @Sendable () -> Bool = { true }, approvalNotificationDelivery: @escaping @Sendable (ApprovalNotificationOutboxIntent) async -> ApprovalNotificationDeliveryDisposition = { _ in .retry }) {
+    public init(runtime: MonitorRuntimeStore, usageLedger: LocalUsageLedgerProvider? = nil, codexRoot: URL = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".codex", isDirectory: true), hookJournalSource: (any HookApprovalJournalSource)? = nil, hookIdentityResolver: (any HookApprovalIdentityResolving)? = nil, approvalCheckpointURL: URL? = nil, approvalCheckpointStore: (any ApprovalLifecycleCheckpointStoring)? = nil, processIsRunning: (@Sendable () -> Bool)? = nil, hookApprovalSourceIsActive: @escaping @Sendable () -> Bool = { true }, approvalNotificationDelivery: @escaping @Sendable (ApprovalNotificationOutboxIntent) async -> ApprovalNotificationDeliveryDisposition = { _ in .retry }, diagnosticRecorder: (@Sendable ([String: String]) -> Void)? = nil) {
         self.runtime = runtime
         self.usageLedger = usageLedger
         self.hookJournalSource = hookJournalSource
         self.hookIdentityResolver = hookIdentityResolver
         self.hookApprovalSourceIsActive = hookApprovalSourceIsActive
         self.approvalNotificationDelivery = approvalNotificationDelivery
+        self.diagnosticRecorder = diagnosticRecorder ?? { fields in DiagnosticEvent.record(.state, fields) }
         self.processIsRunning = processIsRunning ?? CodexProcessLiveness.isRunning
         sourceID = DesktopLocalSourceID("codex-desktop-local")!
         sessionRoots = [
@@ -224,6 +231,7 @@ public actor CodexLocalMonitorDriver {
         do {
             let records = try stateReader.recentThreads()
             hasSuccessfulStateDBRead = true
+            lastStateDBDiagnosticSignature = nil
             let approval = try? Self.catchUpApproval(approvalReader).result
             let hook = hookApprovalSourceIsActive() ? pollHookJournal() : nil
             let approvalCheckpoint = combinedApprovalCheckpoint()
@@ -283,6 +291,7 @@ public actor CodexLocalMonitorDriver {
         do {
             var records = try stateReader.recentThreads()
             hasSuccessfulStateDBRead = true
+            lastStateDBDiagnosticSignature = nil
             let approval = pollApproval()
             let hook = hookApprovalSourceIsActive() ? pollHookJournal() : nil
             // Falling outside a bounded recent-thread window is not deletion.
@@ -551,14 +560,18 @@ public actor CodexLocalMonitorDriver {
     private func installReconciliation(_ values: [RuntimeReconciliationThread], health: DesktopCycleHealth, caller: String) async {
         let previous = await runtime.snapshot()
         await runtime.installReconciliation(values, desktopHealth: health)
-        await recordDesktopUnavailableTransition(from: previous, to: runtime.snapshot(), health: health, caller: caller)
+        let next = await runtime.snapshot()
+        recordArbitrationDecision(from: previous, to: next, observations: [])
+        await recordDesktopUnavailableTransition(from: previous, to: next, health: health, caller: caller)
     }
 
     private func applyDesktopCycle(registrations: [DesktopThreadSnapshot], observations: [DesktopObservation], health: DesktopCycleHealth, caller: String, completeFromSessionStartSessions: Set<String> = []) async {
         let previous = await runtime.snapshot()
         await runtime.applyDesktopCycle(registrations: registrations, observations: observations, health: health)
         await usageLedger?.ingest(registrations: registrations, observations: observations, completeFromSessionStartSessions: completeFromSessionStartSessions)
-        await recordDesktopUnavailableTransition(from: previous, to: runtime.snapshot(), health: health, caller: caller)
+        let next = await runtime.snapshot()
+        recordArbitrationDecision(from: previous, to: next, observations: observations)
+        await recordDesktopUnavailableTransition(from: previous, to: next, health: health, caller: caller)
     }
 
     private func updateActiveTurnOwnership(from observations: [DesktopObservation]) {
@@ -575,6 +588,88 @@ public actor CodexLocalMonitorDriver {
                 break
             }
         }
+    }
+
+    /// Records only structural IDs and state names. The signature suppresses
+    /// repeated health-only polls while preserving each meaningful decision.
+    private func recordArbitrationDecision(from previous: MonitorRuntimeSnapshot, to next: MonitorRuntimeSnapshot, observations: [DesktopObservation]) {
+        let current = previous.currentThread
+        let selected = next.currentThread
+        let activeStates: [MonitorRuntimeState] = [.thinking, .working, .waitingApproval]
+
+        var candidate = selected
+        var decision = "accepted"
+        var reason: String?
+        var candidateTurn = selected?.activeTurnID
+
+        if let current, activeStates.contains(current.state),
+           let idle = next.threads
+            .filter({ $0.threadID != current.threadID && $0.state == .idle })
+            .sorted(by: { lhs, rhs in
+                if lhs.stateSince != rhs.stateSince { return lhs.stateSince > rhs.stateSince }
+                return lhs.threadID.rawID < rhs.threadID.rawID
+            }).first,
+           selected?.threadID == current.threadID {
+            candidate = idle
+            candidateTurn = idle.activeTurnID
+            decision = "rejected"
+            reason = "rejectForeignIdleWhileActive"
+        }
+
+        if let current, activeStates.contains(current.state),
+           let selected, selected.threadID != current.threadID,
+           activeStates.contains(selected.state) {
+            reason = "acceptNewerActiveThread"
+        }
+
+        if let currentTurn = current?.activeTurnID,
+           let terminal = observations.compactMap({ observation -> RolloutRecordEnvelope? in
+               guard case let .rollout(record) = observation,
+                     [.taskCompletedSuccess, .taskCompletedFailure, .turnAbortedInterrupted].contains(record.kind),
+                     record.turnID == currentTurn else { return nil }
+               return record
+           }).last {
+            candidate = next.threads.first(where: { $0.threadID == terminal.threadID }) ?? selected
+            candidateTurn = terminal.turnID
+            decision = "accepted"
+            reason = "acceptSameTurnTerminal"
+        } else if let currentTurn = current?.activeTurnID,
+                  observations.contains(where: { observation in
+                      guard case let .rollout(record) = observation else { return false }
+                      return record.turnID == currentTurn && record.kind == .activity && record.activity == .agentResponse
+                  }),
+                  selected?.threadID == current?.threadID,
+                  selected?.activeTurnID == currentTurn {
+            candidate = selected
+            candidateTurn = currentTurn
+            decision = "rejected"
+            reason = "rejectNonTerminalStepCompletion"
+        }
+
+        guard let reason, let current, let candidate else { return }
+        let signature = [
+            stableDiagnosticID(current.threadID.rawID),
+            stableDiagnosticID(candidate.threadID.rawID),
+            stableDiagnosticID(current.activeTurnID?.rawID ?? "none"),
+            stableDiagnosticID(candidateTurn?.rawID ?? "none"),
+            current.state.rawValue,
+            candidate.state.rawValue,
+            decision,
+            reason
+        ].joined(separator: "|")
+        guard signature != lastArbitrationDiagnosticSignature else { return }
+        lastArbitrationDiagnosticSignature = signature
+        recordTrace([
+            "event": "RUNTIME_ARBITRATION",
+            "selectedThreadID": stableDiagnosticID(current.threadID.rawID),
+            "candidateThreadID": stableDiagnosticID(candidate.threadID.rawID),
+            "currentActiveTurnID": current.activeTurnID.map { stableDiagnosticID($0.rawID) } ?? "none",
+            "candidateActiveTurnID": candidateTurn.map { stableDiagnosticID($0.rawID) } ?? "none",
+            "currentRuntimeState": current.state.rawValue,
+            "candidateRuntimeState": candidate.state.rawValue,
+            "decision": decision,
+            "reason": reason
+        ])
     }
 
     /// One bounded, read-only pass establishes 30-day ledger history from the
@@ -642,6 +737,11 @@ public actor CodexLocalMonitorDriver {
 
     private func recordStateDBReadFailure(_ error: Error, disposition: DesktopPrimarySourceReadDisposition, caller: String) {
         if let error = error as? StateDBError, error == .transientWALUnavailable {
+            // Bootstrap and incremental polling are the same underlying
+            // transient condition; a change of caller must not re-log it.
+            let signature = stateDBDiagnosticSignature(error: error, disposition: disposition)
+            guard lastStateDBDiagnosticSignature != signature else { return }
+            lastStateDBDiagnosticSignature = signature
             recordTrace([
                 "event": "STATE_DB_TRANSIENT_WAL_MISSING",
                 "caller": caller,
@@ -649,23 +749,46 @@ public actor CodexLocalMonitorDriver {
                 "retry": "true",
                 "freshConnection": "true"
             ])
+            // This condition is one classified transient read attempt, not a
+            // second independent high-level STATE_DB_READ_FAILURE.
+            return
         }
+        let signature = stateDBDiagnosticSignature(error: error, disposition: disposition)
+        guard lastStateDBDiagnosticSignature != signature else { return }
+        lastStateDBDiagnosticSignature = signature
         recordTrace([
             "event": "STATE_DB_READ_FAILURE",
             "caller": caller,
             // An error description can contain a filesystem path or source
             // payload. Diagnostics retain only its stable Swift type.
             "error": String(describing: type(of: error)),
+            "failure": stateDBFailureIdentity(error),
             "hasSuccessfulStateDBRead": String(hasSuccessfulStateDBRead),
             "disposition": disposition == .retainLastKnownHealthy ? "retainLastKnownHealthy" : "fatal"
         ])
+    }
+
+    private func stateDBDiagnosticSignature(error: Error, disposition: DesktopPrimarySourceReadDisposition) -> String {
+        "\(stateDBFailureIdentity(error))|\(disposition)"
+    }
+
+    private func stateDBFailureIdentity(_ error: Error) -> String {
+        guard let error = error as? StateDBError else { return "errorType:\(String(describing: type(of: error)))" }
+        return switch error {
+        case .unavailable: "stateDB:unavailable"
+        case .busyExhausted: "stateDB:busyExhausted"
+        case .transientWALUnavailable: "stateDB:transientWALUnavailable"
+        case .schemaMismatch: "stateDB:schemaMismatch"
+        case .readOnlyOpenFailed: "stateDB:readOnlyOpenFailed"
+        case .queryFailed: "stateDB:queryFailed"
+        }
     }
 
     /// The normal app keeps traces in Diagnostics. QA can opt in to the exact
     /// same sanitized JSON line on stdout, making a cold-start/source-lock
     /// transition observable without a 30-minute manual wait.
     private func recordTrace(_ fields: [String: String]) {
-        DiagnosticEvent.record(.state, fields)
+        diagnosticRecorder(fields)
         guard ProcessInfo.processInfo.environment["CODEX_MONITOR_TRACE_STDERR"] == "1",
               JSONSerialization.isValidJSONObject(fields),
               let data = try? JSONSerialization.data(withJSONObject: fields, options: [.sortedKeys]),

@@ -108,21 +108,22 @@ final class MonitorRuntimeTests: XCTestCase {
         XCTAssertFalse(snapshot.approvalRequestObserved)
     }
 
-    func testStaleAccountSnapshotRemainsLastKnownGoodWhileFreshnessIsTracked() async throws {
+    func testStaleAccountSnapshotDoesNotPresentOldQuotaAsCurrent() async throws {
         let clock = RuntimeSnapshotTestClock()
         let store = makeStore(clock: clock, freshness: MonitorRuntimeFreshnessPolicy(maximumAccountAge: 5))
         await store.ingest(account: accountSnapshot(clock: clock, usage: UsagePresence(totalTokens: 100), primary: RateLimitWindow(usedPercent: 50), resetCount: 1))
         clock.advance(6)
 
         let snapshot = await store.snapshot()
-        XCTAssertEqual(snapshot.sourceHealth[.account]?.availability, .available)
+        XCTAssertEqual(snapshot.sourceHealth[.account]?.availability, .stale)
         XCTAssertEqual(snapshot.sourceHealth[.account]?.freshness.state, .stale)
-        XCTAssertEqual(snapshot.usage.availability, .available)
-        XCTAssertEqual(snapshot.usage.usage?.totalTokens, 100)
-        XCTAssertEqual(snapshot.quota.primaryAvailability, .available)
-        XCTAssertEqual(snapshot.quota.primary?.usedPercent, 50)
-        XCTAssertEqual(snapshot.resetInformation.countAvailability, .available)
-        XCTAssertEqual(snapshot.resetInformation.count, 1)
+        XCTAssertEqual(snapshot.accountFreshness, .stale)
+        XCTAssertEqual(snapshot.usage.availability, .stale)
+        XCTAssertNil(snapshot.usage.usage)
+        XCTAssertEqual(snapshot.quota.primaryAvailability, .stale)
+        XCTAssertNil(snapshot.quota.primary)
+        XCTAssertEqual(snapshot.resetInformation.countAvailability, .stale)
+        XCTAssertNil(snapshot.resetInformation.count)
     }
 
     func testQuotaLastKnownGoodSurvivesTransientRefreshFailure() async {
@@ -137,11 +138,139 @@ final class MonitorRuntimeTests: XCTestCase {
 
         XCTAssertEqual(after.account.availability, .available)
         XCTAssertEqual(after.account.plan, before.account.plan)
-        XCTAssertEqual(after.usage.usage?.totalTokens, 100)
-        XCTAssertEqual(after.quota.primary?.usedPercent, 25)
-        XCTAssertEqual(after.resetInformation.count, 1)
+        XCTAssertNil(after.usage.usage)
+        XCTAssertNil(after.quota.primary)
+        XCTAssertNil(after.resetInformation.count)
         XCTAssertEqual(after.sourceHealth[.account]?.availability, .available)
         XCTAssertEqual(after.sourceHealth[.account]?.freshness.state, .stale)
+        XCTAssertEqual(after.accountFreshness, .temporarilyHeld)
+    }
+
+    func testAccountFailureBecomesStaleAfterCentralHoldAndRecoveryIsFresh() async throws {
+        let clock = RuntimeSnapshotTestClock()
+        let store = makeStore(clock: clock, freshness: MonitorRuntimeFreshnessPolicy(maximumAccountAge: 600, temporaryHoldDuration: 30))
+        await store.ingest(account: accountSnapshot(clock: clock, usage: UsagePresence(totalTokens: 1), primary: RateLimitWindow(usedPercent: 40), resetCount: 1))
+        let authoritative = await store.accountRefreshTimestamps().lastAuthoritative
+
+        clock.advance(1)
+        await store.recordAccountRefreshAttempt()
+        await store.markAccountRefreshDegraded()
+        let held = await store.snapshot()
+        XCTAssertEqual(held.accountFreshness, .temporarilyHeld)
+        XCTAssertNil(held.quota.primary)
+        let heldTimestamps = await store.accountRefreshTimestamps()
+        XCTAssertEqual(heldTimestamps.lastAuthoritative, authoritative)
+
+        clock.advance(31)
+        let stale = await store.snapshot()
+        XCTAssertEqual(stale.accountFreshness, .stale)
+        XCTAssertNil(stale.quota.primary)
+
+        await store.ingest(account: accountSnapshot(clock: clock, usage: UsagePresence(totalTokens: 2), primary: RateLimitWindow(usedPercent: 10), resetCount: 1))
+        let recovered = await store.snapshot()
+        XCTAssertEqual(recovered.accountFreshness, .fresh)
+        XCTAssertEqual(recovered.quota.primary?.usedPercent, 10)
+        let recoveredTimestamps = await store.accountRefreshTimestamps()
+        XCTAssertNotEqual(recoveredTimestamps.lastAuthoritative, authoritative)
+    }
+
+    func testRepeatedFailuresUseFirstDegradationForHoldExpiry() async throws {
+        let clock = RuntimeSnapshotTestClock()
+        let store = makeStore(clock: clock, freshness: MonitorRuntimeFreshnessPolicy(maximumAccountAge: 600, temporaryHoldDuration: 120))
+        await store.ingest(account: accountSnapshot(clock: clock, usage: UsagePresence(totalTokens: 1), primary: RateLimitWindow(usedPercent: 12), resetCount: 1))
+        let authoritative = await store.accountRefreshTimestamps().lastAuthoritative
+
+        clock.advance(60)
+        await store.markAccountRefreshDegraded()
+        let firstFailure = await store.accountRefreshTimestamps()
+        clock.advance(60)
+        await store.markAccountRefreshDegraded()
+        clock.advance(61)
+        await store.markAccountRefreshDegraded()
+        let timestamps = await store.accountRefreshTimestamps()
+        let snapshot = await store.snapshot()
+
+        XCTAssertEqual(firstFailure.degradedSince, clock.now().addingTimeInterval(-121))
+        XCTAssertEqual(timestamps.degradedSince, firstFailure.degradedSince)
+        XCTAssertEqual(timestamps.lastFailure, clock.now())
+        XCTAssertEqual(timestamps.lastAuthoritative, authoritative)
+        XCTAssertEqual(snapshot.accountFreshness, .stale)
+        XCTAssertNil(snapshot.quota.primary)
+    }
+
+    func testAuthoritativeRecoveryStartsNewDegradationEpoch() async throws {
+        let clock = RuntimeSnapshotTestClock()
+        let store = makeStore(clock: clock, freshness: MonitorRuntimeFreshnessPolicy(maximumAccountAge: 600, temporaryHoldDuration: 120))
+        await store.ingest(account: accountSnapshot(clock: clock, usage: UsagePresence(totalTokens: 1), primary: RateLimitWindow(usedPercent: 20), resetCount: 1))
+        clock.advance(60)
+        await store.markAccountRefreshDegraded()
+        let firstEpoch = await store.accountRefreshTimestamps().degradedSince
+        clock.advance(10)
+        await store.ingest(account: accountSnapshot(clock: clock, usage: UsagePresence(totalTokens: 2), primary: RateLimitWindow(usedPercent: 30), resetCount: 1))
+        let recoveredTimestamps = await store.accountRefreshTimestamps()
+        XCTAssertNil(recoveredTimestamps.degradedSince)
+        clock.advance(60)
+        await store.markAccountRefreshDegraded()
+        let secondEpoch = await store.accountRefreshTimestamps().degradedSince
+        XCTAssertNotEqual(firstEpoch, secondEpoch)
+        XCTAssertEqual(secondEpoch, clock.now())
+    }
+
+    func testHeldQuotaAndWarningProjectionBecomeUnknown() async throws {
+        let clock = RuntimeSnapshotTestClock()
+        let store = makeStore(clock: clock)
+        await store.ingest(account: accountSnapshot(clock: clock, usage: UsagePresence(totalTokens: 1), primary: RateLimitWindow(usedPercent: 100), resetCount: 1))
+        let fresh = await store.snapshot()
+        XCTAssertEqual(MonitorDisplayValue.orbQuota(fresh), "0%")
+        XCTAssertEqual(QuotaCapsuleHealth.resolve(snapshot: fresh, warningEnabled: true, threshold: 20), .exhausted)
+
+        clock.advance(1)
+        await store.markAccountRefreshDegraded()
+        let held = await store.snapshot()
+        XCTAssertEqual(held.accountFreshness, .temporarilyHeld)
+        XCTAssertEqual(MonitorDisplayValue.orbQuota(held), "--")
+        XCTAssertEqual(MonitorDisplayValue.remainingQuota(held), "--")
+        XCTAssertEqual(QuotaCapsuleHealth.resolve(snapshot: held, warningEnabled: true, threshold: 20), .unknown)
+    }
+
+    func testHeldWarningProjectionBecomesUnknown() async throws {
+        let clock = RuntimeSnapshotTestClock()
+        let store = makeStore(clock: clock)
+        await store.ingest(account: accountSnapshot(clock: clock, usage: UsagePresence(totalTokens: 1), primary: RateLimitWindow(usedPercent: 90), resetCount: 1))
+        let fresh = await store.snapshot()
+        XCTAssertEqual(QuotaCapsuleHealth.resolve(snapshot: fresh, warningEnabled: true, threshold: 20), .warning)
+
+        clock.advance(1)
+        await store.markAccountRefreshDegraded()
+        let held = await store.snapshot()
+        XCTAssertEqual(held.accountFreshness, .temporarilyHeld)
+        XCTAssertEqual(QuotaCapsuleHealth.resolve(snapshot: held, warningEnabled: true, threshold: 20), .unknown)
+    }
+
+    func testQuotaCrossingItsResetBoundaryBecomesStaleImmediately() async throws {
+        let clock = RuntimeSnapshotTestClock()
+        let store = makeStore(clock: clock, freshness: MonitorRuntimeFreshnessPolicy(maximumAccountAge: 600, temporaryHoldDuration: 120))
+        let reset = clock.now().addingTimeInterval(10)
+        await store.ingest(account: accountSnapshot(clock: clock, usage: UsagePresence(totalTokens: 1), primary: RateLimitWindow(usedPercent: 40, resetsAt: reset), resetCount: 1))
+        clock.advance(1)
+        await store.markAccountRefreshDegraded()
+        let held = await store.snapshot()
+        XCTAssertEqual(held.accountFreshness, .temporarilyHeld)
+        clock.advance(11)
+        let snapshot = await store.snapshot()
+        XCTAssertEqual(snapshot.accountFreshness, .stale)
+        XCTAssertNil(snapshot.quota.primary)
+    }
+
+    func testHistoricalAuxiliaryResetDoesNotStaleFreshSnapshot() async throws {
+        let clock = RuntimeSnapshotTestClock()
+        let store = makeStore(clock: clock, freshness: MonitorRuntimeFreshnessPolicy(maximumAccountAge: 600))
+        let current = RateLimitWindow(usedPercent: 40, resetsAt: clock.now().addingTimeInterval(120))
+        let historical = RateLimitWindow(usedPercent: 90, resetsAt: clock.now().addingTimeInterval(-1))
+        await store.ingest(account: accountSnapshot(clock: clock, usage: UsagePresence(totalTokens: 1), primary: current, resetCount: 1, windows: [current, historical]))
+        let snapshot = await store.snapshot()
+        XCTAssertEqual(snapshot.accountFreshness, .fresh)
+        XCTAssertEqual(snapshot.quota.primary?.usedPercent, 40)
     }
 
     func testRepresentativeThreadSwitchesWithoutMixingAttribution() async {
@@ -250,7 +379,7 @@ final class MonitorRuntimeTests: XCTestCase {
         await MainActor.run { model.stopObserving() }
     }
 
-    func testAccountHeartbeatDoesNotChangePresentation() async throws {
+    func testSameValueAuthoritativeAccountRefreshUpdatesPresentation() async throws {
         let clock = RuntimeSnapshotTestClock()
         let store = makeStore(clock: clock)
         let model = await MainActor.run { MonitorAppModel() }
@@ -260,9 +389,55 @@ final class MonitorRuntimeTests: XCTestCase {
         await MainActor.run { model.apply(initial) }
         let baseline = await MainActor.run { model.acceptedSnapshotCount }
 
+        clock.advance(60)
+        await store.ingest(account: accountSnapshot(clock: clock, usage: UsagePresence(totalTokens: 100), primary: RateLimitWindow(usedPercent: 50), resetCount: 1))
+        let refreshed = await store.snapshot()
+        await MainActor.run { model.apply(refreshed) }
+        let accepted = await MainActor.run { model.acceptedSnapshotCount }
+        XCTAssertEqual(accepted, baseline + 1)
+        XCTAssertNotEqual(initial.sourceHealth[.account]?.freshness.observedAt, refreshed.sourceHealth[.account]?.freshness.observedAt)
+        XCTAssertNotEqual(MonitorDisplayValue.update(initial), MonitorDisplayValue.update(refreshed))
+    }
+
+    func testAttemptOnlyAccountRefreshDoesNotChangePresentationAuthority() async throws {
+        let clock = RuntimeSnapshotTestClock()
+        let store = makeStore(clock: clock)
+        let model = await MainActor.run { MonitorAppModel() }
+        await store.applyDesktopCycle(registrations: [], observations: [], health: DesktopCycleHealth(processRunning: true, stateDBReadable: true))
+        let initial = await store.snapshot()
+        await MainActor.run { model.apply(initial) }
+        let baseline = await MainActor.run { model.acceptedSnapshotCount }
+
+        await store.recordAccountRefreshAttempt()
+        let firstAttempt = await store.snapshot()
+        clock.advance(60)
+        await store.recordAccountRefreshAttempt()
+        let secondAttempt = await store.snapshot()
+        await MainActor.run {
+            model.apply(firstAttempt)
+            model.apply(secondAttempt)
+        }
+
+        let accepted = await MainActor.run { model.acceptedSnapshotCount }
+        let timestamps = await store.accountRefreshTimestamps()
+        XCTAssertEqual(initial.accountFreshness, .unavailable)
+        XCTAssertEqual(secondAttempt.accountFreshness, .unavailable)
+        XCTAssertNil(timestamps.lastAuthoritative)
+        XCTAssertTrue(initial.isPresentationEquivalent(to: secondAttempt))
+        XCTAssertEqual(accepted, baseline)
+    }
+
+    func testDesktopHeartbeatDoesNotChangePresentation() async throws {
+        let clock = RuntimeSnapshotTestClock()
+        let store = makeStore(clock: clock)
+        let model = await MainActor.run { MonitorAppModel() }
+        await store.applyDesktopCycle(registrations: [], observations: [], health: DesktopCycleHealth(processRunning: true, stateDBReadable: true))
+        let initial = await store.snapshot()
+        await MainActor.run { model.apply(initial) }
+        let baseline = await MainActor.run { model.acceptedSnapshotCount }
         for _ in 0..<100 {
-            clock.advance(60)
-            await store.ingest(account: accountSnapshot(clock: clock, usage: UsagePresence(totalTokens: 100), primary: RateLimitWindow(usedPercent: 50), resetCount: 1))
+            clock.advance(2)
+            await store.applyDesktopCycle(registrations: [], observations: [], health: DesktopCycleHealth(processRunning: true, stateDBReadable: true))
             let heartbeat = await store.snapshot()
             await MainActor.run { model.apply(heartbeat) }
         }
@@ -572,10 +747,10 @@ final class MonitorRuntimeTests: XCTestCase {
         .rollout(RolloutRecordEnvelope(threadID: thread, turnID: turn, itemID: item, kind: kind, activity: activity, tokenSnapshot: tokens.map { TokenSnapshot(totalTokens: $0, lastCallTokens: nil) }, model: nil, reasoningEffort: nil, observedAt: clock.now(), fileOffset: 0))
     }
 
-    private func accountSnapshot(clock: RuntimeSnapshotTestClock, usage: UsagePresence, primary: RateLimitWindow, resetCount: Int) -> AccountSnapshot {
+    private func accountSnapshot(clock: RuntimeSnapshotTestClock, usage: UsagePresence, primary: RateLimitWindow, resetCount: Int, windows: [RateLimitWindow] = []) -> AccountSnapshot {
         let now = clock.now()
         let provenance = Provenance(sourceID: SourceID("account")!, sourceKind: .account, adapterID: AdapterID("account")!, adapterVersion: AdapterVersion("v3")!, observationMode: .snapshot, authority: .authoritative, observedAt: now, freshness: Freshness(state: .fresh, assessedAt: now, observedAt: now), capability: .usageResponsePresence, evidence: EvidenceMetadata(evidenceRun: "test", cliVersion: "test", historicalTransportEvidenceLabel: "test", probeOrHarnessAvailability: "test", sanitizerAvailability: "test", sanitizerVersion: "test", confidence: "test", limitations: "test"), origin: .adapter)!
-        return AccountSnapshot(provenance: provenance, primaryRateLimit: primary, usage: usage, resetCreditCount: resetCount)!
+        return AccountSnapshot(provenance: provenance, primaryRateLimit: primary, rateLimitWindows: windows, usage: usage, resetCreditCount: resetCount)!
     }
 }
 

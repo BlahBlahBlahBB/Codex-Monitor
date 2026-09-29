@@ -6,11 +6,13 @@ import CodexMonitorContracts
 /// validated local control socket, performs only account reads, forwards one
 /// admitted snapshot to `MonitorRuntimeStore`, then closes the socket.
 public actor AccountUsageProvider {
+    typealias DiagnosticRecorder = @Sendable (MonitorDiagnosticCategory, [String: String]) -> Void
     private let runtime: MonitorRuntimeStore
     private let refreshInterval: Duration
     private let retryDelay: Duration
     private let refreshCycle: @Sendable () async -> AccountRefreshCycleResult
     private let sleep: @Sendable (Duration) async throws -> Void
+    private let diagnosticRecorder: DiagnosticRecorder
     private var loopTask: Task<Void, Never>?
     /// The provider remains one-shot refresh capable until its first explicit
     /// stop, preserving construction-time callers while ensuring no queued UI
@@ -23,11 +25,52 @@ public actor AccountUsageProvider {
     /// can be held while one replacement cycle is attempted.
     private var lastCompleteSnapshot: AccountSnapshot?
 
+    struct RouteDependencies: Sendable {
+        let officialSocketResolver: @Sendable () throws -> SocketPathCapability
+        let officialEndpoint: @Sendable (SocketPathCapability) throws -> UnixSocketWebSocketEndpoint
+        let officialClient: @Sendable (UnixSocketWebSocketEndpoint) throws -> JSONRPCClient
+        let bundledExecutableResolver: @Sendable () throws -> URL
+        let bundledClient: @Sendable (URL) throws -> JSONRPCClient
+
+        init(
+            officialSocketResolver: @escaping @Sendable () throws -> SocketPathCapability,
+            officialEndpoint: @escaping @Sendable (SocketPathCapability) throws -> UnixSocketWebSocketEndpoint,
+            officialClient: @escaping @Sendable (UnixSocketWebSocketEndpoint) throws -> JSONRPCClient,
+            bundledExecutableResolver: @escaping @Sendable () throws -> URL,
+            bundledClient: @escaping @Sendable (URL) throws -> JSONRPCClient
+        ) {
+            self.officialSocketResolver = officialSocketResolver
+            self.officialEndpoint = officialEndpoint
+            self.officialClient = officialClient
+            self.bundledExecutableResolver = bundledExecutableResolver
+            self.bundledClient = bundledClient
+        }
+
+        static let production = RouteDependencies(
+            officialSocketResolver: {
+                try OfficialSocketResolver().resolve()
+            },
+            officialEndpoint: { capability in
+                try UnixSocketWebSocketEndpoint(capability: capability)
+            },
+            officialClient: { endpoint in
+                JSONRPCClient(channel: UnixSocketWebSocketChannel(endpoint: endpoint), binding: try JSONRPCClientBinding(descriptor: AccountUsageProvider.descriptor), clientInfo: JSONRPCClientInfo(name: "codex_monitor_account", title: "Codex Monitor Account", version: "v1"))
+            },
+            bundledExecutableResolver: {
+                try TrustedCodexBundledExecutableResolver().resolve()
+            },
+            bundledClient: { executable in
+                JSONRPCClient(channel: BundledCodexStdioChannel(executableURL: executable), binding: try JSONRPCClientBinding(descriptor: AccountUsageProvider.descriptor), clientInfo: JSONRPCClientInfo(name: "codex_monitor_account", title: "Codex Monitor Account", version: "v1"))
+            }
+        )
+    }
+
     public init(runtime: MonitorRuntimeStore, refreshInterval: Duration = .seconds(60)) {
         self.runtime = runtime
         self.refreshInterval = refreshInterval
         self.retryDelay = .milliseconds(500)
-        self.refreshCycle = Self.productionRefreshCycle
+        self.diagnosticRecorder = Self.productionDiagnosticRecorder
+        self.refreshCycle = { await Self.refresh(using: .production, diagnosticRecorder: Self.productionDiagnosticRecorder) }
         self.sleep = Self.productionSleep
     }
 
@@ -36,12 +79,23 @@ public actor AccountUsageProvider {
         refreshInterval: Duration = .seconds(60),
         retryDelay: Duration = .milliseconds(500),
         refreshCycle: @escaping @Sendable () async -> AccountRefreshCycleResult,
+        diagnosticRecorder: @escaping DiagnosticRecorder = AccountUsageProvider.productionDiagnosticRecorder,
         sleep: @escaping @Sendable (Duration) async throws -> Void = { _ in }
     ) {
         self.runtime = runtime
         self.refreshInterval = refreshInterval
         self.retryDelay = retryDelay
         self.refreshCycle = refreshCycle
+        self.diagnosticRecorder = diagnosticRecorder
+        self.sleep = sleep
+    }
+
+    init(runtime: MonitorRuntimeStore, routeDependencies: RouteDependencies, refreshInterval: Duration = .seconds(60), retryDelay: Duration = .milliseconds(500), diagnosticRecorder: @escaping DiagnosticRecorder = AccountUsageProvider.productionDiagnosticRecorder, sleep: @escaping @Sendable (Duration) async throws -> Void = { _ in }) {
+        self.runtime = runtime
+        self.refreshInterval = refreshInterval
+        self.retryDelay = retryDelay
+        self.diagnosticRecorder = diagnosticRecorder
+        self.refreshCycle = { await Self.refresh(using: routeDependencies, diagnosticRecorder: diagnosticRecorder) }
         self.sleep = sleep
     }
 
@@ -85,7 +139,7 @@ public actor AccountUsageProvider {
     public func refreshOnce() async {
         guard acceptsRefreshes else { return }
         if let inFlightRefresh {
-            Self.recordRefreshEvent("refreshCoalesced")
+            Self.recordRefreshEvent("refreshCoalesced", using: diagnosticRecorder)
             await inFlightRefresh.task.value
             return
         }
@@ -100,17 +154,18 @@ public actor AccountUsageProvider {
     }
 
     private func performRefresh(operationID: UUID) async {
+        await runtime.recordAccountRefreshAttempt()
         let initial = await refreshCycle()
         guard isCurrent(operationID) else { return }
         switch initial {
         case .connectionFailure(let diagnostics):
-            Self.record(diagnostics)
+            Self.record(diagnostics, using: diagnosticRecorder)
             // A transient account refresh failure must not erase the last
             // authoritative Account/Plan/Usage/Quota snapshot. The runtime
             // keeps it visible and records refresh degradation internally.
             await markRefreshDegradedIfCurrent(operationID)
         case .connected(let assembled):
-            Self.record(assembled.diagnostics)
+            Self.record(assembled.diagnostics, using: diagnosticRecorder)
             // A candidate is publishable only after every required Account /
             // Rate Limits / Usage read has reached an authoritative result.
             // In particular, a decoded partial candidate is not presentation
@@ -126,11 +181,11 @@ public actor AccountUsageProvider {
             // Usage component is ever joined to a quota from another cycle.
             // `MonitorRuntimeStore` continues publishing its previous whole
             // snapshot; degradation is metadata only.
-            Self.recordRefreshEvent("incompleteCycleHeld")
+            Self.recordRefreshEvent("incompleteCycleHeld", using: diagnosticRecorder)
             await markRefreshDegradedIfCurrent(operationID)
             guard lastCompleteSnapshot != nil else { return }
             guard isCurrent(operationID) else { return }
-            Self.recordRefreshEvent("boundedRetryStarted")
+            Self.recordRefreshEvent("boundedRetryStarted", using: diagnosticRecorder)
             do {
                 try await sleep(retryDelay)
             } catch {
@@ -142,23 +197,23 @@ public actor AccountUsageProvider {
             guard isCurrent(operationID) else { return }
             switch retry {
             case .connectionFailure(let diagnostics):
-                Self.record(diagnostics)
+                Self.record(diagnostics, using: diagnosticRecorder)
                 // Keep the held snapshot under the established whole-
                 // connection-failure behavior; the next normal cadence can
                 // recover it without publishing an invented partial cycle.
                 await markRefreshDegradedIfCurrent(operationID)
             case .connected(let retryAssembly):
-                Self.record(retryAssembly.diagnostics)
+                Self.record(retryAssembly.diagnostics, using: diagnosticRecorder)
                 if !retryAssembly.isAuthoritativeCycle {
                     // Preserve the prior coherent snapshot on a repeated
                     // incomplete cycle rather than publishing a partial one.
-                    Self.recordRefreshEvent("boundedRetryExhausted")
+                    Self.recordRefreshEvent("boundedRetryExhausted", using: diagnosticRecorder)
                     await markRefreshDegradedIfCurrent(operationID)
                 } else {
                     // This includes an explicitly absent quota returned by a
                     // fully successful cycle. It is authoritative data and
                     // therefore atomically replaces the prior snapshot.
-                    Self.recordRefreshEvent("boundedRetrySucceeded")
+                    Self.recordRefreshEvent("boundedRetrySucceeded", using: diagnosticRecorder)
                     await admit(retryAssembly, operationID: operationID)
                 }
             }
@@ -168,7 +223,11 @@ public actor AccountUsageProvider {
     private func admit(_ assembled: AccountRefreshAssembly, operationID: UUID) async {
         guard isCurrent(operationID) else { return }
         if let snapshot = assembled.snapshot {
-            await runtime.ingest(account: snapshot, refreshDegraded: assembled.diagnostics.degraded)
+            // `isAuthoritativeCycle` is the publication gate. Diagnostics may
+            // still describe an authoritatively absent field (for example an
+            // absent account identity), but that is not a refresh failure and
+            // must not downgrade the admitted authoritative snapshot.
+            await runtime.ingest(account: snapshot)
             guard isCurrent(operationID) else { return }
             // This tracks the snapshot currently held by the runtime. Once a
             // normal partial cycle is admitted, an older complete snapshot is
@@ -200,18 +259,11 @@ public actor AccountUsageProvider {
         try await Task.sleep(for: duration)
     }
 
-    private static func productionRefreshCycle() async -> AccountRefreshCycleResult {
-        let descriptor = Self.descriptor
+    private static func refresh(using dependencies: RouteDependencies, diagnosticRecorder: @escaping DiagnosticRecorder) async -> AccountRefreshCycleResult {
         do {
-            let resolver = OfficialSocketResolver()
-            let endpoint = try UnixSocketWebSocketEndpoint(capability: resolver.resolve())
-            let client = JSONRPCClient(
-                channel: UnixSocketWebSocketChannel(endpoint: endpoint),
-                binding: try JSONRPCClientBinding(descriptor: descriptor),
-                clientInfo: JSONRPCClientInfo(name: "codex_monitor_account", title: "Codex Monitor Account", version: "v1")
-            )
+            let client = try officialClient(using: dependencies)
             do {
-                let assembled = try await wholeCycle(client: client)
+                let assembled = try await wholeCycle(client: client, route: .officialSocket)
                 await client.close()
                 return .connected(assembled)
             } catch {
@@ -219,47 +271,90 @@ public actor AccountUsageProvider {
                 throw error
             }
         } catch {
+            let diagnostic = AccountRefreshDiagnostics.failure(error, defaultRoute: .officialSocket)
             guard !Task.isCancelled, isFallbackEligible(error) else {
-                return .connectionFailure(.wholeConnectionFailure(error))
+                return .connectionFailure(diagnostic)
             }
-            return await bundledStdioRefreshCycle(descriptor: descriptor)
+            record(diagnostic, using: diagnosticRecorder)
+            recordFallback(from: diagnostic, using: diagnosticRecorder)
+            return await bundledRefresh(using: dependencies, diagnosticRecorder: diagnosticRecorder)
         }
     }
 
     /// Every RPC in one refresh comes from a single initialized transport.
     /// Sequential reads ensure an interrupted socket cycle is never assembled
     /// and then mixed with the stdio fallback.
-    private static func wholeCycle(client: JSONRPCClient) async throws -> AccountRefreshAssembly {
-        _ = try await client.connect()
-        let account = try await client.request(method: "account/read", params: .object([:]))
-        let limits = try await client.request(method: "account/rateLimits/read")
-        let usage = try await client.request(method: "account/usage/read")
-        return assemble(account: .success(account), rateLimits: .success(limits), usage: .success(usage), observedAt: Date())
+    static func wholeCycle(client: JSONRPCClient, route: AccountRefreshRoute) async throws -> AccountRefreshAssembly {
+        do { _ = try await client.connect() }
+        catch { throw AccountRefreshStageFailure(route: route, stage: connectStage(for: error, route: route), error: error) }
+        let account: JSONValue
+        do { account = try await client.request(method: "account/read", params: .object([:])) }
+        catch { throw AccountRefreshStageFailure(route: route, stage: .accountRead, error: error) }
+        let limits: JSONValue
+        do { limits = try await client.request(method: "account/rateLimits/read") }
+        catch { throw AccountRefreshStageFailure(route: route, stage: .rateLimitsRead, error: error) }
+        let usage: JSONValue
+        do { usage = try await client.request(method: "account/usage/read") }
+        catch { throw AccountRefreshStageFailure(route: route, stage: .usageRead, error: error) }
+        var assembled = assemble(account: .success(account), rateLimits: .success(limits), usage: .success(usage), observedAt: Date())
+        if assembled.diagnostics.account == .responseIncompatible || assembled.diagnostics.rateLimits == .responseIncompatible || assembled.diagnostics.usage == .responseIncompatible {
+            assembled.diagnostics = assembled.diagnostics.attributing(route: route, stage: .responseDecode, reason: .responseIncompatible)
+        }
+        return assembled
     }
 
-    private static func bundledStdioRefreshCycle(descriptor: AdapterDescriptor) async -> AccountRefreshCycleResult {
+    private static func bundledRefresh(using dependencies: RouteDependencies, diagnosticRecorder: @escaping DiagnosticRecorder) async -> AccountRefreshCycleResult {
         do {
-            let executable = try TrustedCodexBundledExecutableResolver().resolve()
-            let client = JSONRPCClient(
-                channel: BundledCodexStdioChannel(executableURL: executable),
-                binding: try JSONRPCClientBinding(descriptor: descriptor),
-                clientInfo: JSONRPCClientInfo(name: "codex_monitor_account", title: "Codex Monitor Account", version: "v1")
-            )
+            let client = try bundledClient(using: dependencies)
             do {
-                let assembled = try await wholeCycle(client: client)
+                let assembled = try await wholeCycle(client: client, route: .bundledStdio)
                 await client.close()
+                recordRefreshSuccess(route: .bundledStdio, using: diagnosticRecorder)
                 return .connected(assembled)
             } catch {
                 await client.close()
-                return .connectionFailure(.wholeConnectionFailure(error))
+                return .connectionFailure(AccountRefreshDiagnostics.failure(error, defaultRoute: .bundledStdio))
             }
         } catch {
-            return .connectionFailure(.wholeConnectionFailure(error))
+            return .connectionFailure(AccountRefreshDiagnostics.failure(error, defaultRoute: .bundledStdio))
         }
     }
 
+    private static func officialClient(using dependencies: RouteDependencies) throws -> JSONRPCClient {
+        let capability: SocketPathCapability
+        do { capability = try dependencies.officialSocketResolver() }
+        catch { throw AccountRefreshStageFailure(route: .officialSocket, stage: .socketResolve, error: error) }
+        let endpoint: UnixSocketWebSocketEndpoint
+        do { endpoint = try dependencies.officialEndpoint(capability) }
+        catch { throw AccountRefreshStageFailure(route: .officialSocket, stage: .socketValidate, error: error) }
+        return try dependencies.officialClient(endpoint)
+    }
+
+    private static func bundledClient(using dependencies: RouteDependencies) throws -> JSONRPCClient {
+        let executable: URL
+        do { executable = try dependencies.bundledExecutableResolver() }
+        catch { throw AccountRefreshStageFailure(route: .bundledStdio, stage: .executableResolve, error: error) }
+        return try dependencies.bundledClient(executable)
+    }
+
+    private static func connectStage(for error: Error, route: AccountRefreshRoute) -> AccountRefreshStage {
+        if route == .bundledStdio,
+           case let JSONRPCTransportError.transportFailure(code) = error,
+           code == .processLaunchFailed { return .processLaunch }
+        if route == .officialSocket {
+            if case JSONRPCTransportError.endpointRejected = error { return .socketValidate }
+            if case let JSONRPCTransportError.transportFailure(code) = error,
+               code == .socketOpenFailed { return .socketOpen }
+        }
+        // JSONRPCClient.connect owns the protocol initialize request. Any
+        // remaining failure here has reached that combined boundary; no later
+        // read/decode/admission stage is claimed.
+        return .initialize
+    }
+
     static func isFallbackEligible(_ error: Error) -> Bool {
-        switch error {
+        if let staged = error as? AccountRefreshStageFailure { return isFallbackEligible(staged.error) }
+        return switch error {
         case is UnixSocketValidationError:
             true
         case let error as JSONRPCTransportError:
@@ -420,12 +515,27 @@ public actor AccountUsageProvider {
         )
     }
 
-    private static func record(_ diagnostics: AccountRefreshDiagnostics) {
-        DiagnosticEvent.record(.state, diagnostics.fields)
+    private static func productionDiagnosticRecorder(_ category: MonitorDiagnosticCategory, _ fields: [String: String]) {
+        DiagnosticEvent.record(category, fields)
     }
 
-    private static func recordRefreshEvent(_ event: String) {
-        DiagnosticEvent.record(.state, ["event": event])
+    private static func record(_ diagnostics: AccountRefreshDiagnostics, using recorder: DiagnosticRecorder) {
+        recorder(.state, diagnostics.fields)
+    }
+
+    private static func recordFallback(from diagnostics: AccountRefreshDiagnostics, using recorder: DiagnosticRecorder) {
+        var fields = diagnostics.fields
+        fields["event"] = "accountRefreshFallback"
+        fields["nextRoute"] = AccountRefreshRoute.bundledStdio.rawValue
+        recorder(.state, fields)
+    }
+
+    private static func recordRefreshSuccess(route: AccountRefreshRoute, using recorder: DiagnosticRecorder) {
+        recorder(.state, ["event": "accountRefreshSucceeded", "route": route.rawValue])
+    }
+
+    private static func recordRefreshEvent(_ event: String, using recorder: DiagnosticRecorder) {
+        recorder(.state, ["event": event])
     }
 
     private static func rateLimitCandidates(from root: [String: JSONValue]) -> [RateLimitCandidate] {
@@ -520,6 +630,33 @@ public actor AccountUsageProvider {
 
 enum AccountUsageProviderError: Error { case malformedResponse }
 
+enum AccountRefreshRoute: String, Sendable, Equatable { case officialSocket, bundledStdio }
+enum AccountRefreshStage: String, Sendable, Equatable {
+    case socketResolve, socketValidate, socketOpen, executableResolve, processLaunch, initialize, accountRead, rateLimitsRead, usageRead, responseDecode
+}
+enum AccountRefreshFailureReason: String, Sendable, Equatable {
+    case unavailable, inaccessible, replacedOrRemoved, executableMissing, executableRejected, bundleRejected, requestTimedOut, connectionClosed, transportFailure, protocolError, responseIncompatible, cancelled, unknown
+
+    init(error: Error) {
+        switch error {
+        case let value as UnixSocketValidationError:
+            switch value { case .inaccessible: self = .inaccessible; case .replacedOrRemoved: self = .replacedOrRemoved; default: self = .unavailable }
+        case let value as TrustedCodexStdioError:
+            switch value { case .applicationNotFound, .executableMissing: self = .executableMissing; case .executableRejected: self = .executableRejected; case .untrustedBundle, .bundleEscape: self = .bundleRejected; case .processLaunchFailed: self = .transportFailure }
+        case let value as JSONRPCTransportError:
+            switch value { case .requestTimedOut: self = .requestTimedOut; case .connectionClosed, .webSocketClosed: self = .connectionClosed; case .transportFailure: self = .transportFailure; case .protocolError: self = .protocolError; case .malformedMessage: self = .responseIncompatible; case .requestCancelled: self = .cancelled; default: self = .unknown }
+        case is AccountUsageProviderError: self = .responseIncompatible
+        default: self = .unknown
+        }
+    }
+}
+
+struct AccountRefreshStageFailure: Error {
+    let route: AccountRefreshRoute
+    let stage: AccountRefreshStage
+    let error: Error
+}
+
 /// Safe, structural diagnostics only. These names never include a socket path,
 /// server-provided message, request id, user identity, or payload.
 enum AccountRefreshDiagnosticCategory: String, Sendable, Equatable {
@@ -578,6 +715,9 @@ struct AccountRefreshDiagnostics: Sendable, Equatable {
     var rateLimits: AccountRefreshDiagnosticCategory
     var usage: AccountRefreshDiagnosticCategory
     var degraded = false
+    var route: AccountRefreshRoute?
+    var stage: AccountRefreshStage?
+    var reason: AccountRefreshFailureReason?
 
     init(account: AccountRefreshDiagnosticCategory, rateLimits: AccountRefreshDiagnosticCategory, usage: AccountRefreshDiagnosticCategory) {
         self.account = account
@@ -585,32 +725,55 @@ struct AccountRefreshDiagnostics: Sendable, Equatable {
         self.usage = usage
     }
 
-    static func wholeConnectionFailure(_ error: Error) -> Self {
+    static func wholeConnectionFailure(_ error: Error, route: AccountRefreshRoute? = nil, stage: AccountRefreshStage? = nil) -> Self {
         let category = AccountRefreshDiagnosticCategory(error: error)
-        return Self(account: category, rateLimits: category, usage: category, degraded: true)
+        return Self(account: category, rateLimits: category, usage: category, degraded: true, route: route, stage: stage, reason: AccountRefreshFailureReason(error: error))
     }
 
-    private init(account: AccountRefreshDiagnosticCategory, rateLimits: AccountRefreshDiagnosticCategory, usage: AccountRefreshDiagnosticCategory, degraded: Bool) {
+    static func failure(_ error: Error, defaultRoute: AccountRefreshRoute) -> Self {
+        if let staged = error as? AccountRefreshStageFailure {
+            return wholeConnectionFailure(staged.error, route: staged.route, stage: staged.stage)
+        }
+        return wholeConnectionFailure(error, route: defaultRoute)
+    }
+
+    func attributing(route: AccountRefreshRoute, stage: AccountRefreshStage, reason: AccountRefreshFailureReason) -> Self {
+        var copy = self
+        copy.route = route
+        copy.stage = stage
+        copy.reason = reason
+        copy.degraded = true
+        return copy
+    }
+
+    private init(account: AccountRefreshDiagnosticCategory, rateLimits: AccountRefreshDiagnosticCategory, usage: AccountRefreshDiagnosticCategory, degraded: Bool, route: AccountRefreshRoute? = nil, stage: AccountRefreshStage? = nil, reason: AccountRefreshFailureReason? = nil) {
         self.account = account
         self.rateLimits = rateLimits
         self.usage = usage
         self.degraded = degraded
+        self.route = route
+        self.stage = stage
+        self.reason = reason
     }
 
     var fields: [String: String] {
-        [
+        var result = [
             "event": "accountRefresh",
             "account": account.rawValue,
             "rateLimits": rateLimits.rawValue,
             "usage": usage.rawValue,
             "degraded": String(degraded)
         ]
+        if let route { result["route"] = route.rawValue }
+        if let stage { result["stage"] = stage.rawValue }
+        if let reason { result["reason"] = reason.rawValue }
+        return result
     }
 }
 
 struct AccountRefreshAssembly: Sendable {
     let snapshot: AccountSnapshot?
-    let diagnostics: AccountRefreshDiagnostics
+    var diagnostics: AccountRefreshDiagnostics
 
     /// The only publication gate for an Account / Quota candidate. An
     /// explicitly absent account object is still an authoritative response;

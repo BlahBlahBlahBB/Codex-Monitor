@@ -7,6 +7,14 @@ import CodexMonitorContracts
 /// accepted as an Account authority.
 struct TrustedCodexBundledExecutableResolver: Sendable {
     static let bundleIdentifier = "com.openai.codex"
+    /// The current Desktop layout installs the app-server under `codex-cli`.
+    /// Keep the former root resource path as a deliberately finite migration
+    /// fallback for installed versions that have not moved yet.  This is not a
+    /// search: every candidate is validated against the same signed app bundle.
+    static let relativeCandidates = [
+        "codex-cli/bin/codex",
+        "codex"
+    ]
 
     private let applicationURL: @Sendable () -> URL?
 
@@ -26,20 +34,29 @@ struct TrustedCodexBundledExecutableResolver: Sendable {
             throw TrustedCodexStdioError.untrustedBundle
         }
 
-        let executable = resources.appendingPathComponent("codex", isDirectory: false)
-            .resolvingSymlinksInPath().standardizedFileURL
         let applicationPrefix = applicationURL.path.hasSuffix("/") ? applicationURL.path : applicationURL.path + "/"
-        guard executable.path.hasPrefix(applicationPrefix) else { throw TrustedCodexStdioError.bundleEscape }
-        let values = try executable.resourceValues(forKeys: [.isRegularFileKey, .isExecutableKey])
-        guard values.isRegularFile == true, values.isExecutable == true else {
-            throw TrustedCodexStdioError.executableRejected
+
+        for relativePath in Self.relativeCandidates {
+            let unresolved = resources.appendingPathComponent(relativePath, isDirectory: false)
+            guard FileManager.default.fileExists(atPath: unresolved.path) else {
+                continue
+            }
+            let executable = unresolved.resolvingSymlinksInPath().standardizedFileURL
+            guard executable.path.hasPrefix(applicationPrefix) else { throw TrustedCodexStdioError.bundleEscape }
+            let values = try executable.resourceValues(forKeys: [.isRegularFileKey, .isExecutableKey])
+            guard values.isRegularFile == true, values.isExecutable == true else {
+                // A discovered candidate is not a license to try arbitrary
+                // sibling files. It is an explicit rejected trusted path.
+                throw TrustedCodexStdioError.executableRejected
+            }
+            return executable
         }
-        return executable
+        throw TrustedCodexStdioError.executableMissing
     }
 }
 
 enum TrustedCodexStdioError: Error, Sendable, Equatable {
-    case applicationNotFound
+    case applicationNotFound, executableMissing
     case untrustedBundle
     case bundleEscape
     case executableRejected
@@ -80,7 +97,7 @@ actor BundledCodexStdioChannel: JSONRPCByteChannel {
         } catch {
             reader.finish()
             drainer.finish()
-            throw TrustedCodexStdioError.processLaunchFailed
+            throw JSONRPCTransportError.transportFailure(.processLaunchFailed)
         }
         self.process = process
         input = stdin.fileHandleForWriting
