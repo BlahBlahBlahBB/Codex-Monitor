@@ -1544,6 +1544,123 @@ final class MonitorProductIntegrationTests: XCTestCase {
         XCTAssertEqual(MonitorDisplayValue.todayUsage(snapshot, now: observedAt, calendar: calendar), "45 Token")
     }
 
+    func testAccountUsageProviderMapsLifetimeAndPeakDailyTokens() async throws {
+        let observedAt = Date()
+        let usage: JSONValue = .object([
+            "summary": .object([
+                "lifetimeTokens": .number(3_038_489_263),
+                "peakDailyTokens": .number(246_913_867)
+            ])
+        ])
+        let mapped = try AccountUsageProvider.snapshot(
+            accountResponse: .object([:]),
+            rateLimitsResponse: .object([:]),
+            usageResponse: usage,
+            observedAt: observedAt
+        )
+        XCTAssertEqual(mapped.usage?.totalTokens, 3_038_489_263)
+        XCTAssertEqual(mapped.usage?.peakDailyTokens, 246_913_867)
+
+        let runtime = MonitorRuntimeStore(clock: FixedMonitorClock(observedAt), initialPhase: .live)
+        await runtime.ingest(account: mapped)
+        let snapshot = await runtime.snapshot()
+        XCTAssertEqual(MonitorDisplayValue.lifetimeUsage(snapshot, languageCode: "en"), "3.04B Token")
+        XCTAssertEqual(MonitorDisplayValue.peakDailyUsage(snapshot, languageCode: "en"), "246.91M Token")
+        await runtime.markAccountRefreshDegraded()
+        let degraded = await runtime.snapshot()
+        XCTAssertNotEqual(degraded.usage.availability, .available)
+        XCTAssertNotEqual(MonitorDisplayValue.lifetimeUsage(degraded, languageCode: "en"), "3.04B Token")
+        XCTAssertNotEqual(MonitorDisplayValue.peakDailyUsage(degraded, languageCode: "en"), "246.91M Token")
+    }
+
+    func testAccountUsageProviderKeepsAbsentPeakNilAndDoesNotPresentItAsCurrent() async throws {
+        let observedAt = Date()
+        let absent = try AccountUsageProvider.snapshot(
+            accountResponse: .object([:]),
+            rateLimitsResponse: .object([:]),
+            usageResponse: .object(["summary": .object(["lifetimeTokens": .number(900)])]),
+            observedAt: observedAt
+        )
+        let null = try AccountUsageProvider.snapshot(
+            accountResponse: .object([:]),
+            rateLimitsResponse: .object([:]),
+            usageResponse: .object(["summary": .object(["lifetimeTokens": .number(900), "peakDailyTokens": .null])]),
+            observedAt: observedAt
+        )
+        XCTAssertEqual(absent.usage?.totalTokens, 900)
+        XCTAssertNil(absent.usage?.peakDailyTokens)
+        XCTAssertEqual(null.usage?.totalTokens, 900)
+        XCTAssertNil(null.usage?.peakDailyTokens)
+
+        let runtime = MonitorRuntimeStore(clock: FixedMonitorClock(observedAt), initialPhase: .live)
+        await runtime.ingest(account: absent)
+        let fresh = await runtime.snapshot()
+        XCTAssertEqual(MonitorDisplayValue.lifetimeUsage(fresh, languageCode: "en"), "900 Token")
+        XCTAssertEqual(MonitorDisplayValue.peakDailyUsage(fresh, languageCode: "en"), "--")
+        await runtime.markAccountRefreshDegraded()
+        let degraded = await runtime.snapshot()
+        XCTAssertNotEqual(MonitorDisplayValue.lifetimeUsage(degraded, languageCode: "en"), "900 Token")
+        XCTAssertNotEqual(MonitorDisplayValue.peakDailyUsage(degraded, languageCode: "en"), "--")
+    }
+
+    func testUsageViewKeepsFourTokenMetricsAndRestoresOriginalActivityChart() throws {
+        let repositoryRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let sourceURL = repositoryRoot.appendingPathComponent("Sources/CodexMonitorApp/ProductViews.swift")
+        let source = try String(contentsOf: sourceURL, encoding: .utf8)
+
+        XCTAssertTrue(source.contains("UsageMetric(title: L10n.tr(\"label.lifetimeToken\")"))
+        XCTAssertTrue(source.contains("UsageMetric(title: L10n.tr(\"label.peakToken\")"))
+        XCTAssertTrue(source.contains("UsageMetric(title: L10n.tr(\"label.todayToken\")"))
+        XCTAssertTrue(source.contains("UsageMetric(title: L10n.tr(\"label.last30DaysToken\")"))
+        XCTAssertFalse(source.contains("UsageMetric(title: L10n.tr(\"label.todayCost\")"))
+        XCTAssertFalse(source.contains("UsageMetric(title: L10n.tr(\"label.last30DaysCost\")"))
+
+        XCTAssertTrue(source.contains("import Charts"))
+        XCTAssertTrue(source.contains("private struct UsageHistoryChart: View"))
+        XCTAssertTrue(source.contains("Chart(buckets)"))
+        XCTAssertTrue(source.contains("BarMark("))
+        XCTAssertTrue(source.contains("UsageModelBreakdown(day: localDay(for: selectedBucket ?? buckets.last))"))
+        XCTAssertFalse(source.contains("UsageCalendarHeatmap"))
+        XCTAssertFalse(source.contains("CalendarHeatmap"))
+
+        XCTAssertFalse(FileManager.default.fileExists(
+            atPath: repositoryRoot.appendingPathComponent("Sources/CodexMonitorApp/UsageHeatmap.swift").path
+        ))
+    }
+
+    func testAccountUsageProviderPreservesSparseDaysAndExplicitZeroAcrossThirtyCalendarDays() throws {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = try XCTUnwrap(TimeZone(identifier: "Asia/Shanghai"))
+        let observedAt = try XCTUnwrap(calendar.date(from: DateComponents(year: 2026, month: 9, day: 29, hour: 14)))
+        let today = LocalUsageDateKey.value(for: observedAt, calendar: calendar)
+        let oldest = LocalUsageDateKey.value(for: try XCTUnwrap(calendar.date(byAdding: .day, value: -29, to: observedAt)), calendar: calendar)
+        let missing = LocalUsageDateKey.value(for: try XCTUnwrap(calendar.date(byAdding: .day, value: -1, to: observedAt)), calendar: calendar)
+        let mapped = try AccountUsageProvider.snapshot(
+            accountResponse: .object([:]),
+            rateLimitsResponse: .object([:]),
+            usageResponse: .object([
+                "summary": .object([:]),
+                "dailyUsageBuckets": .array([
+                    .object(["startDate": .string(oldest), "tokens": .number(12)]),
+                    .object(["startDate": .string(today), "tokens": .number(0)])
+                ])
+            ]),
+            observedAt: observedAt,
+            calendar: calendar
+        )
+        let buckets = try XCTUnwrap(mapped.usage?.dailyBuckets)
+        XCTAssertEqual(buckets.count, 30)
+        XCTAssertEqual(buckets.first?.startDate, oldest)
+        XCTAssertEqual(buckets.last?.startDate, today)
+        XCTAssertFalse(try XCTUnwrap(buckets.first(where: { $0.startDate == missing })).isSourcePresent)
+        let explicitZero = try XCTUnwrap(buckets.first(where: { $0.startDate == today }))
+        XCTAssertTrue(explicitZero.isSourcePresent)
+        XCTAssertEqual(explicitZero.tokens, 0)
+    }
+
     func testMW1TwoKeyedPrimaryWindowsArePreservedForPresentation() async throws {
         let limits = authoritativeRateLimits(entries: [
             (rateLimitJSON(usedPercent: 24, minutes: 300, reset: 1_800_000_000), nil),

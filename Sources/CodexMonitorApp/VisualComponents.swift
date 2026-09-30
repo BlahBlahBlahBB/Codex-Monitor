@@ -449,6 +449,20 @@ enum MonitorDisplayValue {
         snapshot?.usage.usage?.totalTokens.map { summaryTokenFormat(Int64($0)) } ?? availability(snapshot?.usage.availability)
     }
 
+    static func lifetimeUsage(_ snapshot: MonitorRuntimeSnapshot?, languageCode: String? = nil) -> String {
+        guard snapshot?.usage.availability == .available else {
+            return availability(snapshot?.usage.availability)
+        }
+        return snapshot?.usage.usage?.totalTokens.map { summaryTokenFormat(Int64($0), languageCode: languageCode) } ?? "--"
+    }
+
+    static func peakDailyUsage(_ snapshot: MonitorRuntimeSnapshot?, languageCode: String? = nil) -> String {
+        guard snapshot?.usage.availability == .available else {
+            return availability(snapshot?.usage.availability)
+        }
+        return snapshot?.usage.usage?.peakDailyTokens.map { summaryTokenFormat(Int64($0), languageCode: languageCode) } ?? "--"
+    }
+
     static func account(_ snapshot: MonitorRuntimeSnapshot?, hidden: Bool = false) -> String {
         guard !hidden else { return L10n.tr("value.hidden") }
         guard let kind = snapshot?.account.accountKind else { return availability(snapshot?.account.availability) }

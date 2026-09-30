@@ -65,6 +65,8 @@
 "quota.unit.month" = "month";
 "quota.unit.months" = "months";
 "label.tokenUsage" = "Token Usage";
+"label.lifetimeToken" = "Lifetime Tokens";
+"label.peakToken" = "Peak Tokens";
 "label.todayCost" = "Today cost";
 "label.last30DaysCost" = "Last 30 days cost";
 "label.todayToken" = "Today Token";

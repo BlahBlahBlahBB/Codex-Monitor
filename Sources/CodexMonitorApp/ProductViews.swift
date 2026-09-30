@@ -246,10 +246,8 @@ private struct UsageMetricGrid: View {
             localLedger: localUsage
         )
         LazyVGrid(columns: [GridItem(.flexible(), spacing: 0), GridItem(.flexible(), spacing: 0)], spacing: 0) {
-            UsageMetric(title: L10n.tr("label.todayCost"), value: LocalUsagePresentation.estimatedCost(localUsage?.today?.estimatedCostUSD))
-            // A partial local 30-day cost cannot truthfully occupy the
-            // account-scoped 30-day cost slot.
-            UsageMetric(title: L10n.tr("label.last30DaysCost"), value: LocalUsagePresentation.estimatedCost(hybrid?.headlineEstimatedCostUSD))
+            UsageMetric(title: L10n.tr("label.lifetimeToken"), value: MonitorDisplayValue.lifetimeUsage(snapshot))
+            UsageMetric(title: L10n.tr("label.peakToken"), value: MonitorDisplayValue.peakDailyUsage(snapshot))
             UsageMetric(title: L10n.tr("label.todayToken"), value: localUsage?.today.map { MonitorDisplayValue.summaryTokenFormat($0.totalTokens) } ?? "--")
             UsageMetric(title: L10n.tr("label.last30DaysToken"), value: hybrid?.headlineTokens.map { MonitorDisplayValue.summaryTokenFormat($0) } ?? "--")
         }

@@ -511,6 +511,7 @@ public actor AccountUsageProvider {
             summaryAvailable: root["summary"]?.objectValue != nil,
             dailyBucketsAvailable: daily != nil,
             totalTokens: integer(root["summary"]?.objectValue?["lifetimeTokens"]),
+            peakDailyTokens: integer(root["summary"]?.objectValue?["peakDailyTokens"]),
             dailyBuckets: daily
         )
     }

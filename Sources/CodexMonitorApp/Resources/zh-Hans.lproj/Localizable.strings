@@ -65,6 +65,8 @@
 "quota.unit.month" = "月";
 "quota.unit.months" = "月";
 "label.tokenUsage" = "Token 使用";
+"label.lifetimeToken" = "累计 Token";
+"label.peakToken" = "峰值 Token";
 "label.todayCost" = "今日费用";
 "label.last30DaysCost" = "近 30 天费用";
 "label.todayToken" = "今日 Token";
