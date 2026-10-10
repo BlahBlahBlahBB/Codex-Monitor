@@ -172,9 +172,11 @@ public actor LocalUsageLedgerProvider {
     private var modelByTurn: [TurnKey: String] = [:]
     private var registrationModelByThread: [NamespacedID: String] = [:]
     private var calendar: Calendar
+    private let now: @Sendable () -> Date
 
-    public init(databaseURL: URL? = nil, calendar: Calendar = .autoupdatingCurrent) {
+    public init(databaseURL: URL? = nil, calendar: Calendar = .autoupdatingCurrent, now: @escaping @Sendable () -> Date = Date.init) {
         self.calendar = calendar
+        self.now = now
         let fallback = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
             .appendingPathComponent("Codex Monitor", isDirectory: true)
             .appendingPathComponent("LocalUsageLedger.sqlite", isDirectory: false)
@@ -271,7 +273,7 @@ public actor LocalUsageLedgerProvider {
         // Older records establish the cumulative baseline but are never kept
         // as UI history. This makes first-launch backfill bounded to exactly
         // the 30 local calendar days requested by the product.
-        guard key >= (last30DayKeys(now: Date()).first ?? key) else { return nil }
+        guard key >= (last30DayKeys(now: now()).first ?? key) else { return nil }
         let estimate = estimate(for: token.lastCallBreakdown, expectedDelta: delta, rate: resolved.rate)
         return Sample(identity: identity, sourceKey: sourceKey, cumulativeTotal: token.totalTokens, dateKey: key, modelID: resolved.id, displayModel: resolved.display, total: delta, estimatedCostUSD: estimate?.cost, estimatedCredits: estimate?.credits)
     }

@@ -8,7 +8,7 @@ final class LocalUsageLedgerTests: XCTestCase {
     func testAdvancingTotalIsAdmittedOnceAndReplayAfterRestartDoesNotDoubleCount() async throws {
         let fixture = try LedgerFixture()
         defer { fixture.remove() }
-        let ledger = LocalUsageLedgerProvider(databaseURL: fixture.databaseURL, calendar: fixture.calendar)
+        let ledger = LocalUsageLedgerProvider(databaseURL: fixture.databaseURL, calendar: fixture.calendar, now: { LedgerFixture.testNow })
         await ledger.start()
         await ledger.ingest(registrations: [], observations: [fixture.token(total: 100, last: nil, at: fixture.day(12, 10))])
         await ledger.ingest(registrations: [], observations: [fixture.token(total: 130, last: nil, at: fixture.day(12, 11)), fixture.token(total: 130, last: nil, at: fixture.day(12, 11), offset: 99)])
@@ -16,7 +16,7 @@ final class LocalUsageLedgerTests: XCTestCase {
         XCTAssertEqual(first.today?.totalTokens, 30)
         await ledger.stop()
 
-        let restarted = LocalUsageLedgerProvider(databaseURL: fixture.databaseURL, calendar: fixture.calendar)
+        let restarted = LocalUsageLedgerProvider(databaseURL: fixture.databaseURL, calendar: fixture.calendar, now: { LedgerFixture.testNow })
         await restarted.start()
         await restarted.ingest(registrations: [], observations: [fixture.token(total: 130, last: nil, at: fixture.day(12, 11))])
         let replay = await restarted.snapshot(now: fixture.day(12, 12))
@@ -26,7 +26,7 @@ final class LocalUsageLedgerTests: XCTestCase {
     func testModelAttributionCacheAccountingAndReasoningDoesNotDoubleCount() async throws {
         let fixture = try LedgerFixture()
         defer { fixture.remove() }
-        let ledger = LocalUsageLedgerProvider(databaseURL: fixture.databaseURL, calendar: fixture.calendar)
+        let ledger = LocalUsageLedgerProvider(databaseURL: fixture.databaseURL, calendar: fixture.calendar, now: { LedgerFixture.testNow })
         await ledger.start()
         await ledger.ingest(registrations: [], observations: [fixture.token(total: 10, last: nil, at: fixture.day(12, 9))])
         let breakdown = TokenUsageBreakdown(inputTokens: 12, cachedInputTokens: 2, outputTokens: 8, reasoningOutputTokens: 5, totalTokens: 20)
@@ -42,7 +42,7 @@ final class LocalUsageLedgerTests: XCTestCase {
     func testUnknownOrIncompleteBreakdownNeverCreatesCost() async throws {
         let fixture = try LedgerFixture(model: "gpt-unpriced")
         defer { fixture.remove() }
-        let ledger = LocalUsageLedgerProvider(databaseURL: fixture.databaseURL, calendar: fixture.calendar)
+        let ledger = LocalUsageLedgerProvider(databaseURL: fixture.databaseURL, calendar: fixture.calendar, now: { LedgerFixture.testNow })
         await ledger.start()
         await ledger.ingest(registrations: [], observations: [fixture.token(total: 10, last: nil, at: fixture.day(12, 9))])
         await ledger.ingest(registrations: [], observations: [fixture.token(total: 20, last: 10, breakdown: TokenUsageBreakdown(inputTokens: 5, cachedInputTokens: 0, outputTokens: 5, reasoningOutputTokens: 1, totalTokens: 10), at: fixture.day(12, 10))])
@@ -55,7 +55,7 @@ final class LocalUsageLedgerTests: XCTestCase {
     func testLocalMidnightAndTwoThreadsStayIsolatedAcrossExactThirtyDays() async throws {
         let fixture = try LedgerFixture()
         defer { fixture.remove() }
-        let ledger = LocalUsageLedgerProvider(databaseURL: fixture.databaseURL, calendar: fixture.calendar)
+        let ledger = LocalUsageLedgerProvider(databaseURL: fixture.databaseURL, calendar: fixture.calendar, now: { LedgerFixture.testNow })
         await ledger.start()
         await ledger.ingest(registrations: [], observations: [
             fixture.token(total: 10, last: nil, at: fixture.day(11, 23, minute: 59)),
@@ -126,7 +126,7 @@ final class LocalUsageLedgerTests: XCTestCase {
     func testSameSessionNewTurnUsesSessionCumulativeDelta() async throws {
         let fixture = try LedgerFixture()
         defer { fixture.remove() }
-        let ledger = LocalUsageLedgerProvider(databaseURL: fixture.databaseURL, calendar: fixture.calendar)
+        let ledger = LocalUsageLedgerProvider(databaseURL: fixture.databaseURL, calendar: fixture.calendar, now: { LedgerFixture.testNow })
         await ledger.start()
         await ledger.ingest(registrations: [], observations: [
             fixture.token(total: 100, last: nil, at: fixture.day(12, 9), turn: "turn-a"),
@@ -139,7 +139,7 @@ final class LocalUsageLedgerTests: XCTestCase {
     func testHistoricalLowerCumulativeReplayDoesNotLowerCursor() async throws {
         let fixture = try LedgerFixture()
         defer { fixture.remove() }
-        let ledger = LocalUsageLedgerProvider(databaseURL: fixture.databaseURL, calendar: fixture.calendar)
+        let ledger = LocalUsageLedgerProvider(databaseURL: fixture.databaseURL, calendar: fixture.calendar, now: { LedgerFixture.testNow })
         await ledger.start()
         await ledger.ingest(registrations: [], observations: [
             fixture.token(total: 100, last: nil, at: fixture.day(12, 9)),
@@ -154,7 +154,7 @@ final class LocalUsageLedgerTests: XCTestCase {
     func testBrandNewLiveSessionCountsFirstTokenEventFromZero() async throws {
         let fixture = try LedgerFixture()
         defer { fixture.remove() }
-        let ledger = LocalUsageLedgerProvider(databaseURL: fixture.databaseURL, calendar: fixture.calendar)
+        let ledger = LocalUsageLedgerProvider(databaseURL: fixture.databaseURL, calendar: fixture.calendar, now: { LedgerFixture.testNow })
         await ledger.start()
         await ledger.ingest(registrations: [], observations: [fixture.token(total: 25, last: 25, at: fixture.day(12, 10))], completeFromSessionStartSessions: [fixture.cursorSourceKey()])
         let snapshot = await ledger.snapshot(now: fixture.day(12, 12))
@@ -164,7 +164,7 @@ final class LocalUsageLedgerTests: XCTestCase {
     func testFirstCumulativeRequiresTheExactLiveSessionKey() async throws {
         let fixture = try LedgerFixture()
         defer { fixture.remove() }
-        let ledger = LocalUsageLedgerProvider(databaseURL: fixture.databaseURL, calendar: fixture.calendar)
+        let ledger = LocalUsageLedgerProvider(databaseURL: fixture.databaseURL, calendar: fixture.calendar, now: { LedgerFixture.testNow })
         await ledger.start()
         await ledger.ingest(registrations: [], observations: [
             fixture.token(total: 25, last: 25, at: fixture.day(12, 10), session: "other-session")
@@ -179,7 +179,7 @@ final class LocalUsageLedgerTests: XCTestCase {
     func testMidstreamHistoricalFirstObservationRemainsBaseline() async throws {
         let fixture = try LedgerFixture()
         defer { fixture.remove() }
-        let ledger = LocalUsageLedgerProvider(databaseURL: fixture.databaseURL, calendar: fixture.calendar)
+        let ledger = LocalUsageLedgerProvider(databaseURL: fixture.databaseURL, calendar: fixture.calendar, now: { LedgerFixture.testNow })
         await ledger.start()
         await ledger.ingest(registrations: [], observations: [
             fixture.token(total: 100, last: nil, at: fixture.day(12, 9)),
@@ -192,14 +192,14 @@ final class LocalUsageLedgerTests: XCTestCase {
     func testRestartReplayDoesNotDoubleCountAcrossTurns() async throws {
         let fixture = try LedgerFixture()
         defer { fixture.remove() }
-        let first = LocalUsageLedgerProvider(databaseURL: fixture.databaseURL, calendar: fixture.calendar)
+        let first = LocalUsageLedgerProvider(databaseURL: fixture.databaseURL, calendar: fixture.calendar, now: { LedgerFixture.testNow })
         await first.start()
         await first.ingest(registrations: [], observations: [
             fixture.token(total: 100, last: nil, at: fixture.day(12, 9), turn: "turn-a"),
             fixture.token(total: 130, last: nil, at: fixture.day(12, 10), turn: "turn-b")
         ])
         await first.stop()
-        let restarted = LocalUsageLedgerProvider(databaseURL: fixture.databaseURL, calendar: fixture.calendar)
+        let restarted = LocalUsageLedgerProvider(databaseURL: fixture.databaseURL, calendar: fixture.calendar, now: { LedgerFixture.testNow })
         await restarted.start()
         await restarted.ingest(registrations: [], observations: [
             fixture.token(total: 100, last: nil, at: fixture.day(12, 11), turn: "turn-a"),
@@ -212,7 +212,7 @@ final class LocalUsageLedgerTests: XCTestCase {
     func testTokenAttributionDoesNotCrossTurnsAfterModelSwitch() async throws {
         let fixture = try LedgerFixture()
         defer { fixture.remove() }
-        let ledger = LocalUsageLedgerProvider(databaseURL: fixture.databaseURL, calendar: fixture.calendar)
+        let ledger = LocalUsageLedgerProvider(databaseURL: fixture.databaseURL, calendar: fixture.calendar, now: { LedgerFixture.testNow })
         await ledger.start()
         await ledger.ingest(registrations: [], observations: [
             fixture.turnContext(turn: "turn-a", model: "gpt-5.6-terra", at: fixture.day(12, 8)),
@@ -227,7 +227,7 @@ final class LocalUsageLedgerTests: XCTestCase {
     func testIncompleteBreakdownWithResidualTokensHasNoCost() async throws {
         let fixture = try LedgerFixture()
         defer { fixture.remove() }
-        let ledger = LocalUsageLedgerProvider(databaseURL: fixture.databaseURL, calendar: fixture.calendar)
+        let ledger = LocalUsageLedgerProvider(databaseURL: fixture.databaseURL, calendar: fixture.calendar, now: { LedgerFixture.testNow })
         await ledger.start()
         let residual = TokenUsageBreakdown(inputTokens: 10, cachedInputTokens: 2, outputTokens: 8, reasoningOutputTokens: 5, totalTokens: 20)
         await ledger.ingest(registrations: [], observations: [
@@ -243,7 +243,7 @@ final class LocalUsageLedgerTests: XCTestCase {
         defer { fixture.remove() }
         try fixture.seedVersionOneLedger()
 
-        let ledger = LocalUsageLedgerProvider(databaseURL: fixture.databaseURL, calendar: fixture.calendar)
+        let ledger = LocalUsageLedgerProvider(databaseURL: fixture.databaseURL, calendar: fixture.calendar, now: { LedgerFixture.testNow })
         await ledger.start()
         let snapshot = await ledger.snapshot(now: fixture.day(12, 12))
         await ledger.stop()
@@ -257,6 +257,11 @@ final class LocalUsageLedgerTests: XCTestCase {
 }
 
 private final class LedgerFixture {
+    static let testNow: Date = {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(identifier: "Asia/Shanghai")!
+        return calendar.date(from: DateComponents(year: 2026, month: 8, day: 13, hour: 12))!
+    }()
     let root: URL
     let databaseURL: URL
     var calendar: Calendar
