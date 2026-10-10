@@ -129,6 +129,60 @@ final class DesktopLocalAdapterTests: XCTestCase {
         XCTAssertEqual(try adapter.poll(threadID: thread.threadID).observations.rollouts.tokenTotals, [42])
     }
 
+    func testMultiBatchPartialTokenOffsetsAndLedgerSampleIDsUseTrueLineStarts() async throws {
+        let timestamp = ISO8601DateFormatter().string(from: Date())
+        func timestampedToken(total: Int, last: Int) -> String {
+            let token = fixture.token(total: total, last: last)
+            return "{\"timestamp\":\"\(timestamp)\"," + token.dropFirst()
+        }
+
+        let tokenOne = timestampedToken(total: 10, last: 10)
+        let tokenTwo = timestampedToken(total: 20, last: 10)
+        let prefix = fixture.session("thread-a") + "\n" + fixture.started("turn-a") + "\n"
+        let file = try fixture.rollout("thread-a", lines: [fixture.session("thread-a"), fixture.started("turn-a")])
+        let tokenOneBytes = Array(tokenOne.utf8)
+        let firstCut = tokenOneBytes.count / 3
+        let secondCut = tokenOneBytes.count * 2 / 3
+
+        // First poll sees only the first third of the token record.
+        try fixture.append(to: file, text: String(decoding: tokenOneBytes[..<firstCut], as: UTF8.self))
+        try fixture.addThread("thread-a", rollout: file)
+        let adapter = try fixture.adapter(); let thread = try adapter.open(threadRawID: "thread-a")
+        XCTAssertTrue(try adapter.poll(threadID: thread.threadID).observations.rollouts.tokenTotals.isEmpty)
+
+        // A second incomplete batch must also remain buffered.
+        try fixture.append(to: file, text: String(decoding: tokenOneBytes[firstCut..<secondCut], as: UTF8.self))
+        XCTAssertTrue(try adapter.poll(threadID: thread.threadID).observations.rollouts.tokenTotals.isEmpty)
+
+        // The final third completes token one; token two is a normal complete line.
+        try fixture.append(to: file, text: String(decoding: tokenOneBytes[secondCut...], as: UTF8.self) + "\n" + tokenTwo + "\n")
+        let records = try adapter.poll(threadID: thread.threadID).observations.rollouts.filter { $0.kind == .tokenCount }
+        let tokenOneOffset = UInt64(prefix.utf8.count)
+        let tokenTwoOffset = tokenOneOffset + UInt64(tokenOne.utf8.count + 1)
+        XCTAssertEqual(records.map(\.tokenSnapshot?.totalTokens), [10, 20])
+        XCTAssertEqual(records.map(\.fileOffset), [tokenOneOffset, tokenTwoOffset])
+
+        let databaseURL = fixture.root.appendingPathComponent("usage-ledger.sqlite")
+        let ledger = LocalUsageLedgerProvider(databaseURL: databaseURL)
+        await ledger.start()
+        let sourceKey = try XCTUnwrap(LocalUsageLedgerProvider.cursorSourceKey(for: records[0]))
+        await ledger.ingest(registrations: [], observations: records.map(DesktopObservation.rollout), completeFromSessionStartSessions: [sourceKey])
+        let firstSnapshot = await ledger.snapshot()
+        XCTAssertEqual(firstSnapshot.today?.totalTokens, 20)
+        XCTAssertEqual(try fixture.usageSampleIDs(databaseURL: databaseURL), [
+            "\(sourceKey)|turn-a|\(tokenOneOffset)|10",
+            "\(sourceKey)|turn-a|\(tokenTwoOffset)|20"
+        ])
+        await ledger.stop()
+
+        let restarted = LocalUsageLedgerProvider(databaseURL: databaseURL)
+        await restarted.start()
+        await restarted.ingest(registrations: [], observations: records.map(DesktopObservation.rollout), completeFromSessionStartSessions: [sourceKey])
+        let restartedSnapshot = await restarted.snapshot()
+        XCTAssertEqual(restartedSnapshot.today?.totalTokens, 20)
+        await restarted.stop()
+    }
+
     func testTruncateAndReplacementInvalidateOldCursor() throws {
         let file = try fixture.rollout("thread-a", lines: [fixture.session("thread-a"), fixture.started("turn-a"), fixture.token(total: 10, last: 10)])
         try fixture.addThread("thread-a", rollout: file)
@@ -608,6 +662,20 @@ private final class LocalFixture {
     }
     func addThread(_ id: String, rollout: URL, title: String = "title") throws {
         try executeDatabase("INSERT INTO threads VALUES ('\(sql(id))', '\(sql(rollout.path))', '\(sql(title))', 'gpt-test', 'high', 1, 0)")
+    }
+    func usageSampleIDs(databaseURL: URL) throws -> [String] {
+        var db: OpaquePointer?
+        guard sqlite3_open(databaseURL.path, &db) == SQLITE_OK, let db else { throw POSIXError(.EIO) }
+        defer { sqlite3_close(db) }
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(db, "SELECT sample_id FROM usage_samples ORDER BY cumulative_total", -1, &statement, nil) == SQLITE_OK, let statement else { throw POSIXError(.EIO) }
+        defer { sqlite3_finalize(statement) }
+        var ids: [String] = []
+        while sqlite3_step(statement) == SQLITE_ROW {
+            guard let value = sqlite3_column_text(statement, 0) else { throw POSIXError(.EIO) }
+            ids.append(String(cString: value))
+        }
+        return ids
     }
     func addConversationNameColumn() throws { try executeDatabase("ALTER TABLE threads ADD COLUMN name TEXT") }
     func setConversationName(_ name: String?, for id: String) throws {
