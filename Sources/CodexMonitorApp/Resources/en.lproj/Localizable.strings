@@ -23,6 +23,7 @@
 "update.updated" = "Updated %@";
 "account.updated" = "Data updated %@";
 "quota.current" = "Current quota";
+"quota.lastVerified" = "Last verified %@";
 "runtime.unknown" = "Runtime Unknown";
 "quota.remaining" = "Remaining quota %@";
 "session.tokenQuota" = "Session Token %@ · Remaining quota %@";

@@ -1967,9 +1967,34 @@ final class MonitorProductIntegrationTests: XCTestCase {
         await provider.refreshOnce()
 
         let snapshot = await runtime.snapshot()
-        XCTAssertNil(snapshot.quota.primary)
-        XCTAssertEqual(MonitorDisplayValue.orbQuota(snapshot), "--")
+        XCTAssertEqual(snapshot.quota.primary?.usedPercent, 4)
+        XCTAssertEqual(MonitorDisplayValue.orbQuota(snapshot), "96%")
+        XCTAssertEqual(snapshot.accountFreshness, .temporarilyHeld)
         XCTAssertEqual(snapshot.sourceHealth[.account]?.freshness.state, .stale)
+    }
+
+    func testQuotaPublicationRecoversFreshAfterTimeoutHold() async throws {
+        let cycles = AccountRefreshCycleSequence([
+            .connected(fullRefreshAssembly(email: "account@example.test", usedPercent: 4, tokens: 45)),
+            .connectionFailure(.wholeConnectionFailure(JSONRPCTransportError.requestTimedOut)),
+            .connected(fullRefreshAssembly(email: "account@example.test", usedPercent: 20, tokens: 46))
+        ])
+        let runtime = MonitorRuntimeStore(initialPhase: .live)
+        let provider = AccountUsageProvider(runtime: runtime, refreshCycle: { await cycles.next() })
+
+        await provider.refreshOnce()
+        await provider.refreshOnce()
+
+        let held = await runtime.snapshot()
+        XCTAssertEqual(held.accountFreshness, .temporarilyHeld)
+        XCTAssertEqual(held.quota.primary?.usedPercent, 4)
+        XCTAssertEqual(MonitorDisplayValue.orbQuota(held), "96%")
+
+        await provider.refreshOnce()
+        let recovered = await runtime.snapshot()
+        XCTAssertEqual(recovered.accountFreshness, .fresh)
+        XCTAssertEqual(recovered.quota.primary?.usedPercent, 20)
+        XCTAssertEqual(MonitorDisplayValue.orbQuota(recovered), "80%")
     }
 
     func testQuotaPublicationQ3RejectsIncompleteCandidateBeforeItCanClearQuota() async throws {
@@ -2000,7 +2025,58 @@ final class MonitorProductIntegrationTests: XCTestCase {
         let timestamps = await runtime.accountRefreshTimestamps()
         XCTAssertEqual(timestamps.lastAuthoritative, authoritative)
         let calls = await cycles.callCount()
-        XCTAssertEqual(calls, 3)
+        XCTAssertEqual(calls, 2)
+    }
+
+    func testQuotaPublicationClearsHeldQuotaWhenCredentialIdentityChanges() async throws {
+        let changedCredential = AccountUsageProvider.assemble(
+            account: .success(accountRPC(email: "account@example.test", authMode: "api")),
+            rateLimits: .failure(.rpcUnavailable),
+            usage: .success(usageRPC(tokens: 99)),
+            observedAt: Date()
+        )
+        let cycles = AccountRefreshCycleSequence([
+            .connected(fullRefreshAssembly(email: "account@example.test", usedPercent: 4, tokens: 45)),
+            .connected(changedCredential),
+            .connectionFailure(.wholeConnectionFailure(JSONRPCTransportError.requestTimedOut))
+        ])
+        let runtime = MonitorRuntimeStore(initialPhase: .live)
+        let provider = AccountUsageProvider(runtime: runtime, refreshCycle: { await cycles.next() })
+
+        await provider.refreshOnce()
+        await provider.refreshOnce()
+
+        let snapshot = await runtime.snapshot()
+        XCTAssertEqual(snapshot.accountFreshness, .temporarilyHeld)
+        XCTAssertNil(snapshot.quota.primary)
+        XCTAssertEqual(MonitorDisplayValue.orbQuota(snapshot), "--")
+    }
+
+    func testUsageFailurePublishesSameCycleQuotaAndRefreshesAuthorityTime() async throws {
+        let usageFailure = AccountUsageProvider.assemble(
+            account: .success(accountRPC(email: "account@example.test")),
+            rateLimits: .success(rateLimitsRPC(usedPercent: 20)),
+            usage: .failure(.rpcUnavailable),
+            observedAt: Date()
+        )
+        let cycles = AccountRefreshCycleSequence([
+            .connected(fullRefreshAssembly(email: "account@example.test", usedPercent: 4, tokens: 45)),
+            .connected(usageFailure)
+        ])
+        let runtime = MonitorRuntimeStore(initialPhase: .live)
+        let provider = AccountUsageProvider(runtime: runtime, refreshCycle: { await cycles.next() })
+
+        await provider.refreshOnce()
+        let first = await runtime.accountRefreshTimestamps().lastAuthoritative
+        await provider.refreshOnce()
+
+        let snapshot = await runtime.snapshot()
+        XCTAssertEqual(snapshot.accountFreshness, .fresh)
+        XCTAssertEqual(snapshot.quota.primary?.usedPercent, 20)
+        XCTAssertEqual(MonitorDisplayValue.orbQuota(snapshot), "80%")
+        XCTAssertEqual(snapshot.usage.availability, .unavailable)
+        let timestamps = await runtime.accountRefreshTimestamps()
+        XCTAssertNotEqual(timestamps.lastAuthoritative, first)
     }
 
     func testQuotaPublicationQ4AtomicallyReplacesPriorSnapshotWithoutUnknown() async throws {
@@ -2422,7 +2498,7 @@ final class MonitorProductIntegrationTests: XCTestCase {
             usage: .success(usageRPC(tokens: 99)),
             observedAt: Date()
         )
-        XCTAssertTrue(absentAccount.isAuthoritativeCycle)
+        XCTAssertTrue(absentAccount.isQuotaAuthoritativeCycle)
         XCTAssertTrue(absentAccount.diagnostics.degraded)
 
         let cycles = AccountRefreshCycleSequence([.connected(absentAccount)])
@@ -2614,9 +2690,9 @@ final class MonitorProductIntegrationTests: XCTestCase {
         XCTAssertEqual(bucket.authoritativeTokens, 30_000)
     }
 
-    private func fullRefreshAssembly(email: String, planType: String = "pro", usedPercent: Double, tokens: Int) -> AccountRefreshAssembly {
+    private func fullRefreshAssembly(email: String, planType: String = "pro", authMode: String = "chatgpt", usedPercent: Double, tokens: Int) -> AccountRefreshAssembly {
         AccountUsageProvider.assemble(
-            account: .success(accountRPC(email: email, planType: planType)),
+            account: .success(accountRPC(email: email, planType: planType, authMode: authMode)),
             rateLimits: .success(rateLimitsRPC(usedPercent: usedPercent)),
             usage: .success(usageRPC(tokens: tokens)),
             observedAt: Date()
@@ -2675,10 +2751,10 @@ final class MonitorProductIntegrationTests: XCTestCase {
         XCTFail("Timed out waiting for the expected account refresh cycle")
     }
 
-    private func accountRPC(email: String = "account@example.test", planType: String = "pro") -> JSONValue {
+    private func accountRPC(email: String = "account@example.test", planType: String = "pro", authMode: String = "chatgpt") -> JSONValue {
         .object([
             "account": .object([
-                "type": .string("chatgpt"),
+                "type": .string(authMode),
                 "planType": .string(planType),
                 "email": .string(email)
             ])

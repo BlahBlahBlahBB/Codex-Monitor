@@ -374,6 +374,9 @@ public actor MonitorRuntimeStore {
     private let freshnessPolicy: MonitorRuntimeFreshnessPolicy
     private let accountCapabilities: MonitorAccountCapabilityConfiguration
     private var accountSnapshot: AccountSnapshot?
+    /// Non-nil only when AccountUsageProvider admitted a complete quota from a
+    /// known account identity in the current credential epoch.
+    private var heldQuotaCredentialEpoch: UUID?
     private var accountSource: SourceState
     private var accountRefreshDegraded = false
     private var accountDegradedSince: Date?
@@ -529,8 +532,9 @@ public actor MonitorRuntimeStore {
 
     /// Authoritative account admission is mutually exclusive with a refresh
     /// failure. Failures enter only through `markAccountRefreshDegraded()`.
-    public func ingest(account snapshot: AccountSnapshot) {
+    public func ingest(account snapshot: AccountSnapshot, heldQuotaCredentialEpoch: UUID? = nil) {
         accountSnapshot = snapshot
+        self.heldQuotaCredentialEpoch = heldQuotaCredentialEpoch
         accountRefreshDegraded = false
         lastAuthoritativeAccountRefreshAt = snapshot.provenance.observedAt
         lastRefreshAttemptAt = snapshot.provenance.observedAt
@@ -551,6 +555,14 @@ public actor MonitorRuntimeStore {
         lastRefreshAttemptAt = now
         lastRefreshFailureAt = now
         if accountDegradedSince == nil { accountDegradedSince = now }
+        publishSnapshot()
+    }
+
+    /// A later successful account/read proved a different account identity or
+    /// credential epoch. Clear the retention authorization before publishing
+    /// the degraded replacement state.
+    public func invalidateHeldQuota() {
+        heldQuotaCredentialEpoch = nil
         publishSnapshot()
     }
 
@@ -639,6 +651,12 @@ public actor MonitorRuntimeStore {
         let accountDataHealth = accountFreshness(at: now) == .fresh
             ? accountHealth
             : MonitorSourceHealth(source: .account, availability: .stale, freshness: accountHealth.freshness, reason: .sourceStale)
+        // This is intentionally quota-only. Usage and reset information stay
+        // unavailable while a refresh is degraded, and sourceHealth continues
+        // to expose the held value as stale rather than live authority.
+        let quotaDataHealth = canPresentHeldQuota(at: now)
+            ? MonitorSourceHealth(source: .account, availability: .available, freshness: accountHealth.freshness, reason: .sourceStale)
+            : accountDataHealth
         let desktopHealth = desktopHealth(for: current, lane: desktopSource, now: now)
         let approvalHealth = sourceHealth(for: .approvalLocal, state: approvalSource, now: now)
         let approvalAccessibilityHealth = sourceHealth(for: .approvalAccessibility, state: approvalAccessibilitySource, now: now)
@@ -653,7 +671,7 @@ public actor MonitorRuntimeStore {
         )
         let accountView = MonitorRuntimeSnapshotBuilder.account(account, source: accountHealth)
         let usage = MonitorRuntimeSnapshotBuilder.usage(account, source: accountDataHealth, capability: accountCapabilities.usage)
-        let quota = MonitorRuntimeSnapshotBuilder.quota(account, source: accountDataHealth, primaryCapability: accountCapabilities.primaryQuota, secondaryCapability: accountCapabilities.secondaryQuota)
+        let quota = MonitorRuntimeSnapshotBuilder.quota(account, source: quotaDataHealth, primaryCapability: accountCapabilities.primaryQuota, secondaryCapability: accountCapabilities.secondaryQuota)
         let reset = MonitorRuntimeSnapshotBuilder.reset(account, source: accountDataHealth, countCapability: accountCapabilities.resetCount, detailsCapability: accountCapabilities.resetDetails)
         let semantic = desktopSemanticState(runtime, now: now)
         return MonitorRuntimeSnapshot(capturedAt: now, monitoringPhase: monitoringPhase, currentState: semantic.state, currentStateSince: semantic.since, currentActivity: semantic.activity, currentThread: current, currentSessionThread: MonitorSessionThreadAttribution(thread: current), activeThreadCount: runtime.activeThreadCount, waitingApprovalCount: runtime.waitingApprovalCount, approvalRequestObserved: runtime.approvalRequestObserved, threads: threads, sessionToken: current?.sessionToken, account: accountView, usage: usage, quota: quota, resetInformation: reset, sourceHealth: [.desktopLocal: desktopHealth, .approvalLocal: approvalHealth, .approvalAccessibility: approvalAccessibilityHealth, .account: accountHealth], capabilities: capabilities)
@@ -692,6 +710,13 @@ public actor MonitorRuntimeStore {
             return .temporarilyHeld
         }
         return .fresh
+    }
+
+    private func canPresentHeldQuota(at now: Date) -> Bool {
+        guard accountFreshness(at: now) == .temporarilyHeld,
+              heldQuotaCredentialEpoch != nil,
+              let accountSnapshot else { return false }
+        return !accountSnapshot.rateLimitWindows.isEmpty || accountSnapshot.primaryRateLimit != nil || accountSnapshot.secondaryRateLimit != nil
     }
 
     private func accountFreshnessRecord(at now: Date) -> Freshness? {

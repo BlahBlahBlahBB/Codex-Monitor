@@ -146,6 +146,52 @@ final class MonitorRuntimeTests: XCTestCase {
         XCTAssertEqual(after.accountFreshness, .temporarilyHeld)
     }
 
+    func testCredentialBoundQuotaRemainsVisibleOnlyDuringSafeTransientHold() async {
+        let clock = RuntimeSnapshotTestClock()
+        let store = makeStore(clock: clock, freshness: MonitorRuntimeFreshnessPolicy(maximumAccountAge: 600, temporaryHoldDuration: 120))
+        let credentialEpoch = UUID()
+        await store.ingest(
+            account: accountSnapshot(clock: clock, usage: UsagePresence(totalTokens: 100), primary: RateLimitWindow(usedPercent: 25), resetCount: 1),
+            heldQuotaCredentialEpoch: credentialEpoch
+        )
+        let authoritative = await store.accountRefreshTimestamps().lastAuthoritative
+
+        clock.advance(1)
+        await store.markAccountRefreshDegraded()
+        let held = await store.snapshot()
+        XCTAssertEqual(held.accountFreshness, .temporarilyHeld)
+        XCTAssertEqual(held.quota.primary?.usedPercent, 25)
+        XCTAssertEqual(MonitorDisplayValue.orbQuota(held), "75%")
+        XCTAssertEqual(MonitorDisplayValue.remainingQuota(held), "75%")
+        XCTAssertEqual(held.sourceHealth[.account]?.freshness.state, .stale)
+        let heldTimestamps = await store.accountRefreshTimestamps()
+        XCTAssertEqual(heldTimestamps.lastAuthoritative, authoritative)
+
+        await store.invalidateHeldQuota()
+        let invalidated = await store.snapshot()
+        XCTAssertNil(invalidated.quota.primary)
+        XCTAssertEqual(MonitorDisplayValue.orbQuota(invalidated), "--")
+    }
+
+    func testCredentialBoundQuotaExpiresAtMaximumAccountAge() async {
+        let clock = RuntimeSnapshotTestClock()
+        let store = makeStore(clock: clock, freshness: MonitorRuntimeFreshnessPolicy(maximumAccountAge: 5, temporaryHoldDuration: 120))
+        await store.ingest(
+            account: accountSnapshot(clock: clock, usage: UsagePresence(totalTokens: 100), primary: RateLimitWindow(usedPercent: 25), resetCount: 1),
+            heldQuotaCredentialEpoch: UUID()
+        )
+        clock.advance(1)
+        await store.markAccountRefreshDegraded()
+        let held = await store.snapshot()
+        XCTAssertEqual(held.quota.primary?.usedPercent, 25)
+
+        clock.advance(5)
+        let expired = await store.snapshot()
+        XCTAssertEqual(expired.accountFreshness, .stale)
+        XCTAssertNil(expired.quota.primary)
+        XCTAssertEqual(MonitorDisplayValue.orbQuota(expired), "--")
+    }
+
     func testAccountFailureBecomesStaleAfterCentralHoldAndRecoveryIsFresh() async throws {
         let clock = RuntimeSnapshotTestClock()
         let store = makeStore(clock: clock, freshness: MonitorRuntimeFreshnessPolicy(maximumAccountAge: 600, temporaryHoldDuration: 30))
@@ -251,11 +297,12 @@ final class MonitorRuntimeTests: XCTestCase {
         let clock = RuntimeSnapshotTestClock()
         let store = makeStore(clock: clock, freshness: MonitorRuntimeFreshnessPolicy(maximumAccountAge: 600, temporaryHoldDuration: 120))
         let reset = clock.now().addingTimeInterval(10)
-        await store.ingest(account: accountSnapshot(clock: clock, usage: UsagePresence(totalTokens: 1), primary: RateLimitWindow(usedPercent: 40, resetsAt: reset), resetCount: 1))
+        await store.ingest(account: accountSnapshot(clock: clock, usage: UsagePresence(totalTokens: 1), primary: RateLimitWindow(usedPercent: 40, resetsAt: reset), resetCount: 1), heldQuotaCredentialEpoch: UUID())
         clock.advance(1)
         await store.markAccountRefreshDegraded()
         let held = await store.snapshot()
         XCTAssertEqual(held.accountFreshness, .temporarilyHeld)
+        XCTAssertEqual(held.quota.primary?.usedPercent, 40)
         clock.advance(11)
         let snapshot = await store.snapshot()
         XCTAssertEqual(snapshot.accountFreshness, .stale)

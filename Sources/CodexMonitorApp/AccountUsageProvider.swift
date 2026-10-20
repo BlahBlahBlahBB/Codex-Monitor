@@ -20,10 +20,10 @@ public actor AccountUsageProvider {
     private var acceptsRefreshes = true
     private var inFlightRefresh: InFlightRefresh?
     private var stoppingRefresh: InFlightRefresh?
-    /// This is deliberately a whole admitted snapshot, never individual
-    /// components. It is only used to decide whether a transient quota read
-    /// can be held while one replacement cycle is attempted.
-    private var lastCompleteSnapshot: AccountSnapshot?
+    /// A held quota is tied to a successful account identity and an in-memory
+    /// credential epoch. It is deliberately not persisted and never joined to
+    /// a later account/read result with a different identity.
+    private var lastTrustedQuota: TrustedQuota?
 
     struct RouteDependencies: Sendable {
         let officialSocketResolver: @Sendable () throws -> SocketPathCapability
@@ -166,13 +166,10 @@ public actor AccountUsageProvider {
             await markRefreshDegradedIfCurrent(operationID)
         case .connected(let assembled):
             Self.record(assembled.diagnostics, using: diagnosticRecorder)
-            // A candidate is publishable only after every required Account /
-            // Rate Limits / Usage read has reached an authoritative result.
-            // In particular, a decoded partial candidate is not presentation
-            // state: replacing the published whole snapshot with it would
-            // turn a known quota into `--` while its replacement is still
-            // unresolved.
-            guard !assembled.isAuthoritativeCycle else {
+            // Account and rate limits form the quota authority boundary.
+            // Usage is independent telemetry: its failure must not erase a
+            // same-cycle authoritative quota.
+            guard !assembled.isQuotaAuthoritativeCycle else {
                 await admit(assembled, operationID: operationID)
                 return
             }
@@ -181,9 +178,10 @@ public actor AccountUsageProvider {
             // Usage component is ever joined to a quota from another cycle.
             // `MonitorRuntimeStore` continues publishing its previous whole
             // snapshot; degradation is metadata only.
+            await invalidateHeldQuotaIfIdentityChanged(by: assembled)
             Self.recordRefreshEvent("incompleteCycleHeld", using: diagnosticRecorder)
             await markRefreshDegradedIfCurrent(operationID)
-            guard lastCompleteSnapshot != nil else { return }
+            guard lastTrustedQuota != nil else { return }
             guard isCurrent(operationID) else { return }
             Self.recordRefreshEvent("boundedRetryStarted", using: diagnosticRecorder)
             do {
@@ -204,9 +202,10 @@ public actor AccountUsageProvider {
                 await markRefreshDegradedIfCurrent(operationID)
             case .connected(let retryAssembly):
                 Self.record(retryAssembly.diagnostics, using: diagnosticRecorder)
-                if !retryAssembly.isAuthoritativeCycle {
+                if !retryAssembly.isQuotaAuthoritativeCycle {
                     // Preserve the prior coherent snapshot on a repeated
                     // incomplete cycle rather than publishing a partial one.
+                    await invalidateHeldQuotaIfIdentityChanged(by: retryAssembly)
                     Self.recordRefreshEvent("boundedRetryExhausted", using: diagnosticRecorder)
                     await markRefreshDegradedIfCurrent(operationID)
                 } else {
@@ -227,13 +226,34 @@ public actor AccountUsageProvider {
             // still describe an authoritatively absent field (for example an
             // absent account identity), but that is not a refresh failure and
             // must not downgrade the admitted authoritative snapshot.
-            await runtime.ingest(account: snapshot)
+            let credentialEpoch = credentialEpochForAdmission(of: assembled)
+            await runtime.ingest(account: snapshot, heldQuotaCredentialEpoch: credentialEpoch)
             guard isCurrent(operationID) else { return }
-            // This tracks the snapshot currently held by the runtime. Once a
-            // normal partial cycle is admitted, an older complete snapshot is
-            // no longer available to preserve as a coherent whole.
-            lastCompleteSnapshot = assembled.isCompleteQuotaSnapshot ? snapshot : nil
         }
+    }
+
+    /// Returns an epoch only for a complete, identity-bound quota snapshot.
+    /// A successful empty rate-limit response is authoritative but cannot
+    /// authorize retention of older quota data.
+    private func credentialEpochForAdmission(of assembled: AccountRefreshAssembly) -> UUID? {
+        guard assembled.isCompleteQuotaSnapshot, let identity = assembled.accountIdentity else {
+            lastTrustedQuota = nil
+            return nil
+        }
+        if lastTrustedQuota?.accountIdentity != identity {
+            lastTrustedQuota = TrustedQuota(accountIdentity: identity, credentialEpoch: UUID())
+        }
+        return lastTrustedQuota?.credentialEpoch
+    }
+
+    /// An account response is evidence of an identity/credential transition,
+    /// even when its following rate-limit read failed. Do not show the prior
+    /// account's quota while waiting for a replacement response.
+    private func invalidateHeldQuotaIfIdentityChanged(by assembled: AccountRefreshAssembly) async {
+        guard let identity = assembled.accountIdentity,
+              lastTrustedQuota?.accountIdentity != identity else { return }
+        lastTrustedQuota = nil
+        await runtime.invalidateHeldQuota()
     }
 
     private func markRefreshDegradedIfCurrent(_ operationID: UUID) async {
@@ -293,10 +313,19 @@ public actor AccountUsageProvider {
         let limits: JSONValue
         do { limits = try await client.request(method: "account/rateLimits/read") }
         catch { throw AccountRefreshStageFailure(route: route, stage: .rateLimitsRead, error: error) }
-        let usage: JSONValue
-        do { usage = try await client.request(method: "account/usage/read") }
-        catch { throw AccountRefreshStageFailure(route: route, stage: .usageRead, error: error) }
-        var assembled = assemble(account: .success(account), rateLimits: .success(limits), usage: .success(usage), observedAt: Date())
+        let usage: AccountRPCRead
+        let usageFailureReason: AccountRefreshFailureReason?
+        do {
+            usage = .success(try await client.request(method: "account/usage/read"))
+            usageFailureReason = nil
+        } catch {
+            usage = .failure(AccountRefreshDiagnosticCategory(error: error))
+            usageFailureReason = AccountRefreshFailureReason(error: error)
+        }
+        var assembled = assemble(account: .success(account), rateLimits: .success(limits), usage: usage, observedAt: Date())
+        if let usageFailureReason {
+            assembled.diagnostics = assembled.diagnostics.attributing(route: route, stage: .usageRead, reason: usageFailureReason)
+        }
         if assembled.diagnostics.account == .responseIncompatible || assembled.diagnostics.rateLimits == .responseIncompatible || assembled.diagnostics.usage == .responseIncompatible {
             assembled.diagnostics = assembled.diagnostics.attributing(route: route, stage: .responseDecode, reason: .responseIncompatible)
         }
@@ -484,7 +513,7 @@ public actor AccountUsageProvider {
             usage: usageValue,
             resetCreditCount: limitsValue?.resetCreditCount
         )
-        return AccountRefreshAssembly(snapshot: snapshot, diagnostics: diagnostics)
+        return AccountRefreshAssembly(snapshot: snapshot, diagnostics: diagnostics, accountIdentity: AccountIdentity(accountValue))
     }
 
     private static func accountMetadata(from response: JSONValue) throws -> AccountMetadata {
@@ -709,6 +738,7 @@ enum AccountRPCRead: Sendable {
         case .failure(let category): category
         }
     }
+
 }
 
 struct AccountRefreshDiagnostics: Sendable, Equatable {
@@ -775,17 +805,23 @@ struct AccountRefreshDiagnostics: Sendable, Equatable {
 struct AccountRefreshAssembly: Sendable {
     let snapshot: AccountSnapshot?
     var diagnostics: AccountRefreshDiagnostics
+    let accountIdentity: AccountIdentity?
+
+    init(snapshot: AccountSnapshot?, diagnostics: AccountRefreshDiagnostics, accountIdentity: AccountIdentity? = nil) {
+        self.snapshot = snapshot
+        self.diagnostics = diagnostics
+        self.accountIdentity = accountIdentity
+    }
 
     /// The only publication gate for an Account / Quota candidate. An
     /// explicitly absent account object is still an authoritative response;
     /// all other non-available diagnostics leave the candidate incomplete.
     /// A successful rate-limits response with no quota is `.available`, so it
     /// deliberately passes this gate and can fail closed to `Unknown`.
-    var isAuthoritativeCycle: Bool {
+    var isQuotaAuthoritativeCycle: Bool {
         let accountIsAuthoritative = diagnostics.account == .available || diagnostics.account == .accountDataAbsent
         return accountIsAuthoritative
             && diagnostics.rateLimits == .available
-            && diagnostics.usage == .available
     }
 
     /// Only an already visible, complete snapshot with an authoritative
@@ -793,7 +829,7 @@ struct AccountRefreshAssembly: Sendable {
     /// successful rate-limits RPC that contains no primary quota remains an
     /// authoritative absence and is admitted normally instead.
     var isCompleteQuotaSnapshot: Bool {
-        isAuthoritativeCycle
+        isQuotaAuthoritativeCycle
             && !(snapshot?.rateLimitWindows.isEmpty ?? true)
     }
 }
@@ -821,6 +857,25 @@ private struct AccountMetadata: Sendable {
         self.isAbsent = isAbsent
     }
 
+}
+
+/// Only a successful account/read response may establish this key. It is not
+/// emitted in diagnostics and is retained only in memory.
+struct AccountIdentity: Sendable, Equatable {
+    let email: String
+    let authMode: String
+
+    fileprivate init?(_ metadata: AccountMetadata?) {
+        guard let email = metadata?.email, !email.isEmpty,
+              let authMode = metadata?.authMode, !authMode.isEmpty else { return nil }
+        self.email = email
+        self.authMode = authMode
+    }
+}
+
+private struct TrustedQuota: Sendable {
+    let accountIdentity: AccountIdentity
+    let credentialEpoch: UUID
 }
 
 private struct RateLimitMetadata: Sendable {

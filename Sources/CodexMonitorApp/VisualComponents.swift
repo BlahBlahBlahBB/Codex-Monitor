@@ -503,9 +503,13 @@ enum MonitorDisplayValue {
     }
 
     static func remainingQuota(_ snapshot: MonitorRuntimeSnapshot?) -> String {
-        guard snapshot?.accountFreshness == .fresh else { return "--" }
+        guard let freshness = snapshot?.accountFreshness,
+              freshness == .fresh || freshness == .temporarilyHeld else { return "--" }
         guard let selected = selectedQuotaWindow(snapshot) else {
-            return availability(snapshot?.quota.primaryAvailability)
+            // A degraded hold without a credential-bound quota is not a
+            // presentable value. Do not turn that absence into a stale label
+            // in the Orb-adjacent remaining-quota surface.
+            return freshness == .fresh ? availability(snapshot?.quota.primaryAvailability) : "--"
         }
         return String(format: "%.0f%%", selected.remaining)
     }
@@ -668,6 +672,14 @@ enum MonitorDisplayValue {
         }
         guard snapshot.sourceHealth[.desktopLocal]?.availability == .available else { return L10n.tr("state.sourceUnavailable") }
         return String(format: L10n.tr("update.updated"), formatter.string(from: snapshot.capturedAt))
+    }
+
+    static func quotaFreshness(_ snapshot: MonitorRuntimeSnapshot?) -> String? {
+        guard let snapshot, snapshot.accountFreshness == .temporarilyHeld,
+              let observedAt = snapshot.sourceHealth[.account]?.freshness.observedAt else { return nil }
+        let formatter = DateFormatter()
+        formatter.timeStyle = .short
+        return String(format: L10n.tr("quota.lastVerified"), formatter.string(from: observedAt))
     }
 
     static func source(_ source: MonitorRuntimeSource) -> String {

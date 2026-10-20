@@ -64,6 +64,9 @@ struct MenuBarPopoverView: View {
                         MonitorPopoverRow(label: window.quotaRowLabel, value: window.remainingText)
                         MonitorPopoverRow(label: window.resetRowLabel, value: window.resetDateTime())
                     }
+                    if let freshness = MonitorDisplayValue.quotaFreshness(snapshot) {
+                        MonitorPopoverRow(label: L10n.tr("quota.current"), value: freshness)
+                    }
                     if QuotaWindowPresentation.windows(from: snapshot).isEmpty,
                        let snapshot,
                        snapshot.accountFreshness != .fresh {
