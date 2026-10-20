@@ -1729,13 +1729,18 @@ final class MonitorProductIntegrationTests: XCTestCase {
         let provider = AccountUsageProvider(runtime: runtime, refreshCycle: { await cycles.next() })
 
         await provider.refreshOnce()
+        let authoritative = await runtime.accountRefreshTimestamps().lastAuthoritative
         await provider.refreshOnce()
         let retained = await runtime.snapshot()
-        XCTAssertEqual(QuotaWindowPresentation.windows(from: retained, languageCode: "en").map(\.displayLabel), [])
+        XCTAssertEqual(QuotaWindowPresentation.windows(from: retained, languageCode: "en").map(\.displayLabel), ["5 hours", "1 week"])
+        XCTAssertEqual(retained.accountFreshness, .temporarilyHeld)
+        let heldTimestamps = await runtime.accountRefreshTimestamps()
+        XCTAssertEqual(heldTimestamps.lastAuthoritative, authoritative)
 
         await provider.refreshOnce()
         let replacement = await runtime.snapshot()
         XCTAssertEqual(QuotaWindowPresentation.windows(from: replacement, languageCode: "en").map(\.displayLabel), ["1 week"])
+        XCTAssertEqual(replacement.accountFreshness, .fresh)
     }
 
     func testMW7MW8MW9ZeroOwnResetAndShortToLongPresentation() {
@@ -2165,32 +2170,34 @@ final class MonitorProductIntegrationTests: XCTestCase {
             .connected(partialQuotaRefreshAssembly(email: "account-b@example.test", planType: "plus", tokens: 99)),
             .connected(fullRefreshAssembly(email: "account-b@example.test", planType: "plus", usedPercent: 20, tokens: 99))
         ])
-        let gate = AccountRefreshRetryGate()
         let runtime = MonitorRuntimeStore(initialPhase: .live)
         let provider = AccountUsageProvider(
             runtime: runtime,
-            refreshCycle: { await cycles.next() },
-            sleep: { _ in await gate.pause() }
+            refreshCycle: { await cycles.next() }
         )
         let observer = await observeAccountSnapshots(from: runtime)
         defer { observer.task.cancel() }
 
         await provider.refreshOnce()
-        let refresh = Task { await provider.refreshOnce() }
-        await waitForRetryGate(gate)
+        let authoritative = await runtime.accountRefreshTimestamps().lastAuthoritative
+        await provider.refreshOnce()
 
-        // The partial B cycle has completed, but has not been admitted. The
-        // visible snapshot remains the prior coherent A snapshot rather than
-        // an impossible Account B + Quota A composition.
+        // B is confirmed but has no authoritative quota. Never attach A's
+        // quota to B or retry this identity transition within the same cycle.
         var snapshot = await runtime.snapshot()
         XCTAssertEqual(snapshot.account.plan, "pro")
         XCTAssertNil(snapshot.quota.primary)
         XCTAssertNil(snapshot.usage.usage)
         XCTAssertEqual(snapshot.sourceHealth[.account]?.freshness.state, .stale)
+        XCTAssertEqual(MonitorDisplayValue.orbQuota(snapshot), "--")
+        let rejectedTimestamps = await runtime.accountRefreshTimestamps()
+        XCTAssertEqual(rejectedTimestamps.lastAuthoritative, authoritative)
+        let rejectedCalls = await cycles.callCount()
+        XCTAssertEqual(rejectedCalls, 2)
         await waitForObservedAccountSnapshot(observer.collector, quotaUsedPercent: nil, tokens: nil, freshness: .stale)
 
-        await gate.resume()
-        await refresh.value
+        // The next explicit refresh admits only B's own complete snapshot.
+        await provider.refreshOnce()
 
         snapshot = await runtime.snapshot()
         XCTAssertEqual(snapshot.account.plan, "plus")
@@ -2201,32 +2208,28 @@ final class MonitorProductIntegrationTests: XCTestCase {
         XCTAssertEqual(calls, 3)
     }
 
-    func testRepeatedTransientTransportFailureRetainsThePriorCoherentSnapshot() async throws {
+    func testIncompleteDifferentAccountDoesNotRetryOrRetainQuota() async throws {
         let cycles = AccountRefreshCycleSequence([
             .connected(fullRefreshAssembly(email: "account-a@example.test", usedPercent: 40, tokens: 45)),
-            .connected(partialQuotaRefreshAssembly(email: "account-b@example.test", planType: "plus", tokens: 99)),
-            .connected(partialQuotaRefreshAssembly(email: "account-b@example.test", planType: "plus", tokens: 101))
+            .connected(partialQuotaRefreshAssembly(email: "account-b@example.test", planType: "plus", tokens: 99))
         ])
-        let gate = AccountRefreshRetryGate()
         let runtime = MonitorRuntimeStore(initialPhase: .live)
         let provider = AccountUsageProvider(
             runtime: runtime,
-            refreshCycle: { await cycles.next() },
-            sleep: { _ in await gate.pause() }
+            refreshCycle: { await cycles.next() }
         )
         let observer = await observeAccountSnapshots(from: runtime)
         defer { observer.task.cancel() }
 
         await provider.refreshOnce()
         let refresh = Task { await provider.refreshOnce() }
-        await waitForRetryGate(gate)
+        await waitForObservedAccountSnapshot(observer.collector, quotaUsedPercent: nil, tokens: nil, freshness: .stale)
 
         let held = await runtime.snapshot()
         XCTAssertEqual(held.account.plan, "pro")
         XCTAssertNil(held.quota.primary)
         XCTAssertNil(held.usage.usage)
 
-        await gate.resume()
         await refresh.value
 
         let exhausted = await runtime.snapshot()
@@ -2237,7 +2240,7 @@ final class MonitorProductIntegrationTests: XCTestCase {
         XCTAssertEqual(exhausted.sourceHealth[.account]?.freshness.state, .stale)
         await waitForObservedAccountSnapshot(observer.collector, quotaUsedPercent: nil, tokens: nil, freshness: .stale)
         let calls = await cycles.callCount()
-        XCTAssertEqual(calls, 3)
+        XCTAssertEqual(calls, 2)
     }
 
     func testAuthoritativeFieldAbsenceAdmitsWithoutStartingTransportFallback() async throws {
@@ -2320,7 +2323,7 @@ final class MonitorProductIntegrationTests: XCTestCase {
     func testStopDuringBoundedRetrySleepDoesNotStartRetryCycle() async throws {
         let cycles = AccountRefreshCycleSequence([
             .connected(fullRefreshAssembly(email: "account-a@example.test", usedPercent: 40, tokens: 45)),
-            .connected(partialQuotaRefreshAssembly(email: "account-b@example.test", tokens: 99))
+            .connected(partialQuotaRefreshAssembly(email: "account-a@example.test", tokens: 99))
         ])
         let retryStarted = AccountRefreshSignal()
         let runtime = MonitorRuntimeStore(initialPhase: .live)
@@ -2340,7 +2343,8 @@ final class MonitorProductIntegrationTests: XCTestCase {
         await refresh.value
 
         let snapshot = await runtime.snapshot()
-        XCTAssertNil(snapshot.quota.primary)
+        XCTAssertEqual(snapshot.quota.primary?.usedPercent, 40)
+        XCTAssertEqual(snapshot.accountFreshness, .temporarilyHeld)
         XCTAssertEqual(snapshot.sourceHealth[.account]?.freshness.state, .stale)
         let calls = await cycles.callCount()
         XCTAssertEqual(calls, 2)
@@ -2442,9 +2446,16 @@ final class MonitorProductIntegrationTests: XCTestCase {
         let provider = AccountUsageProvider(runtime: runtime, refreshCycle: { await cycles.next() })
 
         await provider.refreshOnce()
+        let authoritative = await runtime.accountRefreshTimestamps().lastAuthoritative
         await provider.refreshOnce()
 
-        await waitForObservedAccountSnapshot(observer.collector, quotaUsedPercent: nil, tokens: nil, freshness: .stale)
+        await waitForObservedAccountSnapshot(observer.collector, quotaUsedPercent: 40, tokens: nil, freshness: .stale)
+        let held = await runtime.snapshot()
+        XCTAssertEqual(held.account.plan, "pro")
+        XCTAssertEqual(held.accountFreshness, .temporarilyHeld)
+        XCTAssertEqual(MonitorDisplayValue.orbQuota(held), "60%")
+        let heldTimestamps = await runtime.accountRefreshTimestamps()
+        XCTAssertEqual(heldTimestamps.lastAuthoritative, authoritative)
     }
 
     func testAuthoritativeZeroQuotaDoesNotRetryAndRemainsZero() async throws {
