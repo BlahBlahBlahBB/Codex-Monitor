@@ -13,6 +13,7 @@ final class MonitorSurfaceCoordinator: NSObject {
     private let refreshMonitoring: () -> Void
     private let setMonitoringPaused: (Bool) -> Void
     private let activateApprovalObserver: () -> Void
+    private let checkForUpdates: () -> Void
     private let ownership = MonitorSurfaceOwnership()
     private let loginItem = LoginItemController()
     private let notifications = MonitorNotificationController()
@@ -23,13 +24,14 @@ final class MonitorSurfaceCoordinator: NSObject {
     private var settingsWindowController: SettingsWindowController?
     private var diagnosticsWindowController: DiagnosticsWindowController?
 
-    init(model: MonitorAppModel, preferences: MonitorPreferences, localization: LocalizationController, refreshMonitoring: @escaping () -> Void, setMonitoringPaused: @escaping (Bool) -> Void, activateApprovalObserver: @escaping () -> Void) {
+    init(model: MonitorAppModel, preferences: MonitorPreferences, localization: LocalizationController, refreshMonitoring: @escaping () -> Void, setMonitoringPaused: @escaping (Bool) -> Void, activateApprovalObserver: @escaping () -> Void, checkForUpdates: @escaping () -> Void) {
         self.model = model
         self.preferences = preferences
         self.localization = localization
         self.refreshMonitoring = refreshMonitoring
         self.setMonitoringPaused = setMonitoringPaused
         self.activateApprovalObserver = activateApprovalObserver
+        self.checkForUpdates = checkForUpdates
     }
 
     func start() {
@@ -114,7 +116,8 @@ final class MonitorSurfaceCoordinator: NSObject {
                     },
                     exportDiagnostics: { [weak self] completion in self?.exportDiagnostics(completion: completion) },
                     loginItem: loginItem,
-                    showDiagnostics: { [weak self] in self?.showDiagnostics() }
+                    showDiagnostics: { [weak self] in self?.showDiagnostics() },
+                    checkForUpdates: { [weak self] in self?.checkForUpdates() }
                 )
             )
             DiagnosticEvent.record(.localization, ["event": "settingsFirstCreation", "resolvedLocale": L10n.resolvedLanguage])

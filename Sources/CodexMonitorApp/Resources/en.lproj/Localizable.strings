@@ -144,3 +144,17 @@
 "settings.quotaWarningDescription" = "Notify when remaining quota is below %d%%";
 "quota.warningActive" = "Low quota · %@ remaining";
 "quota.exhausted" = "Quota exhausted · Waiting for reset";
+"update.section" = "Updates";
+"update.check" = "Check for Updates";
+"update.checking" = "Checking for Updates";
+"update.checkingDescription" = "An update check is already in progress.";
+"update.upToDate" = "Codex Monitor is up to date";
+"update.available" = "A new Codex Monitor version is available";
+"update.currentVersion" = "Current version: %@";
+"update.availableDescription" = "Current version: %@\nNew version: %@";
+"update.releaseNotes" = "View Release Notes";
+"update.downloadGitHub" = "Download on GitHub";
+"update.remindLater" = "Remind Me Later";
+"update.unavailable" = "Unable to Check for Updates";
+"update.unavailableDescription" = "Check your network connection and try again later.";
+"update.ok" = "OK";

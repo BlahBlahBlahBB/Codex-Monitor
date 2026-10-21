@@ -617,6 +617,7 @@ struct SettingsSystemActions {
     let exportDiagnostics: (@escaping @MainActor (Result<URL, DiagnosticsExportFailure>) -> Void) -> Void
     let loginItem: LoginItemController
     let showDiagnostics: () -> Void
+    let checkForUpdates: () -> Void
 }
 
 struct NativeSettingsWindowView: View {
@@ -658,7 +659,7 @@ struct NativeSettingsWindowView: View {
         case .advanced:
             AdvancedSettingsDetail(preferences: preferences, actions: actions)
         case .about:
-            AboutSettingsDetail()
+            AboutSettingsDetail(actions: actions)
         }
     }
 }
@@ -925,11 +926,15 @@ private struct AdvancedSettingsDetail: View {
 }
 
 private struct AboutSettingsDetail: View {
+    let actions: SettingsSystemActions
     var body: some View {
         SettingsDetail(title: L10n.tr("settings.about")) {
             SettingsRow(title: L10n.tr("settings.productName")) { Text("Codex Monitor").foregroundStyle(.secondary) }
             SettingsRow(title: L10n.tr("settings.version")) { Text(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.0").foregroundStyle(.secondary).monospacedDigit() }
             SettingsRow(title: L10n.tr("settings.build")) { Text(Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "dev").foregroundStyle(.secondary).monospacedDigit() }
+            SettingsRow(title: L10n.tr("update.section")) {
+                Button(L10n.tr("update.check"), action: actions.checkForUpdates).buttonStyle(.bordered)
+            }
             SettingsRow(title: L10n.tr("settings.author")) {
                 Link(
                     "BlahBlahBlahBB",

@@ -144,3 +144,17 @@
 "settings.quotaWarningDescription" = "剩余额度低于 %d%% 时提醒";
 "quota.warningActive" = "额度偏低 · 剩余 %@";
 "quota.exhausted" = "额度已用完 · 等待额度重置";
+"update.section" = "更新";
+"update.check" = "检查更新";
+"update.checking" = "正在检查更新";
+"update.checkingDescription" = "已有更新检查正在进行。";
+"update.upToDate" = "Codex Monitor 已是最新版本";
+"update.available" = "发现 Codex Monitor 新版本";
+"update.currentVersion" = "当前版本：%@";
+"update.availableDescription" = "当前版本：%@\n新版本：%@";
+"update.releaseNotes" = "查看发布说明";
+"update.downloadGitHub" = "前往 GitHub 下载";
+"update.remindLater" = "稍后提醒";
+"update.unavailable" = "暂时无法检查更新";
+"update.unavailableDescription" = "请检查网络连接后稍后重试。";
+"update.ok" = "好";
