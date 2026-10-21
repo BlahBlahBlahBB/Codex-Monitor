@@ -56,6 +56,7 @@ final class CodexMonitorAppDelegate: NSObject, NSApplicationDelegate {
     )
     private var surfaces: MonitorSurfaceCoordinator?
     private var languageObserver: AnyCancellable?
+    let updateNotifier = GitHubUpdateNotifier()
 
     func applicationWillFinishLaunching(_ notification: Notification) {
         L10n.configure(localization)
@@ -71,7 +72,8 @@ final class CodexMonitorAppDelegate: NSObject, NSApplicationDelegate {
             localization: localization,
             refreshMonitoring: { [weak self] in self?.restartObservation() },
             setMonitoringPaused: { [weak self] in self?.setMonitoringPaused($0) },
-            activateApprovalObserver: { [weak self] in self?.activateApprovalObserver() }
+            activateApprovalObserver: { [weak self] in self?.activateApprovalObserver() },
+            checkForUpdates: { [weak self] in self?.updateNotifier.check(interactive: true) }
         )
         self.surfaces = surfaces
         model.startObserving(runtime)
@@ -86,6 +88,7 @@ final class CodexMonitorAppDelegate: NSObject, NSApplicationDelegate {
             installApplicationMenu()
         }
         startSmokeExitIfRequested()
+        updateNotifier.scheduleStartupCheck()
     }
 
     func applicationWillTerminate(_ notification: Notification) {
@@ -95,6 +98,7 @@ final class CodexMonitorAppDelegate: NSObject, NSApplicationDelegate {
         surfaces?.stop()
         Task { await driver.stop() }
         Task { await accountProvider.stop() }
+        updateNotifier.cancel()
     }
 
     private func restartObservation() {
