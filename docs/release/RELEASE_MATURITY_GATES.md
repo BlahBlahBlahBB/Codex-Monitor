@@ -1,6 +1,6 @@
 # Codex Monitor — Release Maturity Gates (Historical v1.0.1)
 
-> This file records the release-maturity decision made for v1.0.1. It is **not** an up-to-date approval or prohibition for the current v1.0.12 artifact. See the [main README](../../README.md) and the [v1.0.12 GitHub Release](https://github.com/BlahBlahBlahBB/Codex-Monitor/releases/tag/v1.0.12). The current artifact is a publicly downloadable **Preview**, signed ad-hoc and **not Apple-notarized**; it is not a stable, officially supported Codex integration.
+> This file records the release-maturity decision made for v1.0.1. It is **not** an up-to-date approval or prohibition for the latest release. See the [main README](../../README.md) and [latest GitHub Release](https://github.com/BlahBlahBlahBB/Codex-Monitor/releases/latest). The current publicly downloadable artifact is a **Preview**, signed ad-hoc and **not Apple-notarized**; it is not a stable, officially supported Codex integration.
 
 ## Recorded maturity status (v1.0.1)
 
@@ -54,4 +54,4 @@ support/disclosure wording
 
 A later Sol review must explicitly output a new release-maturity decision.
 
-At the time this decision was recorded, future packaging/release artifacts were required to retain Preview-only disclosures until a subsequent maturity review. This historical restriction must not be mistaken for a claim that v1.0.12 was notarized or that its published Preview status constitutes stable production support.
+At the time this decision was recorded, future packaging/release artifacts were required to retain Preview-only disclosures until a subsequent maturity review. This historical restriction must not be mistaken for a claim that the currently published Preview has Apple notarization or stable production support.
