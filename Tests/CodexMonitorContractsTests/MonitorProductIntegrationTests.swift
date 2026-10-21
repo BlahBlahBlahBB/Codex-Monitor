@@ -2297,6 +2297,86 @@ final class MonitorProductIntegrationTests: XCTestCase {
         XCTAssertEqual(snapshot.quota.primary?.usedPercent, 40)
     }
 
+    func testScheduledRefreshUsesFifteenSecondProductionCadenceAndStopsCleanly() async throws {
+        XCTAssertEqual(AccountUsageProvider.productionRefreshInterval, .seconds(15))
+        let probe = ScheduledRefreshProbe()
+        let clock = ManualAccountRefreshScheduleClock()
+        let scheduleClock = AccountRefreshScheduleClock(now: { await clock.now() }, sleep: { deadline in try await clock.sleep(until: deadline) })
+        let runtime = MonitorRuntimeStore(initialPhase: .live)
+        let assembly = fullRefreshAssembly(email: "account@example.test", usedPercent: 40, tokens: 45)
+        let provider = AccountUsageProvider(
+            runtime: runtime,
+            refreshInterval: .milliseconds(30),
+            refreshCycle: {
+                await probe.begin()
+                await probe.end()
+                return .connected(assembly)
+            },
+            scheduleClock: scheduleClock
+        )
+
+        await provider.start()
+        await waitForScheduledSleep(clock, deadline: .milliseconds(30))
+        await clock.advance(to: .milliseconds(30))
+        await waitForScheduledSleep(clock, deadline: .milliseconds(60))
+        await clock.advance(to: .milliseconds(60))
+        await waitForScheduledSleep(clock, deadline: .milliseconds(90))
+        await provider.stop()
+        let report = await probe.report()
+        print("SCHEDULE_NORMAL simulatedStarts=[0ms, 30ms, 60ms]")
+        XCTAssertEqual(report.starts, 3)
+        XCTAssertEqual(report.maximumInFlight, 1)
+
+        let callsAtStop = report.starts
+        await clock.advance(to: .milliseconds(120))
+        for _ in 0..<10 { await Task.yield() }
+        let afterStop = await probe.report()
+        XCTAssertEqual(afterStop.starts, callsAtStop)
+    }
+
+    func testScheduledSlowRefreshSkipsElapsedStartsWithoutOverlapOrBacklog() async throws {
+        let gate = AccountRefreshRetryGate()
+        let calls = AccountRefreshCallCounter()
+        let probe = ScheduledRefreshProbe()
+        let clock = ManualAccountRefreshScheduleClock()
+        let scheduleClock = AccountRefreshScheduleClock(now: { await clock.now() }, sleep: { deadline in try await clock.sleep(until: deadline) })
+        let runtime = MonitorRuntimeStore(initialPhase: .live)
+        let assembly = fullRefreshAssembly(email: "account@example.test", usedPercent: 40, tokens: 45)
+        let provider = AccountUsageProvider(
+            runtime: runtime,
+            refreshInterval: .milliseconds(25),
+            refreshCycle: {
+                let call = await calls.next()
+                await probe.begin()
+                if call == 1 { await gate.pause() }
+                await probe.end()
+                return .connected(assembly)
+            },
+            scheduleClock: scheduleClock
+        )
+
+        await provider.start()
+        await waitForRetryGate(gate)
+        await clock.advance(to: .milliseconds(65))
+        await gate.resume()
+        await waitForScheduledSleep(clock, deadline: .milliseconds(75))
+
+        let report = await probe.report()
+        print("SCHEDULE_SLOW simulatedStarts=[0ms] missed=[25ms, 50ms] next=75ms")
+        let callCount = await calls.value()
+        XCTAssertEqual(callCount, 1)
+        XCTAssertEqual(report.maximumInFlight, 1)
+        XCTAssertEqual(report.starts, callCount)
+
+        await clock.advance(to: .milliseconds(75))
+        await waitForRefreshCycleCount(calls, expected: 2)
+        await provider.stop()
+        await clock.advance(to: .milliseconds(100))
+        for _ in 0..<10 { await Task.yield() }
+        let callsAfterStop = await calls.value()
+        XCTAssertEqual(callsAfterStop, 2)
+    }
+
     func testStopCancelsInFlightRefreshBeforeItCanIngest() async throws {
         let started = AccountRefreshSignal()
         let late = fullRefreshAssembly(email: "late@example.test", usedPercent: 40, tokens: 45)
@@ -2762,6 +2842,22 @@ final class MonitorProductIntegrationTests: XCTestCase {
         XCTFail("Timed out waiting for the expected account refresh cycle")
     }
 
+    private func waitForRefreshCycleCount(_ calls: AccountRefreshCallCounter, expected: Int) async {
+        for _ in 0..<100 {
+            if await calls.value() == expected { return }
+            await Task.yield()
+        }
+        XCTFail("Timed out waiting for the expected scheduled account refresh cycle")
+    }
+
+    private func waitForScheduledSleep(_ clock: ManualAccountRefreshScheduleClock, deadline: Duration) async {
+        for _ in 0..<100 {
+            if await clock.isSleeping(until: deadline) { return }
+            await Task.yield()
+        }
+        XCTFail("Timed out waiting for scheduled deadline \(deadline)")
+    }
+
     private func accountRPC(email: String = "account@example.test", planType: String = "pro", authMode: String = "chatgpt") -> JSONValue {
         .object([
             "account": .object([
@@ -3079,6 +3175,52 @@ private actor AccountRefreshCallCounter {
     }
 
     func value() -> Int { calls }
+}
+
+private actor ScheduledRefreshProbe {
+    private var starts = 0
+    private var inFlight = 0
+    private var maximumInFlight = 0
+
+    func begin() {
+        starts += 1
+        inFlight += 1
+        maximumInFlight = max(maximumInFlight, inFlight)
+    }
+
+    func end() {
+        inFlight -= 1
+    }
+
+    func report() -> (starts: Int, maximumInFlight: Int) {
+        (starts, maximumInFlight)
+    }
+}
+
+private actor ManualAccountRefreshScheduleClock {
+    private var current = Duration.zero
+    private var sleepers: [(deadline: Duration, continuation: CheckedContinuation<Void, Never>)] = []
+
+    func now() -> Duration { current }
+
+    func sleep(until deadline: Duration) async throws {
+        guard current < deadline else { return }
+        await withCheckedContinuation { continuation in
+            sleepers.append((deadline, continuation))
+        }
+    }
+
+    func advance(to deadline: Duration) {
+        precondition(deadline >= current)
+        current = deadline
+        let ready = sleepers.filter { $0.deadline <= current }
+        sleepers.removeAll { $0.deadline <= current }
+        for sleeper in ready { sleeper.continuation.resume() }
+    }
+
+    func isSleeping(until deadline: Duration) -> Bool {
+        sleepers.contains { $0.deadline == deadline }
+    }
 }
 
 private struct AccountSnapshotObservation {

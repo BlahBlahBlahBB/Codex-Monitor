@@ -5,6 +5,23 @@ import CSQLite
 @testable import CodexMonitorContracts
 
 final class LocalUsageLedgerTests: XCTestCase {
+    func testInjectedClockKeepsHistoricalAdmissionWindowDeterministic() async throws {
+        let fixture = try LedgerFixture()
+        defer { fixture.remove() }
+        let ledger = LocalUsageLedgerProvider(databaseURL: fixture.databaseURL, calendar: fixture.calendar, now: { LedgerFixture.testNow })
+        let baseline = fixture.calendar.date(from: DateComponents(year: 2026, month: 8, day: 11, hour: 10))!
+        let admitted = fixture.calendar.date(from: DateComponents(year: 2026, month: 8, day: 12, hour: 10))!
+
+        await ledger.start()
+        await ledger.ingest(registrations: [], observations: [
+            fixture.token(total: 100, last: nil, at: baseline),
+            fixture.token(total: 130, last: nil, at: admitted)
+        ])
+        let snapshot = await ledger.snapshot(now: LedgerFixture.testNow)
+        XCTAssertEqual(snapshot.day(named: "2026-08-12")?.totalTokens, 30)
+        await ledger.stop()
+    }
+
     func testAdvancingTotalIsAdmittedOnceAndReplayAfterRestartDoesNotDoubleCount() async throws {
         let fixture = try LedgerFixture()
         defer { fixture.remove() }
@@ -257,6 +274,11 @@ final class LocalUsageLedgerTests: XCTestCase {
 }
 
 private final class LedgerFixture {
+    static let testNow: Date = {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(identifier: "Asia/Shanghai")!
+        return calendar.date(from: DateComponents(year: 2026, month: 8, day: 13, hour: 12))!
+    }()
     let root: URL
     let databaseURL: URL
     var calendar: Calendar

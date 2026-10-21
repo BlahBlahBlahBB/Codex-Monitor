@@ -539,13 +539,14 @@ public final class RolloutIncrementalReader: @unchecked Sendable {
     }
 
     private func consume(_ bytes: Data, identity: FileIdentity, offset: UInt64, endingOffset: UInt64, modified: Date, skipFirstPartial: Bool) -> RolloutReadResult {
+        let bufferedByteCount = UInt64(partialLine.count)
         var data = partialLine; data.append(bytes)
         let lines = data.split(separator: 0x0A, omittingEmptySubsequences: false)
         let endedWithNewline = data.last == 0x0A
         partialLine = endedWithNewline ? Data() : Data(lines.last ?? Data())
         let completeCount = endedWithNewline ? lines.count - 1 : max(0, lines.count - 1)
         var observations: [DesktopObservation] = [.sourceHealth(health(.available, reason: nil, identity: identity))]
-        var lineOffset = offset
+        var lineOffset = offset - bufferedByteCount
         for index in 0..<completeCount {
             let line = Data(lines[index])
             defer { lineOffset += UInt64(line.count + 1) }

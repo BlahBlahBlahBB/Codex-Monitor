@@ -334,9 +334,8 @@ public struct MonitorRuntimeFreshnessPolicy: Sendable, Equatable {
     /// quota/usage payload from looking current when its producer is idle.
     public let maximumAccountAge: TimeInterval
     /// The hold is deliberately short and centralized. AccountUsageProvider
-    /// normally refreshes once per minute, so two cadence intervals permit a
-    /// single retry/reconnect without representing a persistent failure as
-    /// live data.
+    /// refreshes every fifteen seconds. The two-minute cap permits bounded
+    /// recovery without representing a persistent failure as live data.
     public let temporaryHoldDuration: TimeInterval
 
     public init(maximumAccountAge: TimeInterval = 300, temporaryHoldDuration: TimeInterval = 120) {

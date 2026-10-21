@@ -6,12 +6,14 @@ import CodexMonitorContracts
 /// validated local control socket, performs only account reads, forwards one
 /// admitted snapshot to `MonitorRuntimeStore`, then closes the socket.
 public actor AccountUsageProvider {
+    public static let productionRefreshInterval: Duration = .seconds(15)
     typealias DiagnosticRecorder = @Sendable (MonitorDiagnosticCategory, [String: String]) -> Void
     private let runtime: MonitorRuntimeStore
     private let refreshInterval: Duration
     private let retryDelay: Duration
     private let refreshCycle: @Sendable () async -> AccountRefreshCycleResult
     private let sleep: @Sendable (Duration) async throws -> Void
+    private let scheduleClock: AccountRefreshScheduleClock
     private let diagnosticRecorder: DiagnosticRecorder
     private var loopTask: Task<Void, Never>?
     /// The provider remains one-shot refresh capable until its first explicit
@@ -65,22 +67,28 @@ public actor AccountUsageProvider {
         )
     }
 
-    public init(runtime: MonitorRuntimeStore, refreshInterval: Duration = .seconds(60)) {
+    /// Production quota refreshes are deliberately anchored to their planned
+    /// monotonic start times rather than to the completion of the prior read.
+    /// This keeps the visible cadence at fifteen seconds without queuing a
+    /// backlog when a local RPC takes longer than one interval.
+    public init(runtime: MonitorRuntimeStore, refreshInterval: Duration = AccountUsageProvider.productionRefreshInterval) {
         self.runtime = runtime
         self.refreshInterval = refreshInterval
         self.retryDelay = .milliseconds(500)
         self.diagnosticRecorder = Self.productionDiagnosticRecorder
         self.refreshCycle = { await Self.refresh(using: .production, diagnosticRecorder: Self.productionDiagnosticRecorder) }
         self.sleep = Self.productionSleep
+        self.scheduleClock = .production()
     }
 
     init(
         runtime: MonitorRuntimeStore,
-        refreshInterval: Duration = .seconds(60),
+        refreshInterval: Duration = .seconds(15),
         retryDelay: Duration = .milliseconds(500),
         refreshCycle: @escaping @Sendable () async -> AccountRefreshCycleResult,
         diagnosticRecorder: @escaping DiagnosticRecorder = AccountUsageProvider.productionDiagnosticRecorder,
-        sleep: @escaping @Sendable (Duration) async throws -> Void = { _ in }
+        sleep: @escaping @Sendable (Duration) async throws -> Void = { _ in },
+        scheduleClock: AccountRefreshScheduleClock = .production()
     ) {
         self.runtime = runtime
         self.refreshInterval = refreshInterval
@@ -88,15 +96,17 @@ public actor AccountUsageProvider {
         self.refreshCycle = refreshCycle
         self.diagnosticRecorder = diagnosticRecorder
         self.sleep = sleep
+        self.scheduleClock = scheduleClock
     }
 
-    init(runtime: MonitorRuntimeStore, routeDependencies: RouteDependencies, refreshInterval: Duration = .seconds(60), retryDelay: Duration = .milliseconds(500), diagnosticRecorder: @escaping DiagnosticRecorder = AccountUsageProvider.productionDiagnosticRecorder, sleep: @escaping @Sendable (Duration) async throws -> Void = { _ in }) {
+    init(runtime: MonitorRuntimeStore, routeDependencies: RouteDependencies, refreshInterval: Duration = .seconds(15), retryDelay: Duration = .milliseconds(500), diagnosticRecorder: @escaping DiagnosticRecorder = AccountUsageProvider.productionDiagnosticRecorder, sleep: @escaping @Sendable (Duration) async throws -> Void = { _ in }, scheduleClock: AccountRefreshScheduleClock = .production()) {
         self.runtime = runtime
         self.refreshInterval = refreshInterval
         self.retryDelay = retryDelay
         self.diagnosticRecorder = diagnosticRecorder
         self.refreshCycle = { await Self.refresh(using: routeDependencies, diagnosticRecorder: diagnosticRecorder) }
         self.sleep = sleep
+        self.scheduleClock = scheduleClock
     }
 
     public func start() {
@@ -104,11 +114,48 @@ public actor AccountUsageProvider {
         acceptsRefreshes = true
         loopTask = Task { [weak self] in
             guard let self else { return }
-            while !Task.isCancelled {
-                await self.refreshOnce()
-                try? await Task.sleep(for: self.refreshInterval)
+            await self.runScheduledRefreshes()
+        }
+    }
+
+    /// Runs a single serial scheduler. `ContinuousClock` is monotonic, so a
+    /// wall-clock correction cannot produce an extra request or a long pause.
+    /// A slow cycle advances over its missed planned starts; it never catches
+    /// up by launching a burst of account RPCs.
+    private func runScheduledRefreshes() async {
+        var nextStart = Duration.zero
+        while !Task.isCancelled {
+            let now = await scheduleClock.now()
+            if now < nextStart {
+                do {
+                    try await scheduleClock.sleep(nextStart)
+                } catch {
+                    break
+                }
+            }
+            guard !Task.isCancelled else { break }
+
+            await scheduledRefreshIfIdle()
+            nextStart += refreshInterval
+
+            // `scheduledRefreshIfIdle()` is intentionally awaited so no
+            // second operation can overlap it. Every elapsed planned start
+            // is recorded as skipped instead of replayed after a slow cycle.
+            let completedAt = await scheduleClock.now()
+            while nextStart <= completedAt {
+                Self.recordRefreshEvent("scheduledRefreshSkipped", using: diagnosticRecorder)
+                nextStart += refreshInterval
             }
         }
+    }
+
+    private func scheduledRefreshIfIdle() async {
+        guard acceptsRefreshes else { return }
+        guard inFlightRefresh == nil else {
+            Self.recordRefreshEvent("scheduledRefreshSkipped", using: diagnosticRecorder)
+            return
+        }
+        await refreshOnce()
     }
 
     public func stop() async {
@@ -842,6 +889,22 @@ enum AccountRefreshCycleResult: Sendable {
 private struct InFlightRefresh: Sendable {
     let id: UUID
     let task: Task<Void, Never>
+}
+
+/// Keeps production scheduling monotonic while allowing deterministic tests to
+/// advance planned time without relying on host task timing.
+struct AccountRefreshScheduleClock: Sendable {
+    let now: @Sendable () async -> Duration
+    let sleep: @Sendable (Duration) async throws -> Void
+
+    static func production() -> Self {
+        let clock = ContinuousClock()
+        let origin = clock.now
+        return Self(
+            now: { origin.duration(to: clock.now) },
+            sleep: { deadline in try await clock.sleep(until: origin.advanced(by: deadline), tolerance: nil) }
+        )
+    }
 }
 
 private struct AccountMetadata: Sendable {
