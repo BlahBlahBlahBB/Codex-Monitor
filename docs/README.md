@@ -2,7 +2,7 @@
 
 > **Historical engineering document, not the current release checklist.** This handoff records an earlier development phase and its authorization limits. Do not treat its phase permissions or release gate as current.
 >
-> Current public GitHub artifact: [v1.0.12 (Build 116)](https://github.com/BlahBlahBlahBB/Codex-Monitor/releases/tag/v1.0.12), released as an **ad-hoc-signed, non-notarized Preview**, not a stable, officially supported OpenAI integration. See the [main README](../README.md) for current installation instructions.
+> Current public GitHub artifact: [latest release](https://github.com/BlahBlahBlahBB/Codex-Monitor/releases/latest), distributed as an **ad-hoc-signed, non-notarized Preview**, not a stable, officially supported OpenAI integration. See the [main README](../README.md) for its exact version, download, and installation instructions.
 >
 > Historical status at the time: Architecture **CONDITIONAL GO**; release **INTERNAL / DEVELOPER ONLY**. The old universal Desktop-observer Phase 1–11 prompts were retired and should not be executed.
 
@@ -31,7 +31,7 @@ H2–H11 files are prewritten future execution instructions. They are **not auto
 
 ## Historical release restriction
 
-The following restriction is preserved as a record of the former phase. It does not describe the current v1.0.12 GitHub distribution status:
+The following restriction is preserved as a record of the former phase. It does not describe the current GitHub Preview distribution status:
 
 ```text
 Architecture: CONDITIONAL GO
