@@ -8,7 +8,7 @@
 
 **快速入口：** [下载 1.0.13](https://github.com/BlahBlahBlahBB/Codex-Monitor/releases/download/v1.0.13/Codex-Monitor-1.0.13-RC1-macOS-arm64.dmg) · [更新内容](https://github.com/BlahBlahBlahBB/Codex-Monitor/releases/tag/v1.0.13) · [回退至 1.0.12](https://github.com/BlahBlahBlahBB/Codex-Monitor/releases/tag/v1.0.12)
 
-> **当前版本：Codex Monitor 1.0.13**
+> **当前版本：Codex Monitor 1.0.13 (Build 117)**
 >
 > Codex Monitor 当前为 Preview，不是 Stable Public Release，也不是 OpenAI 官方产品。部分能力依赖 Codex 的本地接口与本地数据结构，Codex 更新可能暂时影响个别能力；当数据源不可用时，应用会优先显示 Unknown / Unavailable，而不是伪造状态。
 
@@ -25,6 +25,7 @@
 - [SHA-256 校验文件](https://github.com/BlahBlahBlahBB/Codex-Monitor/releases/download/v1.0.13/SHA256SUMS-v1.0.13.txt)
 - DMG SHA-256：`4542f55247dc484b9f9525eacdf5596c0979a43059a23fbfd90bdbe7b647a54b`
 - DMG 大小：`3,667,920 bytes`（约 3.7 MB）
+- 发布源码：[`fa0f5bbc7664abfb54127bc0e4887739820aca9c`](https://github.com/BlahBlahBlahBB/Codex-Monitor/commit/fa0f5bbc7664abfb54127bc0e4887739820aca9c)（`v1.0.13` Tag 精确指向该提交；后续 `main` 合并提交不改变发布来源）
 
 下载完成后，可以在终端校验文件：
 
@@ -74,7 +75,7 @@ shasum -a 256 ~/Downloads/Codex-Monitor-1.0.13-RC1-macOS-arm64.dmg
 
 自动化回归：**478 executed / 4 skipped / 0 failures**。
 
-Packaged App、DMG verify、Real QA 与最终 Release-app smoke：**PASS**。
+RC1 App / DMG 静态验证及实机 QA：**PASS**。GitHub 发布资产的 SHA-256 与原 RC1 一致；未进行真实 24 小时等待测试，也未通过公开的更高版本 Release 验证升级弹窗。
 
 <br>
 
