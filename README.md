@@ -1,7 +1,12 @@
 # Codex Monitor
-### 🟢🟡🔴
 
-一个原生 macOS Codex 辅助工具，通过菜单栏状态胶囊、桌面悬浮球、Quick View、用量和设置等界面，为 Codex 提供轻量、快速、低打扰的桌面辅助体验。
+[![Release](https://img.shields.io/badge/Release-v1.0.12-2563eb?logo=github)](https://github.com/BlahBlahBlahBB/Codex-Monitor/releases/tag/v1.0.12)
+![Platform](https://img.shields.io/badge/macOS-13%2B%20%7C%20Apple%20Silicon-111827?logo=apple)
+![Maturity](https://img.shields.io/badge/Maturity-Preview-f59e0b)
+
+**原生 macOS Codex 状态与额度辅助工具。** 通过菜单栏状态、桌面悬浮球、Quick View、用量与设置界面，快速查看 Codex 信息，尽量减少工作中断。
+
+**快速入口：** [下载 1.0.12](https://github.com/BlahBlahBlahBB/Codex-Monitor/releases/download/v1.0.12/Codex-Monitor-1.0.12-RC3-macOS-arm64.dmg) · [更新内容](https://github.com/BlahBlahBlahBB/Codex-Monitor/releases/tag/v1.0.12) · [上一个版本 1.0.11](https://github.com/BlahBlahBlahBB/Codex-Monitor/releases/tag/v1.0.11-preview)
 
 > **当前版本：Codex Monitor 1.0.12**
 >
@@ -17,8 +22,17 @@
 
 
 - [查看 v1.0.12 Release](https://github.com/BlahBlahBlahBB/Codex-Monitor/releases/tag/v1.0.12)
-- DMG SHA256：`c95244060c642e48e33a6853b753830926c573b3928fc3ca1c346eb7e01a6a1c`
-- DMG 大小：`3,641,074 bytes`
+- [SHA-256 校验文件](https://github.com/BlahBlahBlahBB/Codex-Monitor/releases/download/v1.0.12/SHA256SUMS-v1.0.12.txt)
+- DMG SHA-256：`c95244060c642e48e33a6853b753830926c573b3928fc3ca1c346eb7e01a6a1c`
+- DMG 大小：`3,641,074 bytes`（约 3.6 MB）
+
+下载完成后，可以在终端校验文件：
+
+```bash
+shasum -a 256 ~/Downloads/Codex-Monitor-1.0.12-RC3-macOS-arm64.dmg
+```
+
+输出的哈希应与上方完全一致。
 
 > 当前 Preview 为 **arm64 / Apple Silicon only**，采用 ad-hoc 签名，尚未使用 Developer ID、Apple Notarization 或 Stapling。macOS Gatekeeper 可能阻止或警告该 Preview 包；它目前用于 Preview / testing，而不是无警告的正式公开发行。
 
@@ -45,7 +59,9 @@
 
 请避免同时在 `/Applications` 中保留多个正式版 Codex Monitor 副本。多个使用相同 Bundle ID 的副本可能造成 macOS LaunchServices 启动路径或版本识别混淆。
 
-当前 Preview 尚未 Developer ID 签名或 notarize，因此 Gatekeeper 仍可能警告或阻止启动。
+当前 Preview 尚未 Developer ID 签名或 Apple 公证，因此 Gatekeeper 仍可能警告或阻止启动。**如果首次打开受到拦截**，先核对下载来源及 SHA-256；在尝试打开应用后，可前往 **系统设置 → 隐私与安全性 → 仍要打开**（若系统提供此选项）确认。不要为了绕过拦截执行不明来源的终端命令。
+
+当前版本**未提供静默自动更新**；升级请按照以上步骤手动安装。需要回退时，可从 [v1.0.11-preview](https://github.com/BlahBlahBlahBB/Codex-Monitor/releases/tag/v1.0.11-preview) 下载上一版本。
 
 <br>
 
