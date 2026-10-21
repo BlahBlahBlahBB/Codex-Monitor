@@ -27,6 +27,8 @@ final class CrossMachineValidationTests: XCTestCase {
                 XCTAssertTrue(body.contains("project_root=\"$(cd \"$(dirname \"$0\")/..\" && pwd)\""))
                 XCTAssertTrue(body.contains("cp \"$executable\""))
                 XCTAssertTrue(body.contains("ditto \"$resource_bundle\""))
+                XCTAssertTrue(body.contains("Add :UIBuildRevision string $build_revision"))
+                XCTAssertTrue(body.contains("git -C \"$project_root\" rev-parse HEAD"))
             }
             for value in developerBindings {
                 XCTAssertFalse(body.contains(value), "production input must not contain \(value): \(url.lastPathComponent)")
@@ -60,13 +62,25 @@ final class CrossMachineValidationTests: XCTestCase {
         XCTAssertFalse(desktopDriver.contains("ProcessInfo.processInfo.environment[\"HOME\"]"))
     }
 
+    func testApprovalObserverLifecycleIsIndependentOfNotificationDeliveryPreference() throws {
+        let root = projectRoot
+        let coordinator = try String(contentsOf: root.appendingPathComponent("Sources/CodexMonitorApp/MonitorSurfaceCoordinator.swift"), encoding: .utf8)
+        let appDelegate = try String(contentsOf: root.appendingPathComponent("Sources/CodexMonitorApp/CodexMonitorApp.swift"), encoding: .utf8)
+
+        XCTAssertTrue(coordinator.contains("activateApprovalObserver()"))
+        XCTAssertFalse(coordinator.contains("approvalPreferenceObserver"))
+        XCTAssertFalse(coordinator.contains("waitingApprovalNotifications"))
+        XCTAssertTrue(appDelegate.contains("_ = await approvalIntegration.reconcile(enabled: true)"))
+        XCTAssertFalse(appDelegate.contains("preferences.waitingApprovalNotifications = false"))
+    }
+
     func testFreshAccountAbsenceAndSourceRecoveryStaySafeWithoutRestart() async throws {
         let runtime = MonitorRuntimeStore(initialPhase: .live)
 
         var snapshot = await runtime.snapshot()
-        XCTAssertEqual(snapshot.account.availability, .unknown)
+        XCTAssertEqual(snapshot.account.availability, .unavailable)
         XCTAssertNil(snapshot.account.accountKind)
-        XCTAssertEqual(snapshot.quota.primaryAvailability, .unknown)
+        XCTAssertEqual(snapshot.quota.primaryAvailability, .stale)
         XCTAssertNil(snapshot.quota.primary)
         XCTAssertEqual(MonitorDisplayValue.orbQuota(snapshot), "--")
         XCTAssertNotEqual(MonitorDisplayValue.remainingQuota(snapshot), "0%")
@@ -75,7 +89,7 @@ final class CrossMachineValidationTests: XCTestCase {
         // It must not invent a zero quota or a placeholder account.
         await runtime.markAccountRefreshDegraded()
         snapshot = await runtime.snapshot()
-        XCTAssertEqual(snapshot.account.availability, .unknown)
+        XCTAssertEqual(snapshot.account.availability, .unavailable)
         XCTAssertEqual(MonitorDisplayValue.orbQuota(snapshot), "--")
 
         await runtime.ingest(account: try accountSnapshot(email: "alice@example.test", usedPercent: 40, tokens: 45))

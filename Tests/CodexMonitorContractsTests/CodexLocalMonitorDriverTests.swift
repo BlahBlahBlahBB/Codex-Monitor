@@ -5,6 +5,135 @@ import CSQLite
 @testable import CodexMonitorApp
 
 final class CodexLocalMonitorDriverTests: XCTestCase {
+    func testStateDBTransientWALDiagnosticIsDeduplicatedThenReemittedAfterRecovery() async throws {
+        let fixture = try DriverFixture(turn: "t1", terminal: false)
+        defer { fixture.cleanup() }
+        let recorder = DriverDiagnosticRecorder()
+        let driver = fixture.driver(runtime: MonitorRuntimeStore(), resolver: nil, diagnosticRecorder: { recorder.record($0) })
+
+        await driver.refreshOnce() // valid main DB, WAL absent
+        recorder.clear()
+
+        var writer: OpaquePointer?
+        XCTAssertEqual(sqlite3_open_v2(fixture.database.path, &writer, SQLITE_OPEN_READWRITE | SQLITE_OPEN_FULLMUTEX, nil), SQLITE_OK)
+        guard let firstWriter = writer else { return XCTFail("Could not open WAL fixture writer") }
+        try sql(firstWriter, "PRAGMA journal_mode = WAL")
+        try sql(firstWriter, "UPDATE threads SET updated_at = 2 WHERE id = 'thread-a'")
+        let walURL = URL(fileURLWithPath: fixture.database.path + "-wal")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: walURL.path))
+        try FileManager.default.removeItem(at: walURL)
+
+        await driver.refreshOnce()
+        XCTAssertEqual(recorder.count(event: "STATE_DB_TRANSIENT_WAL_MISSING"), 1)
+        XCTAssertEqual(recorder.count(event: "STATE_DB_READ_FAILURE"), 0)
+        await driver.refreshOnce()
+        await driver.refreshOnce()
+        XCTAssertEqual(recorder.count(event: "STATE_DB_TRANSIENT_WAL_MISSING"), 1)
+
+        sqlite3_close(firstWriter)
+        writer = nil
+        var recoveryWriter: OpaquePointer?
+        XCTAssertEqual(sqlite3_open_v2(fixture.database.path, &recoveryWriter, SQLITE_OPEN_READWRITE | SQLITE_OPEN_FULLMUTEX, nil), SQLITE_OK)
+        guard let recoveryWriter else { return XCTFail("Could not reopen WAL fixture writer") }
+        try sql(recoveryWriter, "PRAGMA journal_mode = WAL")
+        try sql(recoveryWriter, "UPDATE threads SET updated_at = 3 WHERE id = 'thread-a'")
+        await driver.refreshOnce() // success clears the deduplication gate
+        try FileManager.default.removeItem(at: walURL)
+        await driver.refreshOnce()
+        XCTAssertEqual(recorder.count(event: "STATE_DB_TRANSIENT_WAL_MISSING"), 2)
+        XCTAssertEqual(recorder.count(event: "STATE_DB_READ_FAILURE"), 0)
+
+        sqlite3_close(recoveryWriter)
+        try FileManager.default.removeItem(at: fixture.database)
+        await driver.refreshOnce()
+        XCTAssertEqual(recorder.count(event: "STATE_DB_READ_FAILURE"), 1)
+        await driver.refreshOnce()
+        XCTAssertEqual(recorder.count(event: "STATE_DB_READ_FAILURE"), 1)
+    }
+
+    func testDistinctStateDBFailuresDoNotCollapseIntoOneDedupEpisode() async throws {
+        let fixture = try DriverFixture(turn: "t1", terminal: false)
+        defer { fixture.cleanup() }
+        let recorder = DriverDiagnosticRecorder()
+        let driver = fixture.driver(runtime: MonitorRuntimeStore(), resolver: nil, diagnosticRecorder: { recorder.record($0) })
+        await driver.refreshOnce()
+        recorder.clear()
+
+        var database: OpaquePointer?
+        XCTAssertEqual(sqlite3_open_v2(fixture.database.path, &database, SQLITE_OPEN_READWRITE | SQLITE_OPEN_FULLMUTEX, nil), SQLITE_OK)
+        guard let database else { return XCTFail("Could not open StateDB fixture") }
+        try sql(database, "PRAGMA user_version = 1")
+        sqlite3_close(database)
+        await driver.refreshOnce() // schemaMismatch
+
+        try FileManager.default.removeItem(at: fixture.database)
+        await driver.refreshOnce() // readOnlyOpenFailed: distinct fatal StateDBError
+
+        let failures = recorder.events().filter { $0["event"] == "STATE_DB_READ_FAILURE" }
+        XCTAssertEqual(failures.count, 2)
+        XCTAssertEqual(failures.map { $0["failure"] }, ["stateDB:schemaMismatch", "stateDB:readOnlyOpenFailed"])
+    }
+
+    func testStateDBTransitionChainSuppressesOnlyConsecutiveDuplicate() async throws {
+        let fixture = try DriverFixture(turn: "t1", terminal: false)
+        defer { fixture.cleanup() }
+        let recorder = DriverDiagnosticRecorder()
+        let driver = fixture.driver(runtime: MonitorRuntimeStore(), resolver: nil, diagnosticRecorder: { recorder.record($0) })
+        await driver.refreshOnce()
+        recorder.clear()
+
+        try fixture.setStateDBUserVersion(1)
+        await driver.refreshOnce() // A: schemaMismatch
+        try FileManager.default.removeItem(at: fixture.database)
+        await driver.refreshOnce() // B: readOnlyOpenFailed
+        await driver.refreshOnce() // B: exact duplicate, suppressed
+        try fixture.recreateStateDatabase()
+        try fixture.setStateDBUserVersion(1)
+        await driver.refreshOnce() // A: schemaMismatch, new transition
+
+        let failures = recorder.events().filter { $0["event"] == "STATE_DB_READ_FAILURE" }
+        XCTAssertEqual(failures.map { $0["failure"] }, [
+            "stateDB:schemaMismatch",
+            "stateDB:readOnlyOpenFailed",
+            "stateDB:schemaMismatch"
+        ])
+    }
+
+    func testStateDBSuccessResetsEpisodeBeforeDifferentFailure() async throws {
+        let fixture = try DriverFixture(turn: "t1", terminal: false)
+        defer { fixture.cleanup() }
+        let recorder = DriverDiagnosticRecorder()
+        let driver = fixture.driver(runtime: MonitorRuntimeStore(), resolver: nil, diagnosticRecorder: { recorder.record($0) })
+        await driver.refreshOnce()
+        recorder.clear()
+
+        try fixture.setStateDBUserVersion(1)
+        await driver.refreshOnce() // A: schemaMismatch
+        try fixture.setStateDBUserVersion(0)
+        await driver.refreshOnce() // production success resets the episode
+        try FileManager.default.removeItem(at: fixture.database)
+        await driver.refreshOnce() // B: readOnlyOpenFailed
+
+        let failures = recorder.events().filter { $0["event"] == "STATE_DB_READ_FAILURE" }
+        XCTAssertEqual(failures.map { $0["failure"] }, ["stateDB:schemaMismatch", "stateDB:readOnlyOpenFailed"])
+    }
+
+    func testStateDBDiagnosticFinalFieldsDoNotLeakFixturePathMarker() async throws {
+        let marker = "SYNTHETIC_STATEDB_PATH_MARKER"
+        let fixture = try DriverFixture(turn: "t1", terminal: false, diagnosticPathMarker: marker)
+        defer { fixture.cleanup() }
+        let recorder = DriverDiagnosticRecorder()
+        let driver = fixture.driver(runtime: MonitorRuntimeStore(), resolver: nil, diagnosticRecorder: { recorder.record($0) })
+        await driver.refreshOnce()
+        recorder.clear()
+
+        try FileManager.default.removeItem(at: fixture.database)
+        await driver.refreshOnce()
+
+        let emitted = try XCTUnwrap(recorder.events().first { $0["event"] == "STATE_DB_READ_FAILURE" })
+        XCTAssertFalse(emitted.values.joined(separator: "|").contains(marker))
+    }
+
     func testProductionDriverBootstrapRestoresExactPendingFromCheckpointRoundTrip() async throws {
         let fixture = try DriverFixture(turn: "t1", terminal: false)
         defer { fixture.cleanup() }
@@ -137,6 +266,152 @@ final class CodexLocalMonitorDriverTests: XCTestCase {
         XCTAssertEqual(snapshot.currentThread?.threadID.rawID, "thread-a")
     }
 
+    func testContextRecordsCannotCreateActiveIdleActiveArbitrationGap() async throws {
+        let fixture = try DriverFixture(turn: "historical-a", terminal: false, includeSecondThread: true)
+        defer { fixture.cleanup() }
+        let runtime = MonitorRuntimeStore()
+        let driver = fixture.driver(runtime: runtime, resolver: nil)
+
+        await driver.refreshOnce()
+        fixture.appendFreshTurnStartAndContextMessagesForThreadA()
+        await driver.refreshOnce()
+
+        let snapshot = await runtime.snapshot()
+        XCTAssertEqual(snapshot.currentThread?.threadID.rawID, "thread-a")
+        XCTAssertEqual(snapshot.currentThread?.activeTurnID?.rawID, "t1")
+        XCTAssertEqual(snapshot.currentState, .thinking)
+        XCTAssertNotEqual(snapshot.currentState, .idle)
+    }
+
+    func testToolProgressWithoutPermissionRequestCannotCreateYellowPresentation() async throws {
+        let fixture = try DriverFixture(turn: "t1", terminal: false)
+        defer { fixture.cleanup() }
+        let resolver = try XCTUnwrap(KeyedHookApprovalIdentityDeriver(keyMaterial: Data("tool-progress".utf8)))
+        let owner = try XCTUnwrap(resolver.owner(sourceRawID: "codex-desktop-local", sessionRawID: "thread-a", turnRawID: "t1"))
+        let runtime = MonitorRuntimeStore()
+        let driver = fixture.driver(runtime: runtime, resolver: resolver)
+
+        await driver.refreshOnce()
+        fixture.appendFreshTurnStartForThreadA()
+        await driver.refreshOnce()
+        let completion = try XCTUnwrap(HookApprovalJournalRecord(
+            journalEventID: .init(1)!,
+            kind: .postToolUse,
+            sourceID: owner.sourceID,
+            sessionID: owner.sessionID,
+            turnID: owner.turnID,
+            observedAtMilliseconds: 2
+        ))
+        fixture.journalSource.records = [try JSONEncoder().encode(completion)]
+        await driver.refreshOnce()
+
+        let snapshot = await runtime.snapshot()
+        XCTAssertNotEqual(snapshot.currentState, .waitingApproval)
+        XCTAssertEqual(snapshot.waitingApprovalCount, 0)
+        XCTAssertNotEqual(VisualStatePresentation.forSnapshot(snapshot).orbTone, .yellow)
+    }
+
+    func testActiveToolHeavyContextThreadSurvivesBoundedDiscoveryAndForeignStaleApprovalCannotTurnOrbYellow() async throws {
+        let fixture = try DriverFixture(turn: "historical-a", terminal: false, includeSecondThread: true)
+        defer { fixture.cleanup() }
+        let resolver = try XCTUnwrap(KeyedHookApprovalIdentityDeriver(keyMaterial: Data("full-arbitration".utf8)))
+        // Thread B carries durable, historical approval evidence for a turn
+        // that is not its live rollout turn. This is the stale side of the
+        // former false-yellow arbitration chain.
+        let staleB = try XCTUnwrap(resolver.owner(sourceRawID: "codex-desktop-local", sessionRawID: "thread-b", turnRawID: "b-stale"))
+        try fixture.persist(owner: staleB, health: .available)
+        let runtime = MonitorRuntimeStore()
+        let driver = fixture.driver(runtime: runtime, resolver: resolver)
+
+        await driver.refreshOnce()
+        // Keep B inside the active-reader set while its stale checkpoint
+        // evidence is present, so bounded discovery cannot hide the cross-
+        // thread arbitration case by simply dropping B.
+        fixture.appendFreshTurnStartForThreadB()
+        await driver.refreshOnce()
+        fixture.appendFreshToolHeavyContextTurnForThreadA()
+        await driver.refreshOnce()
+
+        func assertAIsRepresentativeAndNotYellow() async throws {
+            let snapshot = await runtime.snapshot()
+            let a = try XCTUnwrap(snapshot.threads.first { $0.threadID.rawID == "thread-a" })
+            let b = try XCTUnwrap(snapshot.threads.first { $0.threadID.rawID == "thread-b" })
+            XCTAssertEqual(a.activeTurnID?.rawID, "t1")
+            XCTAssertEqual(a.state, .working)
+            XCTAssertNotEqual(b.state, .waitingApproval)
+            XCTAssertEqual(snapshot.currentThread?.threadID.rawID, "thread-a")
+            XCTAssertEqual(snapshot.currentState, .working)
+            XCTAssertEqual(snapshot.waitingApprovalCount, 0)
+            XCTAssertNotEqual(VisualStatePresentation.forSnapshot(snapshot).orbTone, .yellow)
+        }
+
+        try await assertAIsRepresentativeAndNotYellow()
+        try fixture.addNewerIdleThreads(count: 12)
+        await driver.refreshOnce()
+        try await assertAIsRepresentativeAndNotYellow()
+        await driver.refreshOnce()
+        try await assertAIsRepresentativeAndNotYellow()
+
+        // A real, exact human PermissionRequest on A must still take over the
+        // presentation as yellow despite B's unrelated stale checkpoint row.
+        let liveA = try XCTUnwrap(resolver.owner(sourceRawID: "codex-desktop-local", sessionRawID: "thread-a", turnRawID: "t1"))
+        let request = try XCTUnwrap(HookApprovalJournalRecord(
+            journalEventID: .init(2)!,
+            kind: .permissionRequest,
+            sourceID: liveA.sourceID,
+            sessionID: liveA.sessionID,
+            turnID: liveA.turnID,
+            observedAtMilliseconds: 2,
+            reviewer: .user
+        ))
+        fixture.journalSource.records.append(try JSONEncoder().encode(request))
+        await driver.refreshOnce()
+        let approved = await runtime.snapshot()
+        XCTAssertEqual(approved.currentThread?.threadID.rawID, "thread-a")
+        XCTAssertEqual(approved.currentState, .waitingApproval)
+        XCTAssertTrue(approved.userAttentionRequired)
+        XCTAssertEqual(VisualStatePresentation.forSnapshot(approved).orbTone, .yellow)
+
+        let resolution = try XCTUnwrap(HookApprovalJournalRecord(
+            journalEventID: .init(3)!,
+            kind: .postToolUse,
+            sourceID: liveA.sourceID,
+            sessionID: liveA.sessionID,
+            turnID: liveA.turnID,
+            observedAtMilliseconds: 3
+        ))
+        fixture.journalSource.records.append(try JSONEncoder().encode(resolution))
+        await driver.refreshOnce()
+        try await assertAIsRepresentativeAndNotYellow()
+
+        fixture.appendSuccessfulTerminalForThreadA()
+        await driver.refreshOnce()
+        let terminal = await runtime.snapshot()
+        XCTAssertEqual(terminal.threads.first { $0.threadID.rawID == "thread-a" }?.state, .completed)
+        XCTAssertEqual(terminal.currentThread?.threadID.rawID, "thread-b")
+        XCTAssertEqual(terminal.currentState, .thinking)
+        XCTAssertEqual(terminal.waitingApprovalCount, 0)
+        XCTAssertNotEqual(VisualStatePresentation.forSnapshot(terminal).orbTone, .yellow)
+    }
+
+    func testBoundedRecentDiscoveryCannotEvictKnownActiveThread() async throws {
+        let fixture = try DriverFixture(turn: "historical-a", terminal: false)
+        defer { fixture.cleanup() }
+        let runtime = MonitorRuntimeStore()
+        let driver = fixture.driver(runtime: runtime, resolver: nil)
+
+        await driver.refreshOnce()
+        fixture.appendFreshTurnStartForThreadA()
+        await driver.refreshOnce()
+        try fixture.addNewerIdleThreads(count: 12)
+        await driver.refreshOnce()
+
+        let snapshot = await runtime.snapshot()
+        XCTAssertEqual(snapshot.currentThread?.threadID.rawID, "thread-a")
+        XCTAssertEqual(snapshot.currentThread?.activeTurnID?.rawID, "t1")
+        XCTAssertEqual(snapshot.currentState, .thinking)
+    }
+
 
     func testSourceUserRequestProducesYellowAndOneNotification() async throws {
         try await verifySourceRequest(reviewer: "user", attention: true)
@@ -225,6 +500,59 @@ final class CodexLocalMonitorDriverTests: XCTestCase {
                 XCTAssertFalse(snapshot.userAttentionRequired)
             }
         }
+    }
+
+    func testSuppressedApprovalDeliveryStillConsumesLifecycleAndNeverReplaysAfterEnabling() async throws {
+        let fixture = try DriverFixture(turn: "t1", terminal: false)
+        defer { fixture.cleanup() }
+        let resolver = try XCTUnwrap(KeyedHookApprovalIdentityDeriver(keyMaterial: Data("suppressed-lifecycle".utf8)))
+        let owner = try XCTUnwrap(resolver.owner(sourceRawID: "codex-desktop-local", sessionRawID: "thread-a", turnRawID: "t1"))
+        let checkpoint = InMemoryApprovalCheckpointStore()
+        let delivery = ApprovalOutboxDispositionRecorder(disposition: .suppressed)
+        let runtime = MonitorRuntimeStore()
+        let driver = fixture.driver(
+            runtime: runtime,
+            resolver: resolver,
+            approvalCheckpointStore: checkpoint,
+            approvalNotificationDelivery: { intent in await delivery.deliver(intent) }
+        )
+
+        await driver.refreshOnce()
+        fixture.appendFreshTurnStartForThreadA()
+        try fixture.appendPermissionRequest(owner: owner, eventID: 7)
+        await driver.refreshOnce()
+
+        let waiting = await runtime.snapshot()
+        XCTAssertEqual(waiting.currentState, .waitingApproval)
+        XCTAssertEqual(waiting.waitingApprovalCount, 1)
+        let attemptedWhileOff = await delivery.attempted()
+        let confirmedWhileOff = await delivery.confirmed()
+        XCTAssertEqual(attemptedWhileOff.map(\.journalEventID), [HookApprovalJournalEventID(7)!])
+        XCTAssertTrue(confirmedWhileOff.isEmpty)
+        XCTAssertTrue(checkpoint.latest().notificationOutbox.isEmpty)
+
+        let resolution = try XCTUnwrap(HookApprovalJournalRecord(
+            journalEventID: HookApprovalJournalEventID(8)!,
+            kind: .postToolUse,
+            sourceID: owner.sourceID,
+            sessionID: owner.sessionID,
+            turnID: owner.turnID,
+            observedAtMilliseconds: 8
+        ))
+        fixture.journalSource.records.append(try JSONEncoder().encode(resolution))
+        await driver.refreshOnce()
+
+        let resolved = await runtime.snapshot()
+        XCTAssertEqual(resolved.currentState, .thinking)
+        XCTAssertEqual(resolved.waitingApprovalCount, 0)
+        XCTAssertTrue(checkpoint.latest().notificationOutbox.isEmpty)
+
+        await delivery.setDisposition(.confirmed)
+        await driver.refreshOnce()
+        let attemptedAfterEnable = await delivery.attempted()
+        let confirmedAfterEnable = await delivery.confirmed()
+        XCTAssertEqual(attemptedAfterEnable.map(\.journalEventID), [HookApprovalJournalEventID(7)!])
+        XCTAssertTrue(confirmedAfterEnable.isEmpty)
     }
 
     func testNotificationUsesExactRequestReviewerEvenWhenSameTurnHasHumanPending() async throws {
@@ -413,10 +741,12 @@ final class CodexLocalMonitorDriverTests: XCTestCase {
 
 private final class DriverFixture {
     let root: URL; let checkpoint: URL; let journalSource = FixtureJournalSource()
+    var database: URL { root.appendingPathComponent("state_5.sqlite") }
     private let threadARollout: URL
     private let threadBRollout: URL?
-    init(turn: String, terminal: Bool, includeSecondThread: Bool = false) throws {
-        root = FileManager.default.temporaryDirectory.appendingPathComponent("driver-hook-\(UUID().uuidString)")
+    init(turn: String, terminal: Bool, includeSecondThread: Bool = false, diagnosticPathMarker: String? = nil) throws {
+        let rootName = diagnosticPathMarker.map { "driver-hook-\($0)-\(UUID().uuidString)" } ?? "driver-hook-\(UUID().uuidString)"
+        root = FileManager.default.temporaryDirectory.appendingPathComponent(rootName)
         checkpoint = root.appendingPathComponent("checkpoint.json")
         let sessions = root.appendingPathComponent("sessions")
         try FileManager.default.createDirectory(at: sessions, withIntermediateDirectories: true)
@@ -446,8 +776,8 @@ private final class DriverFixture {
         let record = try XCTUnwrap(HookApprovalJournalRecord(journalEventID: eventID, kind: .permissionRequest, sourceID: owner.sourceID, sessionID: owner.sessionID, turnID: owner.turnID, observedAtMilliseconds: 1))
         journalSource.records = [try JSONEncoder().encode(record)]
     }
-    func driver(runtime: MonitorRuntimeStore, resolver: (any HookApprovalIdentityResolving)?, approvalCheckpointStore: (any ApprovalLifecycleCheckpointStoring)? = nil, processIsRunning: @escaping @Sendable () -> Bool = { true }, approvalNotificationDelivery: @escaping @Sendable (ApprovalNotificationOutboxIntent) async -> ApprovalNotificationDeliveryDisposition = { _ in .retry }) -> CodexLocalMonitorDriver {
-        CodexLocalMonitorDriver(runtime: runtime, codexRoot: root, hookJournalSource: journalSource, hookIdentityResolver: resolver, approvalCheckpointURL: checkpoint, approvalCheckpointStore: approvalCheckpointStore, processIsRunning: processIsRunning, approvalNotificationDelivery: approvalNotificationDelivery)
+    func driver(runtime: MonitorRuntimeStore, resolver: (any HookApprovalIdentityResolving)? , approvalCheckpointStore: (any ApprovalLifecycleCheckpointStoring)? = nil, processIsRunning: @escaping @Sendable () -> Bool = { true }, approvalNotificationDelivery: @escaping @Sendable (ApprovalNotificationOutboxIntent) async -> ApprovalNotificationDeliveryDisposition = { _ in .retry }, diagnosticRecorder: (@Sendable ([String: String]) -> Void)? = nil) -> CodexLocalMonitorDriver {
+        CodexLocalMonitorDriver(runtime: runtime, codexRoot: root, hookJournalSource: journalSource, hookIdentityResolver: resolver, approvalCheckpointURL: checkpoint, approvalCheckpointStore: approvalCheckpointStore, processIsRunning: processIsRunning, approvalNotificationDelivery: approvalNotificationDelivery, diagnosticRecorder: diagnosticRecorder)
     }
 
     func appendSourcePermissionRequest(reviewer: String, key: Data) throws {
@@ -470,13 +800,86 @@ private final class DriverFixture {
         let line = "{\"type\":\"event_msg\",\"payload\":{\"type\":\"task_started\",\"turn_id\":\"t1\",\"started_at\":2}}\n"
         if let handle = try? FileHandle(forWritingTo: threadARollout) { defer { try? handle.close() }; handle.seekToEndOfFile(); try? handle.write(contentsOf: Data(line.utf8)) }
     }
+    func appendFreshTurnStartAndContextMessagesForThreadA() {
+        let lines = [
+            "{\"type\":\"event_msg\",\"payload\":{\"type\":\"task_started\",\"turn_id\":\"t1\",\"started_at\":2}}",
+            "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"developer\",\"id\":\"developer-context\"}}",
+            "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"user\",\"id\":\"user-context\"}}"
+        ].joined(separator: "\n") + "\n"
+        if let handle = try? FileHandle(forWritingTo: threadARollout) {
+            defer { try? handle.close() }
+            handle.seekToEndOfFile()
+            try? handle.write(contentsOf: Data(lines.utf8))
+        }
+    }
+    func appendFreshToolHeavyContextTurnForThreadA() {
+        let lines = [
+            "{\"type\":\"event_msg\",\"payload\":{\"type\":\"task_started\",\"turn_id\":\"t1\",\"started_at\":2}}",
+            "{\"type\":\"response_item\",\"payload\":{\"type\":\"function_call\",\"call_id\":\"tool-a\"}}",
+            "{\"type\":\"response_item\",\"payload\":{\"type\":\"function_call_output\",\"call_id\":\"tool-a\"}}",
+            "{\"type\":\"response_item\",\"payload\":{\"type\":\"custom_tool_call\",\"call_id\":\"tool-b\"}}",
+            "{\"type\":\"response_item\",\"payload\":{\"type\":\"custom_tool_call_output\",\"call_id\":\"tool-b\"}}",
+            "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"developer\",\"id\":\"developer-context\"}}",
+            "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"user\",\"id\":\"user-context\"}}",
+            "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"system\",\"id\":\"system-context\"}}",
+            "{\"type\":\"response_item\",\"payload\":{\"type\":\"function_call\",\"call_id\":\"tool-c\"}}"
+        ].joined(separator: "\n") + "\n"
+        if let handle = try? FileHandle(forWritingTo: threadARollout) {
+            defer { try? handle.close() }
+            handle.seekToEndOfFile()
+            try? handle.write(contentsOf: Data(lines.utf8))
+        }
+    }
+    func appendSuccessfulTerminalForThreadA() {
+        let line = "{\"timestamp\":\"2030-01-01T00:00:00Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"task_complete\",\"turn_id\":\"t1\",\"completed_at\":1893456000}}\n"
+        if let handle = try? FileHandle(forWritingTo: threadARollout) {
+            defer { try? handle.close() }
+            handle.seekToEndOfFile()
+            try? handle.write(contentsOf: Data(line.utf8))
+        }
+    }
     func appendFreshTurnStartForThreadB() { guard let threadBRollout else { return }; let line = "{\"type\":\"event_msg\",\"payload\":{\"type\":\"task_started\",\"turn_id\":\"b1\",\"started_at\":2}}\n"; if let handle = try? FileHandle(forWritingTo: threadBRollout) { defer { try? handle.close() }; handle.seekToEndOfFile(); try? handle.write(contentsOf: Data(line.utf8)) } }
+    func addNewerIdleThreads(count: Int) throws {
+        let database = root.appendingPathComponent("state_5.sqlite")
+        var db: OpaquePointer?
+        guard sqlite3_open(database.path, &db) == SQLITE_OK else { throw POSIXError(.EIO) }
+        defer { sqlite3_close(db) }
+        for index in 0..<count {
+            let id = "newer-idle-\(index)"
+            let rollout = root.appendingPathComponent("sessions/\(id).jsonl")
+            try Data("{\"type\":\"session_meta\",\"payload\":{\"id\":\"\(id)\"}}\n".utf8).write(to: rollout)
+            try sql(db, "INSERT INTO threads VALUES ('\(id)', '\(rollout.path)', 'idle-\(index)', 'gpt-test', 'high', \(100 + index), 0)")
+        }
+    }
+    func setStateDBUserVersion(_ version: Int) throws {
+        var db: OpaquePointer?
+        guard sqlite3_open(database.path, &db) == SQLITE_OK else { throw POSIXError(.EIO) }
+        defer { sqlite3_close(db) }
+        try sql(db, "PRAGMA user_version = \(version)")
+    }
+    func recreateStateDatabase() throws {
+        var db: OpaquePointer?
+        guard sqlite3_open(database.path, &db) == SQLITE_OK else { throw POSIXError(.EIO) }
+        defer { sqlite3_close(db) }
+        try sql(db, "PRAGMA user_version = 0")
+        try sql(db, "CREATE TABLE threads (id TEXT PRIMARY KEY, rollout_path TEXT NOT NULL, title TEXT, model TEXT, reasoning_effort TEXT, updated_at INTEGER, tokens_used INTEGER)")
+        try sql(db, "INSERT INTO threads VALUES ('thread-a', '\(threadARollout.path)', 'safe', 'gpt-test', 'high', 1, 0)")
+    }
     func cleanup() { try? FileManager.default.removeItem(at: root) }
 }
 
 private final class FixtureJournalSource: HookApprovalJournalSource, @unchecked Sendable {
     var records: [Data] = []; var failReads = false
     func readRecords() throws -> [Data] { if failReads { throw POSIXError(.EIO) }; return records }
+}
+
+private final class DriverDiagnosticRecorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var fields: [[String: String]] = []
+    func record(_ value: [String: String]) { lock.lock(); defer { lock.unlock() }; fields.append(value) }
+    func clear() { lock.lock(); defer { lock.unlock() }; fields.removeAll() }
+    func count(event: String) -> Int { lock.lock(); defer { lock.unlock() }; return fields.count { $0["event"] == event } }
+    func events() -> [[String: String]] { lock.lock(); defer { lock.unlock() }; return fields }
 }
 private actor ApprovalOutboxDeliveryRecorder {
     private var requestIdentifiers = Set<String>()
@@ -489,6 +892,31 @@ private actor ApprovalOutboxDeliveryRecorder {
     }
 
     func submitted() -> [ApprovalNotificationOutboxIntent] { values }
+}
+
+private actor ApprovalOutboxDispositionRecorder {
+    private var currentDisposition: ApprovalNotificationDeliveryDisposition
+    private var attemptedValues: [ApprovalNotificationOutboxIntent] = []
+    private var confirmedValues: [ApprovalNotificationOutboxIntent] = []
+
+    init(disposition: ApprovalNotificationDeliveryDisposition) {
+        currentDisposition = disposition
+    }
+
+    func deliver(_ intent: ApprovalNotificationOutboxIntent) -> ApprovalNotificationDeliveryDisposition {
+        attemptedValues.append(intent)
+        if currentDisposition == .confirmed {
+            confirmedValues.append(intent)
+        }
+        return currentDisposition
+    }
+
+    func setDisposition(_ disposition: ApprovalNotificationDeliveryDisposition) {
+        currentDisposition = disposition
+    }
+
+    func attempted() -> [ApprovalNotificationOutboxIntent] { attemptedValues }
+    func confirmed() -> [ApprovalNotificationOutboxIntent] { confirmedValues }
 }
 
 private final class InMemoryApprovalCheckpointStore: ApprovalLifecycleCheckpointStoring, @unchecked Sendable {

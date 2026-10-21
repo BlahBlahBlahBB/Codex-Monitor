@@ -64,6 +64,14 @@ struct MenuBarPopoverView: View {
                         MonitorPopoverRow(label: window.quotaRowLabel, value: window.remainingText)
                         MonitorPopoverRow(label: window.resetRowLabel, value: window.resetDateTime())
                     }
+                    if let freshness = MonitorDisplayValue.quotaFreshness(snapshot) {
+                        MonitorPopoverRow(label: L10n.tr("quota.current"), value: freshness)
+                    }
+                    if QuotaWindowPresentation.windows(from: snapshot).isEmpty,
+                       let snapshot,
+                       snapshot.accountFreshness != .fresh {
+                        MonitorPopoverRow(label: L10n.tr("quota.current"), value: "--")
+                    }
                     MonitorPopoverRow(label: L10n.tr("label.resetCredit"), value: MonitorDisplayValue.reset(snapshot))
                     if let quotaNotice = quotaNotice(snapshot) {
                         Text(quotaNotice)
@@ -241,10 +249,8 @@ private struct UsageMetricGrid: View {
             localLedger: localUsage
         )
         LazyVGrid(columns: [GridItem(.flexible(), spacing: 0), GridItem(.flexible(), spacing: 0)], spacing: 0) {
-            UsageMetric(title: L10n.tr("label.todayCost"), value: LocalUsagePresentation.estimatedCost(localUsage?.today?.estimatedCostUSD))
-            // A partial local 30-day cost cannot truthfully occupy the
-            // account-scoped 30-day cost slot.
-            UsageMetric(title: L10n.tr("label.last30DaysCost"), value: LocalUsagePresentation.estimatedCost(hybrid?.headlineEstimatedCostUSD))
+            UsageMetric(title: L10n.tr("label.lifetimeToken"), value: MonitorDisplayValue.lifetimeUsage(snapshot))
+            UsageMetric(title: L10n.tr("label.peakToken"), value: MonitorDisplayValue.peakDailyUsage(snapshot))
             UsageMetric(title: L10n.tr("label.todayToken"), value: localUsage?.today.map { MonitorDisplayValue.summaryTokenFormat($0.totalTokens) } ?? "--")
             UsageMetric(title: L10n.tr("label.last30DaysToken"), value: hybrid?.headlineTokens.map { MonitorDisplayValue.summaryTokenFormat($0) } ?? "--")
         }
@@ -650,7 +656,7 @@ struct NativeSettingsWindowView: View {
         case .privacy:
             PrivacySettingsDetail(preferences: preferences)
         case .advanced:
-            AdvancedSettingsDetail(actions: actions)
+            AdvancedSettingsDetail(preferences: preferences, actions: actions)
         case .about:
             AboutSettingsDetail()
         }
@@ -854,11 +860,17 @@ private struct PrivacySettingsDetail: View {
 }
 
 private struct AdvancedSettingsDetail: View {
+    @ObservedObject var preferences: MonitorPreferences
     let actions: SettingsSystemActions
     @State private var exportState: ExportState = .idle
 
     var body: some View {
         SettingsDetail(title: L10n.tr("settings.advanced")) {
+            SettingsRow(title: L10n.tr("settings.soundEnabled")) {
+                Toggle("", isOn: $preferences.soundEnabled)
+                    .labelsHidden()
+                    .toggleStyle(.switch)
+            }
             SettingsRow(title: L10n.tr("settings.refresh")) { Button(L10n.tr("settings.refresh"), action: actions.refresh).buttonStyle(.bordered) }
             SettingsRow(title: L10n.tr("settings.exportDiagnostics")) {
                 Button(L10n.tr("settings.exportDiagnostics")) {
@@ -905,7 +917,7 @@ private struct AdvancedSettingsDetail: View {
             case .failure(let failure):
                 switch failure {
                 case .downloadsUnavailable: L10n.tr("settings.diagnosticsDownloadsUnavailable")
-                case .writeFailed, .noAvailableFilename: L10n.tr("settings.diagnosticsExportFailed")
+                case .archiveCreationFailed, .writeFailed, .noAvailableFilename: L10n.tr("settings.diagnosticsExportFailed")
                 }
             }
         }
@@ -918,6 +930,13 @@ private struct AboutSettingsDetail: View {
             SettingsRow(title: L10n.tr("settings.productName")) { Text("Codex Monitor").foregroundStyle(.secondary) }
             SettingsRow(title: L10n.tr("settings.version")) { Text(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.0").foregroundStyle(.secondary).monospacedDigit() }
             SettingsRow(title: L10n.tr("settings.build")) { Text(Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "dev").foregroundStyle(.secondary).monospacedDigit() }
+            SettingsRow(title: L10n.tr("settings.author")) {
+                Link(
+                    "BlahBlahBlahBB",
+                    destination: URL(string: "https://github.com/BlahBlahBlahBB/Codex-Monitor")!
+                )
+                .foregroundStyle(.blue)
+            }
         }
     }
 }
