@@ -13,6 +13,8 @@ final class FloatingStatusPanelController: NSObject, ObservableObject, NSWindowD
     private var liveResizeCenter: CGPoint?
     private let quickViewAutoDismissDelay: Duration
     private var quickViewDismissTask: Task<Void, Never>?
+    private var liquidOrbDriver: LiquidOrbDriver?
+    private var liquidOrbStore: LiquidOrbPresentationStore?
 
     init(localization: LocalizationController, actions: MonitorSurfaceActions, quickViewAutoDismissDelay: Duration = QuickViewInteractionContract.automaticDismissDelay) {
         self.localization = localization
@@ -26,19 +28,25 @@ final class FloatingStatusPanelController: NSObject, ObservableObject, NSWindowD
         guard preferences.showOrb else { hide(); return }
         if panel == nil { createPanel(model: model, preferences: preferences) }
         applyPreferences()
+        attachLiquidOrbDriverIfNeeded()
         panel?.orderFrontRegardless()
     }
 
     func hide() {
         hideQuickView()
+        liquidOrbDriver?.shutdown()
+        liquidOrbDriver = nil
         panel?.orderOut(nil)
     }
 
     func closeAll() {
         cancelQuickViewAutoDismiss()
         quickView?.close()
+        liquidOrbDriver?.shutdown()
         panel?.close()
         quickView = nil
+        liquidOrbDriver = nil
+        liquidOrbStore = nil
         panel = nil
         hasPlacedPanel = false
     }
@@ -87,9 +95,19 @@ final class FloatingStatusPanelController: NSObject, ObservableObject, NSWindowD
     /// owned by this controller and is never exposed to SwiftUI.
     var quickViewForTesting: NSPanel? { quickView }
 
-    func windowWillMove(_ notification: Notification) { hideQuickView() }
+    /// Narrow seam: native panel ownership remains localized here.
+    var panelForTesting: NSPanel? { panel }
+    var liquidOrbDriverForTesting: LiquidOrbDriver? { liquidOrbDriver }
 
-    func windowDidMove(_ notification: Notification) { persistFrame() }
+    func windowWillMove(_ notification: Notification) {
+        hideQuickView()
+        liquidOrbDriver?.beginUserDrag()
+    }
+
+    func windowDidMove(_ notification: Notification) {
+        liquidOrbDriver?.panelDidMove()
+        persistFrame()
+    }
     func windowWillStartLiveResize(_ notification: Notification) {
         liveResizeCenter = panel.map { CGPoint(x: $0.frame.midX, y: $0.frame.midY) }
     }
@@ -124,7 +142,8 @@ final class FloatingStatusPanelController: NSObject, ObservableObject, NSWindowD
         panel.isMovableByWindowBackground = true
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         panel.delegate = self
-        let root = AnyView(LocalizedRoot(localization: localization) { FloatingOrbRoot(model: model, preferences: preferences) { [weak self] in
+        let liquidStore = LiquidOrbPresentationStore(diameter: size)
+        let root = AnyView(LocalizedRoot(localization: localization) { FloatingOrbRoot(model: model, preferences: preferences, liquidOrbStore: liquidStore) { [weak self] in
             self?.toggleQuickView(model: model)
         } })
         let hostingView = OrbHostingView(rootView: root, menuProvider: { [weak self] in
@@ -138,6 +157,7 @@ final class FloatingStatusPanelController: NSObject, ObservableObject, NSWindowD
         hostingView.layer?.shadowOpacity = 0
         panel.contentView = hostingView
         self.panel = panel
+        liquidOrbStore = liquidStore
         OrbHostDiagnostics.capture(panel: panel, contentView: hostingView)
         DispatchQueue.main.async {
             DiagnosticEvent.record(.orbHost, [
@@ -185,6 +205,9 @@ final class FloatingStatusPanelController: NSObject, ObservableObject, NSWindowD
             ),
             display: true
         )
+        // Preference-driven resizing must replace stale rest geometry before
+        // the next AppKit movement callback or user interaction.
+        liquidOrbDriver?.resetForDiameterIfNeeded(size)
         hasPlacedPanel = true
     }
 
@@ -204,6 +227,21 @@ final class FloatingStatusPanelController: NSObject, ObservableObject, NSWindowD
         panel.frame.insetBy(dx: FloatingOrbSurfaceConfiguration.shadowInset, dy: FloatingOrbSurfaceConfiguration.shadowInset)
     }
 
+    private func attachLiquidOrbDriverIfNeeded() {
+        guard liquidOrbDriver == nil, let panel, let liquidOrbStore else { return }
+        let orbFrame = visibleOrbFrame(for: panel)
+        let driver = LiquidOrbDriver(
+            centerProvider: { [weak panel] in
+                guard let panel else { return .zero }
+                return CGPoint(x: panel.frame.midX, y: panel.frame.midY)
+            },
+            onPresentation: { [weak liquidOrbStore] presentation in
+                liquidOrbStore?.update(presentation)
+            }
+        )
+        driver.attach(diameter: orbFrame.width)
+        liquidOrbDriver = driver
+    }
     private func scheduleQuickViewAutoDismiss() {
         cancelQuickViewAutoDismiss()
         let delay = quickViewAutoDismissDelay
@@ -297,10 +335,27 @@ final class OrbHostingView: NSHostingView<AnyView> {
 struct FloatingOrbRoot: View {
     @ObservedObject var model: MonitorAppModel
     @ObservedObject var preferences: MonitorPreferences
+    @ObservedObject var liquidOrbStore: LiquidOrbPresentationStore
     let action: () -> Void
 
+    init(model: MonitorAppModel, preferences: MonitorPreferences, liquidOrbStore: LiquidOrbPresentationStore, action: @escaping () -> Void) {
+        self.model = model
+        self.preferences = preferences
+        self.liquidOrbStore = liquidOrbStore
+        self.action = action
+    }
+
+    init(model: MonitorAppModel, preferences: MonitorPreferences, action: @escaping () -> Void) {
+        self.init(
+            model: model,
+            preferences: preferences,
+            liquidOrbStore: LiquidOrbPresentationStore(diameter: preferences.orbSize),
+            action: action
+        )
+    }
+
     var body: some View {
-        MonitorOrbView(snapshot: model.snapshot, presentation: model.presentation(using: preferences), size: preferences.orbSize)
+        MonitorOrbView(snapshot: model.snapshot, presentation: model.presentation(using: preferences), size: preferences.orbSize, liquidPresentation: liquidOrbStore.presentation)
             .contentShape(Circle())
             .onTapGesture(perform: action)
     }

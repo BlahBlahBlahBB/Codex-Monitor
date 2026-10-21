@@ -21,6 +21,9 @@
 "activity.noSession" = "暂无会话";
 "activity.currentTask" = "当前任务";
 "update.updated" = "更新于 %@";
+"account.updated" = "数据更新于 %@";
+"quota.current" = "当前额度";
+"quota.lastVerified" = "上次验证于 %@";
 "runtime.unknown" = "运行时未知";
 "quota.remaining" = "剩余额度 %@";
 "session.tokenQuota" = "会话 Token %@ · 剩余额度 %@";
@@ -63,6 +66,8 @@
 "quota.unit.month" = "月";
 "quota.unit.months" = "月";
 "label.tokenUsage" = "Token 使用";
+"label.lifetimeToken" = "累计 Token";
+"label.peakToken" = "峰值 Token";
 "label.todayCost" = "今日费用";
 "label.last30DaysCost" = "近 30 天费用";
 "label.todayToken" = "今日 Token";
@@ -116,6 +121,7 @@
 "settings.pauseMonitoring" = "暂停监控";
 "settings.waitingApprovalNotification" = "等待授权通知";
 "settings.taskCompletedNotification" = "任务完成通知";
+"settings.soundEnabled" = "提示音";
 "settings.hideAccountInfo" = "隐藏账户信息";
 "settings.approvalDetection" = "审批状态检测";
 "settings.approvalRequestLocal" = "本地审批请求事件检测";
@@ -128,6 +134,7 @@
 "settings.productName" = "产品";
 "settings.version" = "版本";
 "settings.build" = "构建";
+"settings.author" = "作者";
 "settings.exportDiagnostics" = "导出诊断";
 "settings.diagnosticsExporting" = "正在导出诊断…";
 "settings.diagnosticsExported" = "诊断已导出";

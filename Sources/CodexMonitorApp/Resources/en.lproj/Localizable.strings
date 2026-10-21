@@ -21,6 +21,9 @@
 "activity.noSession" = "No session";
 "activity.currentTask" = "Current task";
 "update.updated" = "Updated %@";
+"account.updated" = "Data updated %@";
+"quota.current" = "Current quota";
+"quota.lastVerified" = "Last verified %@";
 "runtime.unknown" = "Runtime Unknown";
 "quota.remaining" = "Remaining quota %@";
 "session.tokenQuota" = "Session Token %@ · Remaining quota %@";
@@ -63,6 +66,8 @@
 "quota.unit.month" = "month";
 "quota.unit.months" = "months";
 "label.tokenUsage" = "Token Usage";
+"label.lifetimeToken" = "Lifetime Tokens";
+"label.peakToken" = "Peak Tokens";
 "label.todayCost" = "Today cost";
 "label.last30DaysCost" = "Last 30 days cost";
 "label.todayToken" = "Today Token";
@@ -116,6 +121,7 @@
 "settings.pauseMonitoring" = "Pause Monitoring";
 "settings.waitingApprovalNotification" = "Waiting Approval Notification";
 "settings.taskCompletedNotification" = "Task Completed Notification";
+"settings.soundEnabled" = "Sound";
 "settings.hideAccountInfo" = "Hide Account Info";
 "settings.approvalDetection" = "Approval detection";
 "settings.approvalRequestLocal" = "Local request-event detection";
@@ -128,6 +134,7 @@
 "settings.productName" = "Product";
 "settings.version" = "Version";
 "settings.build" = "Build";
+"settings.author" = "Author";
 "settings.exportDiagnostics" = "Export Diagnostics";
 "settings.diagnosticsExporting" = "Exporting diagnostics…";
 "settings.diagnosticsExported" = "Diagnostics exported";

@@ -3,7 +3,7 @@
 
 一个原生 macOS Codex 辅助工具，通过菜单栏状态胶囊、桌面悬浮球、Quick View、用量和设置等界面，为 Codex 提供轻量、快速、低打扰的桌面辅助体验。
 
-> **当前版本：Codex Monitor 1.0.11 Preview**
+> **当前版本：Codex Monitor 1.0.12**
 >
 > Codex Monitor 当前为 Preview，不是 Stable Public Release，也不是 OpenAI 官方产品。部分能力依赖 Codex 的本地接口与本地数据结构，Codex 更新可能暂时影响个别能力；当数据源不可用时，应用会优先显示 Unknown / Unavailable，而不是伪造状态。
 
@@ -13,12 +13,12 @@
 
 ### macOS · Apple Silicon
 
-<a href="https://github.com/BlahBlahBlahBB/Codex-Monitor/releases/download/v1.0.11-preview/Codex-Monitor-1.0.11-Preview-macOS-arm64.dmg"><img src="https://img.shields.io/badge/%E4%B8%8B%E8%BD%BD-1.0.11%20Preview-black?style=for-the-badge&logo=apple" alt="下载 Codex Monitor 1.0.11 Preview"></a>
+<a href="https://github.com/BlahBlahBlahBB/Codex-Monitor/releases/download/v1.0.12/Codex-Monitor-1.0.12-RC3-macOS-arm64.dmg"><img src="https://img.shields.io/badge/%E4%B8%8B%E8%BD%BD-1.0.12-black?style=for-the-badge&logo=apple" alt="下载 Codex Monitor 1.0.12"></a>
 
 
-- [查看 v1.0.11-preview Release](https://github.com/BlahBlahBlahBB/Codex-Monitor/releases/tag/v1.0.11-preview)
-- DMG SHA256：`91204561c55702940fdc9c9e3b4ff2c1d3fcd659fbc256ca3ce99eb8287ac2e8`
-- DMG 大小：`3,629,516 bytes`
+- [查看 v1.0.12 Release](https://github.com/BlahBlahBlahBB/Codex-Monitor/releases/tag/v1.0.12)
+- DMG SHA256：`c95244060c642e48e33a6853b753830926c573b3928fc3ca1c346eb7e01a6a1c`
+- DMG 大小：`3,641,074 bytes`
 
 > 当前 Preview 为 **arm64 / Apple Silicon only**，采用 ad-hoc 签名，尚未使用 Developer ID、Apple Notarization 或 Stapling。macOS Gatekeeper 可能阻止或警告该 Preview 包；它目前用于 Preview / testing，而不是无警告的正式公开发行。
 
@@ -28,7 +28,7 @@
 
 ### 首次安装
 
-1. 建议直接从本页 GitHub Release 下载 `Codex-Monitor-1.0.11-Preview-macOS-arm64.dmg`
+1. 建议直接从本页 GitHub Release 下载 `Codex-Monitor-1.0.12-RC3-macOS-arm64.dmg`
 2. 打开 DMG
 3. 将 `Codex Monitor.app` 拖入 `/Applications`
 4. 从“应用程序”启动 Codex Monitor
@@ -49,15 +49,14 @@
 
 <br>
 
-## ✨ 1.0.11 Preview 重点更新
+## ✨ 1.0.12 重点更新
 
-- 新增累计 Token（Lifetime Tokens）指标
-- 新增历史单日峰值 Token（Peak Tokens）指标
-- 替换不可用的成本汇总卡片
-- 保留今日 Token 与近 30 天 Token 指标
-- 保留原有 Token activity visualization
+- 增加以单调时钟和计划起点驱动的 15 秒受控额度刷新，慢周期不会回放或形成请求突发
+- 短暂 RPC 失败期间保留可信额度，并保持账户身份与 credentialEpoch 隔离
+- 解耦 Quota 与可选 Usage 的读取失败，保留基于 limitId 的多额度桶识别
+- 修复 Ledger 30 天边界时钟与部分行读取时的 fileOffset 可靠性
 
-自动化回归：**459 executed / 455 passed / 4 expected opt-in skips / 0 failures**。
+自动化回归：**468 executed / 4 skipped / 0 failures**。
 
 Packaged App、DMG verify、Real QA 与最终 Release-app smoke：**PASS**。
 
@@ -161,13 +160,13 @@ Codex Monitor 不会用推测值替代未知值；例如 Quota 无法确认时�
 
 ## ⚠️ Preview 数据源说明
 
-Codex Monitor 1.0.11 Preview 当前会读取本机 Codex 的本地集成数据面。
+Codex Monitor 1.0.12 当前会读取本机 Codex 的本地集成数据面。
 
 其中部分 Account 能力使用 Codex app-server 的本地 transport；Desktop runtime / session observation、approval attention 也依赖 Codex 的本地 SQLite / rollout / Hook 等实现细节，这些本地 schema 与事件目前不应被视为稳定 public contract。
 
 因此：
 
-- 1.0.11 定位为 **Preview-only**
+- 1.0.12 保持 **Preview-only** 定位
 - Codex 更新可能暂时影响某个单独 capability
 - capability 缺失时应用应安全降级
 - 当前不应被描述为 stable production-supported Codex integration
@@ -213,7 +212,7 @@ swift test
 Preview release packaging：
 
 ```bash
-VERSION=1.0.11 BUILD=113 RELEASE_LABEL=Preview ./Tools/package_release.sh
+VERSION=1.0.12 BUILD=116 RELEASE_LABEL=RC3 ./Tools/package_release.sh
 ```
 
 在未提供 `SIGNING_IDENTITY` 时，脚本生成明确标记的 ad-hoc local Preview；Developer ID / notarization 流程当前尚未启用。
@@ -222,7 +221,7 @@ VERSION=1.0.11 BUILD=113 RELEASE_LABEL=Preview ./Tools/package_release.sh
 
 ## 📌 Release scope
 
-Codex Monitor 1.0.11 Preview 当前验证范围：
+Codex Monitor 1.0.12 当前验证范围：
 
 - macOS 13+
 - Apple Silicon / arm64
@@ -237,4 +236,4 @@ Codex Monitor 1.0.11 Preview 当前验证范围：
 - 超长 transcript、跨 chunk、exact/latest turn_context、畸形/截断/超限记录测试：PASS
 - 等待审批 / 完成通知与点击激活 Codex：保持既有验证行为
 - signed ApprovalObserver helper 与 Hook/config 完整性契约保持不变
-- Release Gate：459 executed / 455 passed / 4 expected opt-in skips / 0 failures
+- Release Gate：468 executed / 4 skipped / 0 failures

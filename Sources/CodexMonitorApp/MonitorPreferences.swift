@@ -27,6 +27,7 @@ public final class MonitorPreferences: ObservableObject {
     @Published public var pauseMonitoring: Bool { didSet { defaults.set(pauseMonitoring, forKey: Keys.pauseMonitoring) } }
     @Published public var waitingApprovalNotifications: Bool { didSet { defaults.set(waitingApprovalNotifications, forKey: Keys.waitingApprovalNotifications) } }
     @Published public var taskCompletedNotifications: Bool { didSet { defaults.set(taskCompletedNotifications, forKey: Keys.taskCompletedNotifications) } }
+    @Published public var soundEnabled: Bool { didSet { defaults.set(soundEnabled, forKey: Keys.soundEnabled) } }
     @Published public var hideAccountInfo: Bool { didSet { defaults.set(hideAccountInfo, forKey: Keys.hideAccountInfo) } }
     @Published public var quotaWarningEnabled: Bool { didSet { defaults.set(quotaWarningEnabled, forKey: Keys.quotaWarningEnabled) } }
     @Published public var quotaWarningThreshold: Double {
@@ -51,6 +52,7 @@ public final class MonitorPreferences: ObservableObject {
         static let pauseMonitoring = "monitor.pauseMonitoring"
         static let waitingApprovalNotifications = "monitor.waitingApprovalNotifications"
         static let taskCompletedNotifications = "monitor.taskCompletedNotifications"
+        static let soundEnabled = "monitor.soundEnabled"
         static let hideAccountInfo = "monitor.hideAccountInfo"
         static let quotaWarningEnabled = "monitor.quotaWarningEnabled"
         static let quotaWarningThreshold = "monitor.quotaWarningThreshold"
@@ -72,6 +74,7 @@ public final class MonitorPreferences: ObservableObject {
         pauseMonitoring = defaults.object(forKey: Keys.pauseMonitoring) as? Bool ?? false
         waitingApprovalNotifications = defaults.object(forKey: Keys.waitingApprovalNotifications) as? Bool ?? false
         taskCompletedNotifications = defaults.object(forKey: Keys.taskCompletedNotifications) as? Bool ?? false
+        soundEnabled = defaults.object(forKey: Keys.soundEnabled) as? Bool ?? false
         hideAccountInfo = defaults.object(forKey: Keys.hideAccountInfo) as? Bool ?? false
         quotaWarningEnabled = defaults.object(forKey: Keys.quotaWarningEnabled) as? Bool ?? true
         quotaWarningThreshold = QuotaWarningThreshold.snap(defaults.object(forKey: Keys.quotaWarningThreshold) as? Double ?? QuotaWarningThreshold.defaultValue)

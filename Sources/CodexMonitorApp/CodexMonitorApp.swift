@@ -71,7 +71,7 @@ final class CodexMonitorAppDelegate: NSObject, NSApplicationDelegate {
             localization: localization,
             refreshMonitoring: { [weak self] in self?.restartObservation() },
             setMonitoringPaused: { [weak self] in self?.setMonitoringPaused($0) },
-            reconcileApprovalObserver: { [weak self] enabled in self?.reconcileApprovalObserver(enabled) }
+            activateApprovalObserver: { [weak self] in self?.activateApprovalObserver() }
         )
         self.surfaces = surfaces
         model.startObserving(runtime)
@@ -121,12 +121,10 @@ final class CodexMonitorAppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    private func reconcileApprovalObserver(_ enabled: Bool) {
+    private func activateApprovalObserver() {
         Task { [weak self] in
             guard let self else { return }
-            let succeeded = await approvalIntegration.reconcile(enabled: enabled)
-            guard enabled, !succeeded, preferences.waitingApprovalNotifications else { return }
-            preferences.waitingApprovalNotifications = false
+            _ = await approvalIntegration.reconcile(enabled: true)
         }
     }
 

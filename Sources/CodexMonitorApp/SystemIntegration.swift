@@ -88,6 +88,7 @@ struct MonitorTaskNotification: Equatable {
     let identifier: String
     let kind: MonitorTaskNotificationKind
     let content: MonitorNotificationContent
+    let soundEnabled: Bool
 }
 
 struct MonitorTaskNotificationResponse: Equatable {
@@ -117,17 +118,23 @@ final class UserNotificationCenterDelivery: MonitorNotificationDelivering {
     }
 
     func deliver(_ notification: MonitorTaskNotification) async -> Bool {
+        let content = Self.makeContent(for: notification)
+        return await withCheckedContinuation { continuation in
+            center.add(UNNotificationRequest(identifier: notification.identifier, content: content, trigger: nil)) { error in
+                continuation.resume(returning: error == nil)
+            }
+        }
+    }
+
+    static func makeContent(for notification: MonitorTaskNotification) -> UNMutableNotificationContent {
         let content = UNMutableNotificationContent()
         content.title = notification.content.title
         content.subtitle = notification.content.subtitle
         content.body = notification.content.body
         content.categoryIdentifier = MonitorTaskNotification.categoryIdentifier
         content.userInfo = [MonitorTaskNotification.kindUserInfoKey: notification.kind.rawValue]
-        return await withCheckedContinuation { continuation in
-            center.add(UNNotificationRequest(identifier: notification.identifier, content: content, trigger: nil)) { error in
-                continuation.resume(returning: error == nil)
-            }
-        }
+        content.sound = notification.soundEnabled ? .default : nil
+        return content
     }
 
     func containsNotification(identifier: String) async -> Bool {
@@ -322,7 +329,7 @@ final class MonitorNotificationController {
             waitingApprovalEnabled: preferences.waitingApprovalNotifications,
             taskCompletedEnabled: preferences.taskCompletedNotifications
         ) else { return }
-        _ = await delivery.deliver(MonitorTaskNotification(identifier: UUID().uuidString, kind: .completed, content: notification))
+        _ = await delivery.deliver(MonitorTaskNotification(identifier: UUID().uuidString, kind: .completed, content: notification, soundEnabled: preferences.soundEnabled))
     }
 
     /// Reconciles one durable approval intent. Notification Center is queried
@@ -334,7 +341,8 @@ final class MonitorNotificationController {
         let notification = MonitorTaskNotification(
             identifier: intent.requestIdentifier,
             kind: .waitingApproval,
-            content: MonitorNotificationContent.waitingApproval(taskTitle: intent.taskTitle)
+            content: MonitorNotificationContent.waitingApproval(taskTitle: intent.taskTitle),
+            soundEnabled: preferences.soundEnabled
         )
         return await delivery.deliver(notification) ? .confirmed : .retry
     }
