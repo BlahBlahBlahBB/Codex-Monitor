@@ -1,10 +1,10 @@
-# Codex Monitor — Hybrid Handoff v2.0
+# Codex Monitor — Historical Hybrid Handoff v2.0
 
-> **This is the active handoff.**
+> **Historical engineering document, not the current release checklist.** This handoff records an earlier development phase and its authorization limits. Do not treat its phase permissions or release gate as current.
 >
-> Old universal Desktop-observer Phase 1–11 prompts are retired and must not be executed.
-> Current architecture implementation status: **CONDITIONAL GO**
-> Current release maturity: **INTERNAL / DEVELOPER ONLY**
+> Current public GitHub artifact: [v1.0.12 (Build 116)](https://github.com/BlahBlahBlahBB/Codex-Monitor/releases/tag/v1.0.12), released as an **ad-hoc-signed, non-notarized Preview**, not a stable, officially supported OpenAI integration. See the [main README](../README.md) for current installation instructions.
+>
+> Historical status at the time: Architecture **CONDITIONAL GO**; release **INTERNAL / DEVELOPER ONLY**. The old universal Desktop-observer Phase 1–11 prompts were retired and should not be executed.
 
 ## Start here
 
@@ -23,15 +23,15 @@ The approved visual reference remains:
 
 but it is a visual reference only. Production remains native SwiftUI + AppKit.
 
-## Current authorization
+## Historical phase authorization
 
 Only **H1** is authorized by the final AR-P0 review.
 
 H2–H11 files are prewritten future execution instructions. They are **not automatically authorized**. Each phase may start only after the immediately preceding review/report explicitly authorizes it.
 
-## Hard release restriction
+## Historical release restriction
 
-Until a later review changes the status:
+The following restriction is preserved as a record of the former phase. It does not describe the current v1.0.12 GitHub distribution status:
 
 ```text
 Architecture: CONDITIONAL GO
