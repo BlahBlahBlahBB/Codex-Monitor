@@ -101,7 +101,7 @@ archive_public_key() {
 
   # ditto archives can include AppleDouble metadata under __MACOSX. Select
   # only the real bundle Info.plist, never its ._Info.plist sidecar.
-  info_path="$(unzip -Z1 "$archive" | awk '$0 ~ /^[^/]+\.app\/Contents\/Info\.plist$/ { print; exit }')"
+  info_path="$(unzip -Z1 "$archive" | awk -F/ 'NF == 3 && $1 ~ /\.app$/ && $2 == "Contents" && $3 == "Info.plist" { print; exit }')"
   [[ -n "$info_path" ]] || fail "Update archive does not contain an app Info.plist: ${archive:t}"
   mkdir -p "$archive_root"
   unzip -qq "$archive" "$info_path" -d "$archive_root"
