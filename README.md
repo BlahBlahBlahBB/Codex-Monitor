@@ -31,7 +31,7 @@
 shasum -a 256 ~/Downloads/Codex-Monitor-1.0.14-RC1-macOS-arm64.dmg
 ```
 
-输出的哈希应与上方完全一致。
+输出的哈希应与 `SHA256SUMS-v1.0.14.txt` 中对应文件的值一致。
 
 > 当前 Preview 为 **arm64 / Apple Silicon only**，采用 ad-hoc 签名，尚未使用 Developer ID、Apple Notarization 或 Stapling。macOS Gatekeeper 可能阻止或警告该 Preview 包；它目前用于 Preview / testing，而不是无警告的正式公开发行。
 
@@ -238,7 +238,7 @@ VERSION=1.0.14 BUILD=120 RELEASE_LABEL=RC1 ./Tools/package_release.sh
 
 ## 📌 Release scope
 
-Codex Monitor 1.0.13 当前验证范围：
+Codex Monitor 1.0.14 当前验证范围：
 
 - macOS 13+
 - Apple Silicon / arm64
