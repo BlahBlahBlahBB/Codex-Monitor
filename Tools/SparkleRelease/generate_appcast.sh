@@ -99,7 +99,9 @@ archive_public_key() {
   local extracted_info
   local archive_root="$validation_root/${archive:t}"
 
-  info_path="$(unzip -Z1 "$archive" | awk '/\.app\/Contents\/Info\.plist$/ { print; exit }')"
+  # ditto archives can include AppleDouble metadata under __MACOSX. Select
+  # only the real bundle Info.plist, never its ._Info.plist sidecar.
+  info_path="$(unzip -Z1 "$archive" | awk -F/ 'NF == 3 && $1 ~ /\.app$/ && $2 == "Contents" && $3 == "Info.plist" { print; exit }')"
   [[ -n "$info_path" ]] || fail "Update archive does not contain an app Info.plist: ${archive:t}"
   mkdir -p "$archive_root"
   unzip -qq "$archive" "$info_path" -d "$archive_root"
@@ -113,6 +115,16 @@ while IFS= read -r archive; do
 done < <(find "$archives_dir" -maxdepth 1 -type f -name '*.zip' -print | sort)
 (( ${#archives} > 0 )) || fail "No ZIP update assets found in $archives_dir"
 
+# Release directories also contain a manual-install DMG. Sparkle's
+# generate_appcast scans all archives in its input directory and rejects a DMG
+# and ZIP carrying the same bundle version as duplicates, so give it a private
+# staging directory containing only the full ZIP update payloads.
+generation_archives_dir="$validation_root/archives"
+mkdir -p "$generation_archives_dir"
+for archive in "${archives[@]}"; do
+  cp "$archive" "$generation_archives_dir/${archive:t}"
+done
+
 for archive in "${archives[@]}"; do
   [[ "$(archive_public_key "$archive")" == "$expected_public_key" ]] || fail "SUPublicEDKey does not match the selected signing identity: ${archive:t}"
 done
@@ -123,7 +135,7 @@ done
   --maximum-versions 3 \
   --maximum-deltas "$maximum_deltas" \
   -o "$candidate_appcast" \
-  "$archives_dir"
+  "$generation_archives_dir"
 
 [[ -f "$candidate_appcast" ]] || fail "Sparkle did not create a candidate appcast."
 
