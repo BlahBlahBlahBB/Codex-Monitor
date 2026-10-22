@@ -404,6 +404,7 @@ struct DiagnosticPreferenceSnapshot: Sendable {
 
 enum DiagnosticEvent {
     static func record(_ category: MonitorDiagnosticCategory, _ fields: [String: String]) {
+        guard !QAIsolation.enabled else { return }
         Task { await MonitorDiagnostics.shared.record(category, fields) }
     }
 
@@ -427,6 +428,7 @@ enum DiagnosticEvent {
 enum OrbHostDiagnostics {
     @MainActor
     static func capture(panel: NSPanel, contentView: NSView) {
+        guard !QAIsolation.enabled else { return }
         let panelRecord = "NSPanel frame=\(panel.frame.integral) opaque=\(panel.isOpaque) background=\(panel.backgroundColor.description) shadow=\(panel.hasShadow)\n"
         let tree = panelRecord + describe(view: contentView, depth: 0)
         Task { await MonitorDiagnostics.shared.recordOrbLayerTree(tree) }

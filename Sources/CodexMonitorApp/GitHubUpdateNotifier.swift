@@ -146,6 +146,7 @@ actor GitHubUpdateCheckGate {
 @MainActor
 final class GitHubUpdateNotifier {
     nonisolated static let repository = GitHubReleaseAPIClient.repository
+    nonisolated static let officialReleasesPage = URL(string: "https://github.com/BlahBlahBlahBB/Codex-Monitor/releases")!
     nonisolated static let automaticInterval: TimeInterval = 24 * 60 * 60
     nonisolated static let startupDelay: Duration = .seconds(8)
 

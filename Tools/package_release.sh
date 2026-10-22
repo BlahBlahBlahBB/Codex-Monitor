@@ -7,10 +7,10 @@ set -euo pipefail
 project_root="$(cd "$(dirname "$0")/.." && pwd)"
 product_name="Codex Monitor"
 bundle_identifier="${BUNDLE_IDENTIFIER:-com.codexmonitor.app}"
-marketing_version="${VERSION:-1.0.9}"
-build_number="${BUILD:-110}"
-# Defaults preserve the 1.0.9 preview artifact convention. RC/release builds
-# use the same pipeline and set RELEASE_LABEL (for example, RC1).
+marketing_version="${VERSION:-1.0.14}"
+build_number="${BUILD:-118}"
+# Defaults target the 1.0.14 preview artifact. RC/release builds use the same
+# pipeline and set RELEASE_LABEL (for example, RC1).
 release_label="${RELEASE_LABEL:-Preview}"
 build_revision="${UI_BUILD_REVISION:-$(git -C "$project_root" rev-parse HEAD)}"
 build_timestamp="${UI_BUILD_TIMESTAMP:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}"
@@ -21,12 +21,20 @@ app_bundle_name="${APP_BUNDLE_NAME:-$product_name.app}"
 app_path="$release_root/$app_bundle_name"
 dmg_name="Codex-Monitor-$marketing_version-$release_label-macOS-arm64.dmg"
 dmg_path="$release_root/$dmg_name"
+update_zip_name="Codex-Monitor-$marketing_version-$release_label-macOS-arm64.zip"
+update_zip_path="$release_root/$update_zip_name"
 dmg_staging="$release_root/dmg-root"
 
 # SIGNING_IDENTITY is deliberately not resolved through the keychain. An empty
 # value creates an explicitly local, ad-hoc rehearsal build; a release operator
 # supplies a Developer ID Application identity when one is provisioned.
 signing_identity="${SIGNING_IDENTITY:-${RELEASE_SIGNING_IDENTITY:-}}"
+# The public key is deliberately injected only when packaging a distributable
+# app. The corresponding private key is never read by this script.
+sparkle_feed_url="${SPARKLE_FEED_URL:-}"
+sparkle_public_key="${SPARKLE_PUBLIC_ED25519_KEY:-}"
+allow_insecure_localhost="${SPARKLE_ALLOW_INSECURE_LOCALHOST:-0}"
+qa_isolation="${QA_ISOLATION:-0}"
 
 [[ "$marketing_version" =~ '^[0-9]+(\.[0-9]+){1,2}([-.][0-9A-Za-z.]+)?$' ]] || {
   print -u2 "VERSION must be a valid marketing version (for example, 1.0.9): $marketing_version"
@@ -41,6 +49,51 @@ signing_identity="${SIGNING_IDENTITY:-${RELEASE_SIGNING_IDENTITY:-}}"
   exit 1
 }
 [[ -f "$icon_source" ]] || { print -u2 "Missing final icon: $icon_source"; exit 1; }
+[[ "$qa_isolation" == "0" || "$qa_isolation" == "1" ]] || {
+  print -u2 "QA_ISOLATION must be 0 or 1."
+  exit 1
+}
+if [[ "$qa_isolation" == "1" ]]; then
+  [[ "$bundle_identifier" != "com.codexmonitor.app" ]] || {
+    print -u2 "QA isolation requires a dedicated, non-production bundle identifier."
+    exit 1
+  }
+  [[ "$app_bundle_name" != "Codex Monitor.app" ]] || {
+    print -u2 "QA isolation requires a dedicated app bundle name."
+    exit 1
+  }
+  [[ "$signing_identity" == "" ]] || {
+    print -u2 "QA isolation must use the disposable ad-hoc signing path, never a release identity."
+    exit 1
+  }
+  [[ "$allow_insecure_localhost" == "1" && "$sparkle_feed_url" == http://127.0.0.1:* ]] || {
+    print -u2 "QA isolation requires its explicit loopback-only Sparkle feed."
+    exit 1
+  }
+else
+  [[ "$bundle_identifier" == "com.codexmonitor.app" ]] || {
+    print -u2 "Production packaging requires BUNDLE_IDENTIFIER=com.codexmonitor.app."
+    exit 1
+  }
+  [[ "$allow_insecure_localhost" == "0" ]] || {
+    print -u2 "Production packaging forbids SPARKLE_ALLOW_INSECURE_LOCALHOST."
+    exit 1
+  }
+fi
+[[ -n "$sparkle_public_key" ]] || {
+  print -u2 "SPARKLE_PUBLIC_ED25519_KEY is required; do not use a private key value."
+  exit 1
+}
+[[ -n "$sparkle_feed_url" ]] || {
+  print -u2 "SPARKLE_FEED_URL must be an HTTPS appcast URL."
+  exit 1
+}
+if [[ "$sparkle_feed_url" != https://* ]]; then
+  if [[ "$allow_insecure_localhost" != "1" || "$sparkle_feed_url" != http://127.0.0.1:* ]]; then
+    print -u2 "SPARKLE_FEED_URL must use HTTPS (localhost HTTP is only allowed with SPARKLE_ALLOW_INSECURE_LOCALHOST=1)."
+    exit 1
+  fi
+fi
 
 swift_tool="$(xcrun --find swift)"
 swiftc_tool="$(xcrun --find swiftc)"
@@ -86,6 +139,9 @@ build_args=(
   -Xswiftc -D -Xswiftc CODEX_MONITOR_RELEASE
   -Xswiftc -debug-prefix-map -Xswiftc "$project_root=/CodexMonitor"
 )
+if [[ "$qa_isolation" == "1" ]]; then
+  build_args+=( -Xswiftc -D -Xswiftc CODEX_MONITOR_QA_ISOLATION )
+fi
 SDKROOT="$sdk_path" "$swift_tool" "${build_args[@]}"
 bin_path="$(SDKROOT="$sdk_path" "$swift_tool" "${build_args[@]}" --show-bin-path)"
 executable="$bin_path/CodexMonitorApp"
@@ -101,6 +157,10 @@ mkdir -p "$app_path/Contents/Library/Helpers"
 cp "$helper_executable" "$app_path/Contents/Library/Helpers/ApprovalObserver"
 ditto "$resource_bundle" "$app_path/Contents/Resources/$(basename "$resource_bundle")"
 cp "$icon_source" "$app_path/Contents/Resources/$(basename "$icon_source")"
+
+sparkle_framework="$bin_path/Sparkle.framework"
+[[ -d "$sparkle_framework" ]] || { print -u2 "Missing embedded Sparkle.framework: $sparkle_framework"; exit 1; }
+ditto "$sparkle_framework" "$app_path/Contents/Frameworks/Sparkle.framework"
 
 app_executable="$app_path/Contents/MacOS/CodexMonitorApp"
 app_helper="$app_path/Contents/Library/Helpers/ApprovalObserver"
@@ -132,6 +192,15 @@ for packaged_executable in "$app_executable" "$app_helper"; do
     exit 1
   fi
 done
+
+# Sparkle is built by SwiftPM, but a distributed app resolves it from its
+# embedded Frameworks directory rather than the build directory.
+if ! "$otool_tool" -l "$app_executable" | awk '
+  $1 == "cmd" && $2 == "LC_RPATH" { in_rpath = 1; next }
+  in_rpath && $1 == "path" { print $2; in_rpath = 0 }
+' | grep -Fxq '@executable_path/../Frameworks'; then
+  "$install_name_tool" -add_rpath '@executable_path/../Frameworks' "$app_executable"
+fi
 
 # Validate the final, post-RPATH-cleanup binary before signing or creating a
 # DMG. The SDK marker is part of the frozen visual-release contract.
@@ -174,6 +243,25 @@ plutil -create xml1 "$info_plist"
 /usr/libexec/PlistBuddy -c "Add :CodexMonitorReleaseChannel string $release_label" "$info_plist"
 /usr/libexec/PlistBuddy -c "Add :UIBuildRevision string $build_revision" "$info_plist"
 /usr/libexec/PlistBuddy -c "Add :UIBuildTimestamp string $build_timestamp" "$info_plist"
+/usr/libexec/PlistBuddy -c "Add :SUFeedURL string $sparkle_feed_url" "$info_plist"
+/usr/libexec/PlistBuddy -c "Add :SUPublicEDKey string $sparkle_public_key" "$info_plist"
+/usr/libexec/PlistBuddy -c 'Add :SUEnableAutomaticChecks bool true' "$info_plist"
+/usr/libexec/PlistBuddy -c 'Add :SUScheduledCheckInterval integer 86400' "$info_plist"
+/usr/libexec/PlistBuddy -c 'Add :SUEnableDownloaderService bool true' "$info_plist"
+/usr/libexec/PlistBuddy -c 'Add :SUAutomaticallyUpdate bool false' "$info_plist"
+qa_info_plist_value=false
+if [[ "$qa_isolation" == "1" ]]; then
+  qa_info_plist_value=true
+fi
+/usr/libexec/PlistBuddy -c "Add :CodexMonitorQAIsolation bool $qa_info_plist_value" "$info_plist"
+
+# The production channel is HTTPS-only. A loopback HTTP feed is permitted only
+# for this repository's isolated lifecycle QA, so keep the matching ATS rule
+# equally narrow and omit it from release builds.
+if [[ "$allow_insecure_localhost" == "1" ]]; then
+  /usr/libexec/PlistBuddy -c 'Add :NSAppTransportSecurity dict' "$info_plist"
+  /usr/libexec/PlistBuddy -c 'Add :NSAppTransportSecurity:NSAllowsLocalNetworking bool true' "$info_plist"
+fi
 
 if [[ -n "$signing_identity" ]]; then
   signing_status="Developer ID signing requested"
@@ -200,7 +288,7 @@ while IFS= read -r nested_executable; do
 done < <(find "$app_path/Contents" -type f -perm -111 -print | sort)
 while IFS= read -r nested_bundle; do
   sign_code "$nested_bundle"
-done < <(find "$app_path/Contents" -depth -type d \( -name '*.framework' -o -name '*.xpc' -o -name '*.appex' -o -name '*.plugin' \) -print | sort)
+done < <(find "$app_path/Contents" -depth -type d \( -name '*.framework' -o -name '*.xpc' -o -name '*.app' -o -name '*.appex' -o -name '*.plugin' \) -print | sort)
 sign_code "$main_executable"
 sign_code "$app_path"
 "$codesign_tool" --verify --deep --strict --verbose=2 "$app_path"
@@ -214,6 +302,13 @@ ln -s /Applications "$dmg_staging/Applications"
 "$hdiutil_tool" create -quiet -ov -volname "$product_name $marketing_version $release_label" \
   -srcfolder "$dmg_staging" -format UDZO "$dmg_path"
 
+# `ditto` retains framework/app symlinks, metadata, and the top-level .app
+# bundle expected by Sparkle. This archive is the only payload fed to
+# Sparkle's official signing/index tools.
+ditto -c -k --sequesterRsrc --keepParent "$app_path" "$update_zip_path"
+
 print "APP=$app_path"
 print "DMG=$dmg_path"
+print "UPDATE_ZIP=$update_zip_path"
 print "SIGNING_STATUS=$signing_status"
+print "QA_ISOLATION=$qa_isolation"

@@ -14,9 +14,11 @@ final class MonitorSurfaceCoordinator: NSObject {
     private let setMonitoringPaused: (Bool) -> Void
     private let activateApprovalObserver: () -> Void
     private let checkForUpdates: () -> Void
+    private let openManualUpdateDownload: () -> Void
+    private let qaIsolationEnabled: Bool
     private let ownership = MonitorSurfaceOwnership()
-    private let loginItem = LoginItemController()
-    private let notifications = MonitorNotificationController()
+    private let loginItem: LoginItemController
+    private let notifications: MonitorNotificationController?
     private var preferencesObserver: AnyCancellable?
     private var statusItemController: MonitorStatusItemController?
     private var floatingController: FloatingStatusPanelController?
@@ -24,7 +26,7 @@ final class MonitorSurfaceCoordinator: NSObject {
     private var settingsWindowController: SettingsWindowController?
     private var diagnosticsWindowController: DiagnosticsWindowController?
 
-    init(model: MonitorAppModel, preferences: MonitorPreferences, localization: LocalizationController, refreshMonitoring: @escaping () -> Void, setMonitoringPaused: @escaping (Bool) -> Void, activateApprovalObserver: @escaping () -> Void, checkForUpdates: @escaping () -> Void) {
+    init(model: MonitorAppModel, preferences: MonitorPreferences, localization: LocalizationController, refreshMonitoring: @escaping () -> Void, setMonitoringPaused: @escaping (Bool) -> Void, activateApprovalObserver: @escaping () -> Void, checkForUpdates: @escaping () -> Void, openManualUpdateDownload: @escaping () -> Void, qaIsolationEnabled: Bool = false) {
         self.model = model
         self.preferences = preferences
         self.localization = localization
@@ -32,6 +34,12 @@ final class MonitorSurfaceCoordinator: NSObject {
         self.setMonitoringPaused = setMonitoringPaused
         self.activateApprovalObserver = activateApprovalObserver
         self.checkForUpdates = checkForUpdates
+        self.openManualUpdateDownload = openManualUpdateDownload
+        self.qaIsolationEnabled = qaIsolationEnabled
+        // Do not even query LoginItems or construct a UserNotifications
+        // integration in the disposable QA executable.
+        self.loginItem = LoginItemController(reconcileOnInit: !qaIsolationEnabled)
+        self.notifications = qaIsolationEnabled ? nil : MonitorNotificationController()
     }
 
     func start() {
@@ -49,11 +57,11 @@ final class MonitorSurfaceCoordinator: NSObject {
         statusItemController = MonitorStatusItemController(model: model, preferences: preferences, localization: localization, actions: actions)
         floatingController = FloatingStatusPanelController(localization: localization, actions: actions)
         floatingController?.configure(model: model, preferences: preferences)
-        notifications.start(model: model, preferences: preferences)
+        notifications?.start(model: model, preferences: preferences)
 
         // Approval lifecycle observation is runtime infrastructure. The
         // notification preference gates only delivery through the outbox.
-        activateApprovalObserver()
+        if !qaIsolationEnabled { activateApprovalObserver() }
 
         preferencesObserver = preferences.objectWillChange.sink { [weak self] _ in
             // Published sends before mutation; schedule after the value lands.
@@ -76,7 +84,7 @@ final class MonitorSurfaceCoordinator: NSObject {
     func stop() {
         preferencesObserver?.cancel()
         preferencesObserver = nil
-        notifications.stop()
+        notifications?.stop()
         floatingController?.closeAll()
         statusItemController?.invalidate()
         usageWindowController?.close()
@@ -88,7 +96,8 @@ final class MonitorSurfaceCoordinator: NSObject {
     /// Notification outbox delivery remains a presentation concern, while the
     /// driver owns durable cursor/outbox acknowledgement.
     func deliverApprovalOutboxIntent(_ intent: ApprovalNotificationOutboxIntent) async -> ApprovalNotificationDeliveryDisposition {
-        await notifications.deliverApprovalOutboxIntent(intent, preferences: preferences)
+        guard let notifications else { return .retry }
+        return await notifications.deliverApprovalOutboxIntent(intent, preferences: preferences)
     }
 
     func showUsage() {
@@ -108,16 +117,22 @@ final class MonitorSurfaceCoordinator: NSObject {
                 localization: localization,
                 actions: SettingsSystemActions(
                     refresh: { [weak self] in self?.refreshMonitoring() },
-                    openLogsFolder: Self.openLogsFolder,
+                    openLogsFolder: qaIsolationEnabled ? {} : Self.openLogsFolder,
                     setMonitoringPaused: { [weak self] in self?.setMonitoringPaused($0) },
                     requestNotificationPermission: { [weak self] preference in
                         guard let self else { return }
-                        self.notifications.requestPermissionThenEnable(preference, preferences: self.preferences)
+                        guard !self.qaIsolationEnabled else { return }
+                        self.notifications?.requestPermissionThenEnable(preference, preferences: self.preferences)
                     },
-                    exportDiagnostics: { [weak self] completion in self?.exportDiagnostics(completion: completion) },
+                    exportDiagnostics: { [weak self] completion in
+                        guard let self, !self.qaIsolationEnabled else { return }
+                        self.exportDiagnostics(completion: completion)
+                    },
                     loginItem: loginItem,
-                    showDiagnostics: { [weak self] in self?.showDiagnostics() },
-                    checkForUpdates: { [weak self] in self?.checkForUpdates() }
+                    showDiagnostics: { [weak self] in if self?.qaIsolationEnabled == false { self?.showDiagnostics() } },
+                    checkForUpdates: { [weak self] in self?.checkForUpdates() },
+                    openManualUpdateDownload: { [weak self] in self?.openManualUpdateDownload() },
+                    qaIsolationEnabled: qaIsolationEnabled
                 )
             )
             DiagnosticEvent.record(.localization, ["event": "settingsFirstCreation", "resolvedLocale": L10n.resolvedLanguage])
@@ -126,6 +141,7 @@ final class MonitorSurfaceCoordinator: NSObject {
     }
 
     func showDiagnostics() {
+        guard !qaIsolationEnabled else { return }
         if diagnosticsWindowController == nil {
             guard ownership.acquire(.diagnostics) else { return }
             diagnosticsWindowController = DiagnosticsWindowController(model: model, localization: localization)
@@ -138,6 +154,7 @@ final class MonitorSurfaceCoordinator: NSObject {
     }
 
     private func openCodex() {
+        guard !qaIsolationEnabled else { return }
         guard let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.openai.codex") else { return }
         NSWorkspace.shared.openApplication(at: url, configuration: .init())
     }

@@ -618,6 +618,8 @@ struct SettingsSystemActions {
     let loginItem: LoginItemController
     let showDiagnostics: () -> Void
     let checkForUpdates: () -> Void
+    let openManualUpdateDownload: () -> Void
+    let qaIsolationEnabled: Bool
 }
 
 struct NativeSettingsWindowView: View {
@@ -653,7 +655,7 @@ struct NativeSettingsWindowView: View {
         case .floating:
             FloatingSettingsDetail(preferences: preferences)
         case .notifications:
-            NotificationSettingsDetail(preferences: preferences, actions: actions)
+            if !actions.qaIsolationEnabled { NotificationSettingsDetail(preferences: preferences, actions: actions) }
         case .privacy:
             PrivacySettingsDetail(preferences: preferences)
         case .advanced:
@@ -724,16 +726,18 @@ private struct GeneralSettingsDetail: View {
                 .labelsHidden()
                 .pickerStyle(.menu)
             }
-            SettingsRow(title: L10n.tr("settings.launchAtLogin")) {
-                Toggle(L10n.tr("settings.launchAtLogin"), isOn: Binding(
-                    get: { actions.loginItem.isEnabled },
-                    set: { enabled in
-                        do { try actions.loginItem.setEnabled(enabled) }
-                        catch { actions.loginItem.reconcile(); launchAtLoginError = error.localizedDescription }
-                    }
-                ))
-                .labelsHidden()
-                .toggleStyle(.switch)
+            if !actions.qaIsolationEnabled {
+                SettingsRow(title: L10n.tr("settings.launchAtLogin")) {
+                    Toggle(L10n.tr("settings.launchAtLogin"), isOn: Binding(
+                        get: { actions.loginItem.isEnabled },
+                        set: { enabled in
+                            do { try actions.loginItem.setEnabled(enabled) }
+                            catch { actions.loginItem.reconcile(); launchAtLoginError = error.localizedDescription }
+                        }
+                    ))
+                    .labelsHidden()
+                    .toggleStyle(.switch)
+                }
             }
         }
         .alert(L10n.tr("settings.launchAtLogin"), isPresented: Binding(get: { launchAtLoginError != nil }, set: { if !$0 { launchAtLoginError = nil } })) {
@@ -872,32 +876,36 @@ private struct AdvancedSettingsDetail: View {
                     .labelsHidden()
                     .toggleStyle(.switch)
             }
-            SettingsRow(title: L10n.tr("settings.refresh")) { Button(L10n.tr("settings.refresh"), action: actions.refresh).buttonStyle(.bordered) }
-            SettingsRow(title: L10n.tr("settings.exportDiagnostics")) {
-                Button(L10n.tr("settings.exportDiagnostics")) {
-                    exportState = .exporting
-                    actions.exportDiagnostics { result in
-                        exportState = switch result {
-                        case .success: .success
-                        case .failure(let failure): .failure(failure)
+            if !actions.qaIsolationEnabled {
+                SettingsRow(title: L10n.tr("settings.refresh")) { Button(L10n.tr("settings.refresh"), action: actions.refresh).buttonStyle(.bordered) }
+                SettingsRow(title: L10n.tr("settings.exportDiagnostics")) {
+                    Button(L10n.tr("settings.exportDiagnostics")) {
+                        exportState = .exporting
+                        actions.exportDiagnostics { result in
+                            exportState = switch result {
+                            case .success: .success
+                            case .failure(let failure): .failure(failure)
+                            }
                         }
                     }
+                    .buttonStyle(.bordered)
+                    .disabled(exportState == .exporting)
                 }
-                .buttonStyle(.bordered)
-                .disabled(exportState == .exporting)
-            }
-            if let message = exportState.message {
-                Text(message)
-                    .font(.system(size: 12))
-                    .foregroundStyle(exportState.isFailure ? .red : .secondary)
-                    .padding(.horizontal, 16)
-                    .padding(.vertical, 10)
+                if let message = exportState.message {
+                    Text(message)
+                        .font(.system(size: 12))
+                        .foregroundStyle(exportState.isFailure ? .red : .secondary)
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 10)
+                }
             }
 #if !CODEX_MONITOR_RELEASE
             // These local troubleshooting controls are deliberately omitted from
             // the distributable product. The QA build continues to expose them.
-            SettingsRow(title: L10n.tr("settings.openLogsFolder")) { Button(L10n.tr("settings.openLogsFolder"), action: actions.openLogsFolder).buttonStyle(.bordered) }
-            SettingsRow(title: L10n.tr("settings.openDiagnostics")) { Button(L10n.tr("settings.openDiagnostics"), action: actions.showDiagnostics).buttonStyle(.bordered) }
+            if !actions.qaIsolationEnabled {
+                SettingsRow(title: L10n.tr("settings.openLogsFolder")) { Button(L10n.tr("settings.openLogsFolder"), action: actions.openLogsFolder).buttonStyle(.bordered) }
+                SettingsRow(title: L10n.tr("settings.openDiagnostics")) { Button(L10n.tr("settings.openDiagnostics"), action: actions.showDiagnostics).buttonStyle(.bordered) }
+            }
 #endif
         }
     }
@@ -933,7 +941,10 @@ private struct AboutSettingsDetail: View {
             SettingsRow(title: L10n.tr("settings.version")) { Text(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.0").foregroundStyle(.secondary).monospacedDigit() }
             SettingsRow(title: L10n.tr("settings.build")) { Text(Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "dev").foregroundStyle(.secondary).monospacedDigit() }
             SettingsRow(title: L10n.tr("update.section")) {
-                Button(L10n.tr("update.check"), action: actions.checkForUpdates).buttonStyle(.bordered)
+                HStack {
+                    Button(L10n.tr("update.check"), action: actions.checkForUpdates).buttonStyle(.bordered)
+                    Button(L10n.tr("update.manualDownload"), action: actions.openManualUpdateDownload).buttonStyle(.bordered)
+                }
             }
             SettingsRow(title: L10n.tr("settings.author")) {
                 Link(

@@ -11,6 +11,8 @@ final class CodexMonitorApplication: NSObject {
     private static let applicationDelegate = CodexMonitorAppDelegate()
 
     static func main() {
+        // Must precede NSApplication creation and every app-owned subsystem.
+        QAIsolation.verifyPackaging()
         let application = NSApplication.shared
         application.delegate = applicationDelegate
         application.run()
@@ -22,8 +24,10 @@ final class CodexMonitorAppDelegate: NSObject, NSApplicationDelegate {
     private let runtime = MonitorRuntimeStore(
         accountCapabilities: .init(secondaryQuota: .snapshot)
     )
-    private let usageLedger = LocalUsageLedgerProvider()
-    private let approvalObserverPaths = AppOwnedApprovalObserverPaths.default
+    private lazy var usageLedger: LocalUsageLedgerProvider = {
+        LocalUsageLedgerProvider()
+    }()
+    private lazy var approvalObserverPaths = AppOwnedApprovalObserverPaths.default
     private lazy var approvalJournalSource = AppManagedHookApprovalJournalSource(journalURL: approvalObserverPaths.journalURL)
     private lazy var approvalIdentityResolver = AppManagedHookApprovalIdentityResolver(identityKeyURL: approvalObserverPaths.identityKeyURL)
     private lazy var approvalIntegration: ApprovalObserverIntegration = {
@@ -49,14 +53,14 @@ final class CodexMonitorAppDelegate: NSObject, NSApplicationDelegate {
     }()
     private lazy var accountProvider = AccountUsageProvider(runtime: runtime)
     private let model = MonitorAppModel()
-    let preferences = MonitorPreferences()
+    let preferences = MonitorPreferences(defaults: QAIsolation.preferences)
     private lazy var localization = LocalizationController(
         preference: preferences.interfaceLanguage,
         preferredLanguages: LocalizationController.launchPreferredLanguages
     )
     private var surfaces: MonitorSurfaceCoordinator?
     private var languageObserver: AnyCancellable?
-    let updateNotifier = GitHubUpdateNotifier()
+    private let sparkleUpdates = SparkleUpdateController()
 
     func applicationWillFinishLaunching(_ notification: Notification) {
         L10n.configure(localization)
@@ -73,22 +77,26 @@ final class CodexMonitorAppDelegate: NSObject, NSApplicationDelegate {
             refreshMonitoring: { [weak self] in self?.restartObservation() },
             setMonitoringPaused: { [weak self] in self?.setMonitoringPaused($0) },
             activateApprovalObserver: { [weak self] in self?.activateApprovalObserver() },
-            checkForUpdates: { [weak self] in self?.updateNotifier.check(interactive: true) }
+            checkForUpdates: { [weak self] in self?.sparkleUpdates.checkForUpdates() },
+            openManualUpdateDownload: { NSWorkspace.shared.open(GitHubUpdateNotifier.officialReleasesPage) },
+            qaIsolationEnabled: QAIsolation.enabled
         )
         self.surfaces = surfaces
         model.startObserving(runtime)
-        model.startObserving(usageLedger)
+        if !QAIsolation.enabled { model.startObserving(usageLedger) }
         surfaces.start()
-        Task { await driver.start() }
-        Task { await accountProvider.start() }
-        if preferences.pauseMonitoring { setMonitoringPaused(true) }
+        sparkleUpdates.start()
+        if !QAIsolation.enabled {
+            Task { await driver.start() }
+            Task { await accountProvider.start() }
+            if preferences.pauseMonitoring { setMonitoringPaused(true) }
+        }
         languageObserver = preferences.$interfaceLanguage.sink { [weak self] preference in
             guard let self else { return }
             localization.refresh(preference: preference, preferredLanguages: LocalizationController.launchPreferredLanguages)
             installApplicationMenu()
         }
         startSmokeExitIfRequested()
-        updateNotifier.scheduleStartupCheck()
     }
 
     func applicationWillTerminate(_ notification: Notification) {
@@ -96,12 +104,15 @@ final class CodexMonitorAppDelegate: NSObject, NSApplicationDelegate {
         languageObserver?.cancel()
         model.stopObserving()
         surfaces?.stop()
-        Task { await driver.stop() }
-        Task { await accountProvider.stop() }
-        updateNotifier.cancel()
+        if !QAIsolation.enabled {
+            Task { await driver.stop() }
+            Task { await accountProvider.stop() }
+        }
+        sparkleUpdates.stop()
     }
 
     private func restartObservation() {
+        guard !QAIsolation.enabled else { return }
         // This is a safe UI-level request to resume the existing snapshot
         // observation bridge; it does not touch local sources from UI.
         model.startObserving(runtime)
@@ -118,6 +129,7 @@ final class CodexMonitorAppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func setMonitoringPaused(_ paused: Bool) {
+        guard !QAIsolation.enabled else { return }
         Task { [weak self] in
             guard let self else { return }
             await driver.setUserMonitoringPaused(paused)
@@ -126,6 +138,7 @@ final class CodexMonitorAppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func activateApprovalObserver() {
+        guard !QAIsolation.enabled else { return }
         Task { [weak self] in
             guard let self else { return }
             _ = await approvalIntegration.reconcile(enabled: true)
