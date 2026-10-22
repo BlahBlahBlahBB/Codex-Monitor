@@ -230,7 +230,9 @@ final class MonitorTaskNotificationResponseHandler: NSObject, UNUserNotification
 final class LoginItemController: ObservableObject {
     @Published private(set) var isEnabled = false
 
-    init() { reconcile() }
+    init(reconcileOnInit: Bool = true) {
+        if reconcileOnInit { reconcile() }
+    }
 
     func reconcile() {
         isEnabled = SMAppService.mainApp.status == .enabled

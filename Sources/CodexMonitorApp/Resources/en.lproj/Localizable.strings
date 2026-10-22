@@ -146,6 +146,7 @@
 "quota.exhausted" = "Quota exhausted · Waiting for reset";
 "update.section" = "Updates";
 "update.check" = "Check for Updates";
+"update.manualDownload" = "Manual Download";
 "update.checking" = "Checking for Updates";
 "update.checkingDescription" = "An update check is already in progress.";
 "update.upToDate" = "Codex Monitor is up to date";

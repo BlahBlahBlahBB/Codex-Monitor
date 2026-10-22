@@ -2922,7 +2922,7 @@ final class MonitorProductIntegrationTests: XCTestCase {
 
     private func testSettingsActions() -> SettingsSystemActions {
         SettingsSystemActions(
-            refresh: {}, openLogsFolder: {}, setMonitoringPaused: { _ in }, requestNotificationPermission: { _ in }, exportDiagnostics: { _ in }, loginItem: LoginItemController(), showDiagnostics: {}, checkForUpdates: {}
+            refresh: {}, openLogsFolder: {}, setMonitoringPaused: { _ in }, requestNotificationPermission: { _ in }, exportDiagnostics: { _ in }, loginItem: LoginItemController(reconcileOnInit: false), showDiagnostics: {}, checkForUpdates: {}, openManualUpdateDownload: {}, qaIsolationEnabled: false
         )
     }
 

@@ -74,6 +74,85 @@ final class CrossMachineValidationTests: XCTestCase {
         XCTAssertFalse(appDelegate.contains("preferences.waitingApprovalNotifications = false"))
     }
 
+    func testSparkleIsTheOnlyActiveInAppUpdaterAndPackagingPreservesItsTrustBoundary() throws {
+        let root = projectRoot
+        let appDelegate = try String(contentsOf: root.appendingPathComponent("Sources/CodexMonitorApp/CodexMonitorApp.swift"), encoding: .utf8)
+        let updater = try String(contentsOf: root.appendingPathComponent("Sources/CodexMonitorApp/SparkleUpdateController.swift"), encoding: .utf8)
+        let package = try String(contentsOf: root.appendingPathComponent("Tools/package_release.sh"), encoding: .utf8)
+        let appcastTool = try String(contentsOf: root.appendingPathComponent("Tools/SparkleRelease/generate_appcast.sh"), encoding: .utf8)
+
+        XCTAssertTrue(appDelegate.contains("sparkleUpdates.start()"))
+        XCTAssertTrue(appDelegate.contains("sparkleUpdates.checkForUpdates()"))
+        XCTAssertFalse(appDelegate.contains("GitHubUpdateNotifier()"))
+        XCTAssertFalse(appDelegate.contains("updateNotifier.scheduleStartupCheck()"))
+        XCTAssertTrue(updater.contains("SPUStandardUpdaterController"))
+        XCTAssertTrue(updater.contains("checkForUpdates(nil)"))
+
+        XCTAssertTrue(package.contains("SPARKLE_PUBLIC_ED25519_KEY is required"))
+        XCTAssertTrue(package.contains("SPARKLE_FEED_URL must use HTTPS"))
+        XCTAssertTrue(package.contains("ditto \"$sparkle_framework\""))
+        XCTAssertTrue(package.contains("-name '*.app'"))
+        XCTAssertTrue(package.contains("--keepParent \"$app_path\" \"$update_zip_path\""))
+        XCTAssertTrue(package.contains("SUAutomaticallyUpdate bool false"))
+        XCTAssertFalse(package.contains("disable-library-validation"))
+        XCTAssertTrue(package.contains("if [[ \"$signing_identity\" == \"-\" ]]; then\n    \"$codesign_tool\" --force --sign - \"$code_path\""))
+        XCTAssertTrue(appcastTool.contains("SPARKLE_ALLOW_INSECURE_LOCALHOST"))
+        XCTAssertTrue(appcastTool.contains("Update assets must use HTTPS"))
+        XCTAssertTrue(appcastTool.contains("com.codexmonitor.sparkle.production.v1"))
+        XCTAssertTrue(appcastTool.contains("SPARKLE_ED25519_KEY_SOURCE"))
+        XCTAssertTrue(appcastTool.contains("Recovery-file mode requires SPARKLE_ED25519_RECOVERY_OR_CI_AUTHORIZATION=approved"))
+        XCTAssertTrue(appcastTool.contains("Required Keychain signing identity is unavailable"))
+        XCTAssertTrue(appcastTool.contains("SUPublicEDKey does not match the selected signing identity"))
+        XCTAssertTrue(appcastTool.contains("Production enclosure URL prefix must be"))
+        XCTAssertTrue(appcastTool.contains("No Ed25519 enclosure signature found"))
+        XCTAssertTrue(appcastTool.contains("--verify \"${signing_args[@]}\""))
+        XCTAssertTrue(appcastTool.contains("--maximum-deltas \"$maximum_deltas\""))
+    }
+
+    func testCompileTimeQAIsolationPrecedesAllProductionIntegrations() throws {
+        let root = projectRoot
+        let isolation = try String(contentsOf: root.appendingPathComponent("Sources/CodexMonitorApp/QAIsolation.swift"), encoding: .utf8)
+        let appDelegate = try String(contentsOf: root.appendingPathComponent("Sources/CodexMonitorApp/CodexMonitorApp.swift"), encoding: .utf8)
+        let coordinator = try String(contentsOf: root.appendingPathComponent("Sources/CodexMonitorApp/MonitorSurfaceCoordinator.swift"), encoding: .utf8)
+        let diagnostics = try String(contentsOf: root.appendingPathComponent("Sources/CodexMonitorApp/Diagnostics.swift"), encoding: .utf8)
+        let package = try String(contentsOf: root.appendingPathComponent("Tools/package_release.sh"), encoding: .utf8)
+
+        XCTAssertTrue(isolation.contains("#if CODEX_MONITOR_QA_ISOLATION"))
+        XCTAssertTrue(isolation.contains("static let expectedBundleIdentifier: String? = \"com.codexmonitor.sparkle.productionqa\""))
+        XCTAssertTrue(isolation.contains(".standard"))
+        XCTAssertFalse(isolation.contains("UserDefaults(suiteName:"))
+        XCTAssertTrue(isolation.contains("static func verifyPackaging()"))
+        XCTAssertTrue(isolation.contains("CodexMonitorQAIsolation=true"))
+        XCTAssertFalse(isolation.contains("ProcessInfo.processInfo.environment"))
+
+        XCTAssertTrue(appDelegate.contains("QAIsolation.verifyPackaging()"))
+        XCTAssertTrue(appDelegate.contains("guard !QAIsolation.enabled else { return }"))
+        XCTAssertTrue(appDelegate.contains("if !QAIsolation.enabled {\n            Task { await driver.start() }"))
+        XCTAssertTrue(appDelegate.contains("if !QAIsolation.enabled { model.startObserving(usageLedger) }"))
+        XCTAssertTrue(appDelegate.contains("private lazy var approvalObserverPaths"))
+        XCTAssertTrue(coordinator.contains("self.notifications = qaIsolationEnabled ? nil : MonitorNotificationController()"))
+        XCTAssertTrue(coordinator.contains("LoginItemController(reconcileOnInit: !qaIsolationEnabled)"))
+        XCTAssertTrue(coordinator.contains("guard !qaIsolationEnabled else { return }\n        guard let url = NSWorkspace.shared.urlForApplication"))
+        XCTAssertTrue(diagnostics.contains("guard !QAIsolation.enabled else { return }"))
+
+        XCTAssertTrue(package.contains("QA isolation requires a dedicated, non-production bundle identifier."))
+        XCTAssertTrue(package.contains("QA isolation requires its explicit loopback-only Sparkle feed."))
+        XCTAssertTrue(package.contains("QA isolation must use the disposable ad-hoc signing path"))
+        XCTAssertTrue(package.contains("Production packaging requires BUNDLE_IDENTIFIER=com.codexmonitor.app."))
+        XCTAssertTrue(package.contains("Production packaging forbids SPARKLE_ALLOW_INSECURE_LOCALHOST."))
+        XCTAssertTrue(package.contains("CODEX_MONITOR_QA_ISOLATION"))
+    }
+
+#if CODEX_MONITOR_QA_ISOLATION
+    func testQADelegateConstructionDoesNotStartRuntimeInfrastructure() {
+        // Construction is intentionally weaker than application launch. It
+        // exercises the QA-only property-initialization path without opening
+        // Codex transports, touching Hooks, registering notifications, or
+        // creating an NSApplication.
+        _ = CodexMonitorAppDelegate()
+    }
+#endif
+
     func testFreshAccountAbsenceAndSourceRecoveryStaySafeWithoutRestart() async throws {
         let runtime = MonitorRuntimeStore(initialPhase: .live)
 

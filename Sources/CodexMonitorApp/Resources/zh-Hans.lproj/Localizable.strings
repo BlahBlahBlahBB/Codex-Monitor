@@ -146,6 +146,7 @@
 "quota.exhausted" = "额度已用完 · 等待额度重置";
 "update.section" = "更新";
 "update.check" = "检查更新";
+"update.manualDownload" = "手动下载";
 "update.checking" = "正在检查更新";
 "update.checkingDescription" = "已有更新检查正在进行。";
 "update.upToDate" = "Codex Monitor 已是最新版本";

@@ -10,6 +10,12 @@ let package = Package(
         .executable(name: "CodexMonitorApp", targets: ["CodexMonitorApp"]),
         .executable(name: "ApprovalObserver", targets: ["ApprovalObserver"])
     ],
+    dependencies: [
+        // Pin the updater framework so signing, appcast generation, and
+        // runtime behavior are reviewed together. Do not silently float to a
+        // different Sparkle release in a production update channel.
+        .package(url: "https://github.com/sparkle-project/Sparkle.git", exact: "2.10.0")
+    ],
     targets: [
         .target(
             name: "CSQLite",
@@ -20,7 +26,11 @@ let package = Package(
         .target(name: "CodexMonitorContracts", dependencies: ["CSQLite"]),
         .executableTarget(
             name: "CodexMonitorApp",
-            dependencies: ["CodexMonitorContracts", "CSQLite"],
+            dependencies: [
+                "CodexMonitorContracts",
+                "CSQLite",
+                .product(name: "Sparkle", package: "Sparkle")
+            ],
             resources: [.process("Resources")]
         ),
         .executableTarget(name: "ApprovalObserver", dependencies: ["CodexMonitorContracts"]),
