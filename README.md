@@ -1,14 +1,14 @@
 # Codex Monitor
 
-[![Release](https://img.shields.io/badge/Release-v1.0.13-2563eb?logo=github)](https://github.com/BlahBlahBlahBB/Codex-Monitor/releases/tag/v1.0.13)
+[![Release](https://img.shields.io/badge/Release-v1.0.14-2563eb?logo=github)](https://github.com/BlahBlahBlahBB/Codex-Monitor/releases/tag/v1.0.14)
 ![Platform](https://img.shields.io/badge/macOS-13%2B%20%7C%20Apple%20Silicon-111827?logo=apple)
 ![Maturity](https://img.shields.io/badge/Maturity-Preview-f59e0b)
 
 **原生 macOS Codex 状态与额度辅助工具。** 通过菜单栏状态、桌面悬浮球、Quick View、用量与设置界面，快速查看 Codex 信息，尽量减少工作中断。
 
-**快速入口：** [下载 1.0.13](https://github.com/BlahBlahBlahBB/Codex-Monitor/releases/download/v1.0.13/Codex-Monitor-1.0.13-RC1-macOS-arm64.dmg) · [更新内容](https://github.com/BlahBlahBlahBB/Codex-Monitor/releases/tag/v1.0.13) · [回退至 1.0.12](https://github.com/BlahBlahBlahBB/Codex-Monitor/releases/tag/v1.0.12)
+**快速入口：** [下载 1.0.14](https://github.com/BlahBlahBlahBB/Codex-Monitor/releases/download/v1.0.14/Codex-Monitor-1.0.14-RC1-macOS-arm64.dmg) · [更新内容](https://github.com/BlahBlahBlahBB/Codex-Monitor/releases/tag/v1.0.14) · [回退至 1.0.13](https://github.com/BlahBlahBlahBB/Codex-Monitor/releases/tag/v1.0.13)
 
-> **当前版本：Codex Monitor 1.0.13 (Build 117)**
+> **当前版本：Codex Monitor 1.0.14 (Build 120)**
 >
 > Codex Monitor 当前为 Preview，不是 Stable Public Release，也不是 OpenAI 官方产品。部分能力依赖 Codex 的本地接口与本地数据结构，Codex 更新可能暂时影响个别能力；当数据源不可用时，应用会优先显示 Unknown / Unavailable，而不是伪造状态。
 
@@ -18,19 +18,17 @@
 
 ### macOS · Apple Silicon
 
-<a href="https://github.com/BlahBlahBlahBB/Codex-Monitor/releases/download/v1.0.13/Codex-Monitor-1.0.13-RC1-macOS-arm64.dmg"><img src="https://img.shields.io/badge/%E4%B8%8B%E8%BD%BD-1.0.13-black?style=for-the-badge&logo=apple" alt="下载 Codex Monitor 1.0.13"></a>
+<a href="https://github.com/BlahBlahBlahBB/Codex-Monitor/releases/download/v1.0.14/Codex-Monitor-1.0.14-RC1-macOS-arm64.dmg"><img src="https://img.shields.io/badge/%E4%B8%8B%E8%BD%BD-1.0.14-black?style=for-the-badge&logo=apple" alt="下载 Codex Monitor 1.0.14"></a>
 
 
-- [查看 v1.0.13 Release](https://github.com/BlahBlahBlahBB/Codex-Monitor/releases/tag/v1.0.13)
-- [SHA-256 校验文件](https://github.com/BlahBlahBlahBB/Codex-Monitor/releases/download/v1.0.13/SHA256SUMS-v1.0.13.txt)
-- DMG SHA-256：`4542f55247dc484b9f9525eacdf5596c0979a43059a23fbfd90bdbe7b647a54b`
-- DMG 大小：`3,667,920 bytes`（约 3.7 MB）
-- 发布源码：[`fa0f5bbc7664abfb54127bc0e4887739820aca9c`](https://github.com/BlahBlahBlahBB/Codex-Monitor/commit/fa0f5bbc7664abfb54127bc0e4887739820aca9c)（`v1.0.13` Tag 精确指向该提交；后续 `main` 合并提交不改变发布来源）
+- [查看 v1.0.14 Release](https://github.com/BlahBlahBlahBB/Codex-Monitor/releases/tag/v1.0.14)
+- [SHA-256 校验文件](https://github.com/BlahBlahBlahBB/Codex-Monitor/releases/download/v1.0.14/SHA256SUMS-v1.0.14.txt)
+- 发布源码由 `v1.0.14` Tag 固定；DMG、更新 ZIP 与 appcast 的 SHA-256 以 Release 附带的校验文件为准。
 
 下载完成后，可以在终端校验文件：
 
 ```bash
-shasum -a 256 ~/Downloads/Codex-Monitor-1.0.13-RC1-macOS-arm64.dmg
+shasum -a 256 ~/Downloads/Codex-Monitor-1.0.14-RC1-macOS-arm64.dmg
 ```
 
 输出的哈希应与上方完全一致。
@@ -43,7 +41,7 @@ shasum -a 256 ~/Downloads/Codex-Monitor-1.0.13-RC1-macOS-arm64.dmg
 
 ### 首次安装
 
-1. 建议直接从本页 GitHub Release 下载 `Codex-Monitor-1.0.13-RC1-macOS-arm64.dmg`
+1. 建议直接从本页 GitHub Release 下载 `Codex-Monitor-1.0.14-RC1-macOS-arm64.dmg`
 2. 打开 DMG
 3. 将 `Codex Monitor.app` 拖入 `/Applications`
 4. 从“应用程序”启动 Codex Monitor
@@ -62,20 +60,21 @@ shasum -a 256 ~/Downloads/Codex-Monitor-1.0.13-RC1-macOS-arm64.dmg
 
 当前 Preview 尚未 Developer ID 签名或 Apple 公证，因此 Gatekeeper 仍可能警告或阻止启动。**如果首次打开受到拦截**，先核对下载来源及 SHA-256；在尝试打开应用后，可前往 **系统设置 → 隐私与安全性 → 仍要打开**（若系统提供此选项）确认。不要为了绕过拦截执行不明来源的终端命令。
 
-当前版本会在启动后延迟检查，并在最多 24 小时一次的自动检查中提示 GitHub 新版本；也可在 **设置 → 关于 → 检查更新** 手动查询。它**不下载、不安装或替换 App**，升级请按以上步骤手动安装。需要回退时，可从 [v1.0.12](https://github.com/BlahBlahBlahBB/Codex-Monitor/releases/tag/v1.0.12) 下载上一版本。
+从 **1.0.13 升级到 1.0.14** 需要按上述 DMG 流程手动安装一次。1.0.14 起，设置 → 关于的“检查更新”由 Sparkle 负责，可下载、验签并在用户确认后替换与重新启动 App；GitHub Releases 页面仍保留为手动下载与回退入口。需要回退时，可从 [v1.0.13](https://github.com/BlahBlahBlahBB/Codex-Monitor/releases/tag/v1.0.13) 下载上一版本。
 
 <br>
 
-## ✨ 1.0.13 重点更新
+## ✨ 1.0.14 重点更新
 
-- 新增 GitHub Releases 版本更新检测：启动后延迟检查，后续最多每 24 小时检查一次
-- 设置 → 关于新增“检查更新”，并提供中英文无更新与新版本提醒文案
-- 新版本提醒仅跳转固定的官方 GitHub Release 页面；不执行自动下载或自动安装
-- 版本比较安全忽略旧版、当前版本、draft、prerelease、非法版本和缺失 Build 的推测
+- 新增 Sparkle 2.10 应用内更新：下载完整 ZIP、Ed25519 验签、用户确认安装并重新启动
+- Sparkle 更新使用 HTTPS appcast；手动 GitHub 下载/回退入口继续保留
+- 1.0.13 用户需手动安装本版一次；之后的兼容版本可通过 Sparkle 更新
+- 当前仍为 ad-hoc 签名、未使用 Apple Developer ID、公证或 Stapling；首次安装仍可能需要 macOS Gatekeeper 正常放行
+- 非 QA 生产 RC 实机运行验收及下载中断场景尚未执行，属于发布负责人接受的剩余风险
 
-自动化回归：**478 executed / 4 skipped / 0 failures**。
+自动化回归：**480 executed / 4 skipped / 0 failures**。
 
-RC1 App / DMG 静态验证及实机 QA：**PASS**。GitHub 发布资产的 SHA-256 与原 RC1 一致；未进行真实 24 小时等待测试，也未通过公开的更高版本 Release 验证升级弹窗。
+RC1 App / DMG、嵌套 Sparkle/XPC 签名、生产公钥注入与更新 ZIP 静态验证：**PASS**。生产运行路径与下载中断未实测，不得解读为通过。
 
 <br>
 
@@ -230,7 +229,7 @@ swift test
 Preview release packaging：
 
 ```bash
-VERSION=1.0.13 BUILD=117 RELEASE_LABEL=RC1 ./Tools/package_release.sh
+VERSION=1.0.14 BUILD=120 RELEASE_LABEL=RC1 ./Tools/package_release.sh
 ```
 
 在未提供 `SIGNING_IDENTITY` 时，脚本生成明确标记的 ad-hoc local Preview；Developer ID / notarization 流程当前尚未启用。
