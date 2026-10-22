@@ -98,8 +98,14 @@ final class CrossMachineValidationTests: XCTestCase {
         XCTAssertTrue(package.contains("if [[ \"$signing_identity\" == \"-\" ]]; then\n    \"$codesign_tool\" --force --sign - \"$code_path\""))
         XCTAssertTrue(appcastTool.contains("SPARKLE_ALLOW_INSECURE_LOCALHOST"))
         XCTAssertTrue(appcastTool.contains("Update assets must use HTTPS"))
+        XCTAssertTrue(appcastTool.contains("com.codexmonitor.sparkle.production.v1"))
+        XCTAssertTrue(appcastTool.contains("SPARKLE_ED25519_KEY_SOURCE"))
+        XCTAssertTrue(appcastTool.contains("Recovery-file mode requires SPARKLE_ED25519_RECOVERY_OR_CI_AUTHORIZATION=approved"))
+        XCTAssertTrue(appcastTool.contains("Required Keychain signing identity is unavailable"))
+        XCTAssertTrue(appcastTool.contains("SUPublicEDKey does not match the selected signing identity"))
+        XCTAssertTrue(appcastTool.contains("Production enclosure URL prefix must be"))
         XCTAssertTrue(appcastTool.contains("No Ed25519 enclosure signature found"))
-        XCTAssertTrue(appcastTool.contains("--verify --ed-key-file"))
+        XCTAssertTrue(appcastTool.contains("--verify \"${signing_args[@]}\""))
         XCTAssertTrue(appcastTool.contains("--maximum-deltas \"$maximum_deltas\""))
     }
 
