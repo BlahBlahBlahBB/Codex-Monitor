@@ -172,6 +172,31 @@ final class MonitorProductIntegrationTests: XCTestCase {
         XCTAssertFalse(source.contains("settings.maintenance"))
     }
 
+    func testAboutUpdateRowUsesOnlyThePrimarySparkleAction() throws {
+        let sourceURL = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("Sources/CodexMonitorApp/ProductViews.swift")
+        let source = try String(contentsOf: sourceURL, encoding: .utf8)
+        let aboutStart = try XCTUnwrap(source.range(of: "private struct AboutSettingsDetail: View {"))
+        let aboutEnd = try XCTUnwrap(source.range(of: "struct DiagnosticsWindowView", range: aboutStart.upperBound..<source.endIndex))
+        let about = String(source[aboutStart.lowerBound..<aboutEnd.lowerBound])
+
+        XCTAssertTrue(about.contains("SettingsRow(title: L10n.tr(\"update.section\"))"))
+        XCTAssertTrue(about.contains("Button(L10n.tr(\"update.check\"), action: actions.checkForUpdates)"))
+        XCTAssertTrue(about.contains(".buttonStyle(.borderedProminent)"))
+        XCTAssertFalse(about.contains("manualDownload"))
+        XCTAssertFalse(about.contains("openManualUpdateDownload"))
+        XCTAssertFalse(about.contains("VStack"))
+
+        XCTAssertEqual(L10n.tr("update.check", languageCode: "en"), "Check for Updates")
+        XCTAssertEqual(L10n.tr("update.check", languageCode: "zh-Hans"), "检查更新")
+        for language in ["en", "zh-Hans"] {
+            XCTAssertEqual(L10n.tr("update.manualDownloadFallback", languageCode: language), "update.manualDownloadFallback")
+        }
+    }
+
     func testDiagnosticsExportUsesTimestampedNonOverwritingSanitizedZIP() async throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent("CodexMonitorDiagnosticsTests-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
@@ -2922,7 +2947,7 @@ final class MonitorProductIntegrationTests: XCTestCase {
 
     private func testSettingsActions() -> SettingsSystemActions {
         SettingsSystemActions(
-            refresh: {}, openLogsFolder: {}, setMonitoringPaused: { _ in }, requestNotificationPermission: { _ in }, exportDiagnostics: { _ in }, loginItem: LoginItemController(reconcileOnInit: false), showDiagnostics: {}, checkForUpdates: {}, openManualUpdateDownload: {}, qaIsolationEnabled: false
+            refresh: {}, openLogsFolder: {}, setMonitoringPaused: { _ in }, requestNotificationPermission: { _ in }, exportDiagnostics: { _ in }, loginItem: LoginItemController(reconcileOnInit: false), showDiagnostics: {}, checkForUpdates: {}, qaIsolationEnabled: false
         )
     }
 

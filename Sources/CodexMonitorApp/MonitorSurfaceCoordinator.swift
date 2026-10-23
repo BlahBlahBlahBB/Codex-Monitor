@@ -14,7 +14,6 @@ final class MonitorSurfaceCoordinator: NSObject {
     private let setMonitoringPaused: (Bool) -> Void
     private let activateApprovalObserver: () -> Void
     private let checkForUpdates: () -> Void
-    private let openManualUpdateDownload: () -> Void
     private let qaIsolationEnabled: Bool
     private let ownership = MonitorSurfaceOwnership()
     private let loginItem: LoginItemController
@@ -26,7 +25,7 @@ final class MonitorSurfaceCoordinator: NSObject {
     private var settingsWindowController: SettingsWindowController?
     private var diagnosticsWindowController: DiagnosticsWindowController?
 
-    init(model: MonitorAppModel, preferences: MonitorPreferences, localization: LocalizationController, refreshMonitoring: @escaping () -> Void, setMonitoringPaused: @escaping (Bool) -> Void, activateApprovalObserver: @escaping () -> Void, checkForUpdates: @escaping () -> Void, openManualUpdateDownload: @escaping () -> Void, qaIsolationEnabled: Bool = false) {
+    init(model: MonitorAppModel, preferences: MonitorPreferences, localization: LocalizationController, refreshMonitoring: @escaping () -> Void, setMonitoringPaused: @escaping (Bool) -> Void, activateApprovalObserver: @escaping () -> Void, checkForUpdates: @escaping () -> Void, qaIsolationEnabled: Bool = false) {
         self.model = model
         self.preferences = preferences
         self.localization = localization
@@ -34,7 +33,6 @@ final class MonitorSurfaceCoordinator: NSObject {
         self.setMonitoringPaused = setMonitoringPaused
         self.activateApprovalObserver = activateApprovalObserver
         self.checkForUpdates = checkForUpdates
-        self.openManualUpdateDownload = openManualUpdateDownload
         self.qaIsolationEnabled = qaIsolationEnabled
         // Do not even query LoginItems or construct a UserNotifications
         // integration in the disposable QA executable.
@@ -131,7 +129,6 @@ final class MonitorSurfaceCoordinator: NSObject {
                     loginItem: loginItem,
                     showDiagnostics: { [weak self] in if self?.qaIsolationEnabled == false { self?.showDiagnostics() } },
                     checkForUpdates: { [weak self] in self?.checkForUpdates() },
-                    openManualUpdateDownload: { [weak self] in self?.openManualUpdateDownload() },
                     qaIsolationEnabled: qaIsolationEnabled
                 )
             )
