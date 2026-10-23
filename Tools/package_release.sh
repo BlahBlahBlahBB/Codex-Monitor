@@ -7,9 +7,9 @@ set -euo pipefail
 project_root="$(cd "$(dirname "$0")/.." && pwd)"
 product_name="Codex Monitor"
 bundle_identifier="${BUNDLE_IDENTIFIER:-com.codexmonitor.app}"
-marketing_version="${VERSION:-1.0.14}"
-build_number="${BUILD:-120}"
-# Defaults target the 1.0.14 preview artifact. RC/release builds use the same
+marketing_version="${VERSION:-1.0.15}"
+build_number="${BUILD:-121}"
+# Defaults target the 1.0.15 preview artifact. RC/release builds use the same
 # pipeline and set RELEASE_LABEL (for example, RC1).
 release_label="${RELEASE_LABEL:-Preview}"
 build_revision="${UI_BUILD_REVISION:-$(git -C "$project_root" rev-parse HEAD)}"
@@ -147,15 +147,23 @@ bin_path="$(SDKROOT="$sdk_path" "$swift_tool" "${build_args[@]}" --show-bin-path
 executable="$bin_path/CodexMonitorApp"
 helper_executable="$bin_path/ApprovalObserver"
 resource_bundle="$bin_path/CodexMonitorContracts_CodexMonitorApp.bundle"
+app_localization_resources="$project_root/Sources/CodexMonitorApp/AppBundleLocalizations"
 
 [[ -x "$executable" ]] || { print -u2 "Missing executable: $executable"; exit 1; }
 [[ -x "$helper_executable" ]] || { print -u2 "Missing approval observer helper: $helper_executable"; exit 1; }
 [[ -d "$resource_bundle" ]] || { print -u2 "Missing SwiftPM resource bundle: $resource_bundle"; exit 1; }
+[[ -d "$app_localization_resources/en.lproj" && -d "$app_localization_resources/zh-Hans.lproj" && -d "$app_localization_resources/zh_CN.lproj" ]] || {
+  print -u2 "Missing main-bundle localization resources."
+  exit 1
+}
 
 cp "$executable" "$app_path/Contents/MacOS/CodexMonitorApp"
 mkdir -p "$app_path/Contents/Library/Helpers"
 cp "$helper_executable" "$app_path/Contents/Library/Helpers/ApprovalObserver"
 ditto "$resource_bundle" "$app_path/Contents/Resources/$(basename "$resource_bundle")"
+ditto "$app_localization_resources/en.lproj" "$app_path/Contents/Resources/en.lproj"
+ditto "$app_localization_resources/zh-Hans.lproj" "$app_path/Contents/Resources/zh-Hans.lproj"
+ditto "$app_localization_resources/zh_CN.lproj" "$app_path/Contents/Resources/zh_CN.lproj"
 cp "$icon_source" "$app_path/Contents/Resources/$(basename "$icon_source")"
 
 sparkle_framework="$bin_path/Sparkle.framework"
@@ -229,6 +237,11 @@ fi
 info_plist="$app_path/Contents/Info.plist"
 plutil -create xml1 "$info_plist"
 /usr/libexec/PlistBuddy -c "Add :CFBundleDevelopmentRegion string en" "$info_plist"
+/usr/libexec/PlistBuddy -c "Add :CFBundleLocalizations array" "$info_plist"
+/usr/libexec/PlistBuddy -c "Add :CFBundleLocalizations:0 string en" "$info_plist"
+/usr/libexec/PlistBuddy -c "Add :CFBundleLocalizations:1 string zh-Hans" "$info_plist"
+/usr/libexec/PlistBuddy -c "Add :CFBundleLocalizations:2 string zh_CN" "$info_plist"
+/usr/libexec/PlistBuddy -c "Add :CFBundleAllowMixedLocalizations bool true" "$info_plist"
 /usr/libexec/PlistBuddy -c "Add :CFBundleDisplayName string $product_name" "$info_plist"
 /usr/libexec/PlistBuddy -c "Add :CFBundleExecutable string CodexMonitorApp" "$info_plist"
 /usr/libexec/PlistBuddy -c "Add :CFBundleIdentifier string $bundle_identifier" "$info_plist"

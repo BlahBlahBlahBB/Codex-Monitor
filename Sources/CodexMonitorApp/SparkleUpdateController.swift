@@ -6,10 +6,19 @@ import Sparkle
 /// Sparkle's standard user driver presents every install/relaunch decision.
 @MainActor
 final class SparkleUpdateController {
-    private var updaterController: SPUStandardUpdaterController?
+    enum CheckResult: Equatable {
+        case started
+        case restartRequiredForLanguage
+    }
 
-    func start() {
+    private var updaterController: SPUStandardUpdaterController?
+    private var driverLanguage: String?
+    private var nativeDriverMatchesSelection = false
+
+    func start(language: String, nativeDriverMatchesSelection: Bool) {
         guard updaterController == nil else { return }
+        driverLanguage = SparkleLocalization.driverLanguage(for: language)
+        self.nativeDriverMatchesSelection = nativeDriverMatchesSelection
         updaterController = SPUStandardUpdaterController(
             startingUpdater: true,
             updaterDelegate: nil,
@@ -17,8 +26,13 @@ final class SparkleUpdateController {
         )
     }
 
-    func checkForUpdates() {
+    func checkForUpdates(language: String) -> CheckResult {
+        guard nativeDriverMatchesSelection,
+              driverLanguage == SparkleLocalization.driverLanguage(for: language) else {
+            return .restartRequiredForLanguage
+        }
         updaterController?.checkForUpdates(nil)
+        return .started
     }
 
     func stop() {
@@ -26,5 +40,7 @@ final class SparkleUpdateController {
         // the in-process updater without asking Sparkle to touch any external
         // app or Codex Desktop state.
         updaterController = nil
+        driverLanguage = nil
+        nativeDriverMatchesSelection = false
     }
 }

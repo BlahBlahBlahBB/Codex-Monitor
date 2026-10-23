@@ -941,9 +941,15 @@ private struct AboutSettingsDetail: View {
             SettingsRow(title: L10n.tr("settings.version")) { Text(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.0").foregroundStyle(.secondary).monospacedDigit() }
             SettingsRow(title: L10n.tr("settings.build")) { Text(Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "dev").foregroundStyle(.secondary).monospacedDigit() }
             SettingsRow(title: L10n.tr("update.section")) {
-                HStack {
-                    Button(L10n.tr("update.check"), action: actions.checkForUpdates).buttonStyle(.bordered)
-                    Button(L10n.tr("update.manualDownload"), action: actions.openManualUpdateDownload).buttonStyle(.bordered)
+                VStack(alignment: .leading, spacing: 7) {
+                    Button(L10n.tr("update.check"), action: actions.checkForUpdates)
+                        .buttonStyle(.borderedProminent)
+                    Button(action: actions.openManualUpdateDownload) {
+                        Text(L10n.tr("update.manualDownloadFallback"))
+                            .font(.footnote)
+                            .underline()
+                    }
+                    .buttonStyle(.plain)
                 }
             }
             SettingsRow(title: L10n.tr("settings.author")) {
