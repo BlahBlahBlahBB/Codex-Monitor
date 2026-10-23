@@ -81,8 +81,9 @@ final class CrossMachineValidationTests: XCTestCase {
         let package = try String(contentsOf: root.appendingPathComponent("Tools/package_release.sh"), encoding: .utf8)
         let appcastTool = try String(contentsOf: root.appendingPathComponent("Tools/SparkleRelease/generate_appcast.sh"), encoding: .utf8)
 
-        XCTAssertTrue(appDelegate.contains("sparkleUpdates.start()"))
-        XCTAssertTrue(appDelegate.contains("sparkleUpdates.checkForUpdates()"))
+        XCTAssertTrue(appDelegate.contains("sparkleUpdates.start(\n            language: localization.resolvedLanguage,"))
+        XCTAssertTrue(appDelegate.contains("sparkleUpdates.checkForUpdates(language: localization.resolvedLanguage)"))
+        XCTAssertTrue(appDelegate.contains("LocalizationController.systemPreferredLanguages"))
         XCTAssertFalse(appDelegate.contains("GitHubUpdateNotifier()"))
         XCTAssertFalse(appDelegate.contains("updateNotifier.scheduleStartupCheck()"))
         XCTAssertTrue(updater.contains("SPUStandardUpdaterController"))
@@ -94,6 +95,10 @@ final class CrossMachineValidationTests: XCTestCase {
         XCTAssertTrue(package.contains("-name '*.app'"))
         XCTAssertTrue(package.contains("--keepParent \"$app_path\" \"$update_zip_path\""))
         XCTAssertTrue(package.contains("SUAutomaticallyUpdate bool false"))
+        XCTAssertTrue(package.contains("CFBundleLocalizations:1 string zh-Hans"))
+        XCTAssertTrue(package.contains("CFBundleLocalizations:2 string zh_CN"))
+        XCTAssertTrue(package.contains("CFBundleAllowMixedLocalizations bool true"))
+        XCTAssertTrue(package.contains("AppBundleLocalizations"))
         XCTAssertFalse(package.contains("disable-library-validation"))
         XCTAssertTrue(package.contains("if [[ \"$signing_identity\" == \"-\" ]]; then\n    \"$codesign_tool\" --force --sign - \"$code_path\""))
         XCTAssertTrue(appcastTool.contains("SPARKLE_ALLOW_INSECURE_LOCALHOST"))
@@ -107,6 +112,54 @@ final class CrossMachineValidationTests: XCTestCase {
         XCTAssertTrue(appcastTool.contains("No Ed25519 enclosure signature found"))
         XCTAssertTrue(appcastTool.contains("--verify \"${signing_args[@]}\""))
         XCTAssertTrue(appcastTool.contains("--maximum-deltas \"$maximum_deltas\""))
+    }
+
+    func testSparkleLanguageMappingKeepsSimplifiedChineseOnSparkleResourceIdentifier() {
+        XCTAssertEqual(SparkleLocalization.driverLanguage(for: "zh-Hans"), "zh_CN")
+        XCTAssertEqual(SparkleLocalization.driverLanguage(for: "zh_CN"), "zh_CN")
+        XCTAssertEqual(SparkleLocalization.driverLanguage(for: "en"), "en")
+        XCTAssertEqual(SparkleLocalization.driverLanguage(for: "fr"), "en")
+    }
+
+    func testSparkleLaunchLanguagePersistsForTheNextNativeFrameworkLoad() {
+        let suite = "com.codexmonitor.tests.sparkle-localization.\(UUID().uuidString)"
+        let defaults = try! XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+
+        // A Chinese app selection on an English system needs one controlled
+        // restart the first time it is persisted. The next native framework
+        // load sees the matching app-only AppleLanguages value.
+        let chineseFirstLaunch = SparkleLocalization.prepareForLaunch(
+            preference: .simplifiedChinese,
+            defaults: defaults,
+            persistentDomainName: suite,
+            systemPreferredLanguages: ["en"]
+        )
+        XCTAssertEqual(chineseFirstLaunch.driverLanguage, "en")
+        XCTAssertFalse(chineseFirstLaunch.nativeDriverMatchesSelection)
+        XCTAssertEqual(defaults.stringArray(forKey: "AppleLanguages")?.first, "zh_CN")
+
+        let chineseRestart = SparkleLocalization.prepareForLaunch(
+            preference: .simplifiedChinese,
+            defaults: defaults,
+            persistentDomainName: suite,
+            systemPreferredLanguages: ["en"]
+        )
+        XCTAssertEqual(chineseRestart.driverLanguage, "zh_CN")
+        XCTAssertTrue(chineseRestart.nativeDriverMatchesSelection)
+
+        // The inverse case models an English app selection on a Chinese
+        // system, without changing the real macOS language list.
+        defaults.removeObject(forKey: "AppleLanguages")
+        let englishFirstLaunch = SparkleLocalization.prepareForLaunch(
+            preference: .english,
+            defaults: defaults,
+            persistentDomainName: suite,
+            systemPreferredLanguages: ["zh-Hans"]
+        )
+        XCTAssertEqual(englishFirstLaunch.driverLanguage, "zh_CN")
+        XCTAssertFalse(englishFirstLaunch.nativeDriverMatchesSelection)
+        XCTAssertEqual(defaults.stringArray(forKey: "AppleLanguages")?.first, "en")
     }
 
     func testCompileTimeQAIsolationPrecedesAllProductionIntegrations() throws {

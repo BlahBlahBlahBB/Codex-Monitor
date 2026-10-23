@@ -147,6 +147,9 @@
 "update.section" = "Updates";
 "update.check" = "Check for Updates";
 "update.manualDownload" = "Manual Download";
+"update.manualDownloadFallback" = "Can't update automatically? Download manually";
+"update.languageRestartRequiredTitle" = "Restart Codex Monitor to check for updates";
+"update.languageRestartRequiredDescription" = "Update dialogs use the language selected when Codex Monitor starts. Restart the app, then check for updates again.";
 "update.checking" = "Checking for Updates";
 "update.checkingDescription" = "An update check is already in progress.";
 "update.upToDate" = "Codex Monitor is up to date";

@@ -9,10 +9,20 @@ final class CodexMonitorApplication: NSObject {
     /// Settings scene. `CodexMonitorAppDelegate` is the sole owner of every
     /// native surface, including the canonical Settings controller.
     private static let applicationDelegate = CodexMonitorAppDelegate()
+    fileprivate static var sparkleLaunchState = SparkleLocalization.LaunchState(
+        driverLanguage: "en",
+        nativeDriverMatchesSelection: true
+    )
 
     static func main() {
         // Must precede NSApplication creation and every app-owned subsystem.
         QAIsolation.verifyPackaging()
+        let launchPreferences = MonitorPreferences(defaults: QAIsolation.preferences)
+        sparkleLaunchState = SparkleLocalization.prepareForLaunch(
+            preference: launchPreferences.interfaceLanguage,
+            defaults: QAIsolation.preferences,
+            systemPreferredLanguages: LocalizationController.systemPreferredLanguages
+        )
         let application = NSApplication.shared
         application.delegate = applicationDelegate
         application.run()
@@ -77,7 +87,7 @@ final class CodexMonitorAppDelegate: NSObject, NSApplicationDelegate {
             refreshMonitoring: { [weak self] in self?.restartObservation() },
             setMonitoringPaused: { [weak self] in self?.setMonitoringPaused($0) },
             activateApprovalObserver: { [weak self] in self?.activateApprovalObserver() },
-            checkForUpdates: { [weak self] in self?.sparkleUpdates.checkForUpdates() },
+            checkForUpdates: { [weak self] in self?.checkForUpdates() },
             openManualUpdateDownload: { NSWorkspace.shared.open(GitHubUpdateNotifier.officialReleasesPage) },
             qaIsolationEnabled: QAIsolation.enabled
         )
@@ -85,7 +95,10 @@ final class CodexMonitorAppDelegate: NSObject, NSApplicationDelegate {
         model.startObserving(runtime)
         if !QAIsolation.enabled { model.startObserving(usageLedger) }
         surfaces.start()
-        sparkleUpdates.start()
+        sparkleUpdates.start(
+            language: localization.resolvedLanguage,
+            nativeDriverMatchesSelection: CodexMonitorApplication.sparkleLaunchState.nativeDriverMatchesSelection
+        )
         if !QAIsolation.enabled {
             Task { await driver.start() }
             Task { await accountProvider.start() }
@@ -93,7 +106,11 @@ final class CodexMonitorAppDelegate: NSObject, NSApplicationDelegate {
         }
         languageObserver = preferences.$interfaceLanguage.sink { [weak self] preference in
             guard let self else { return }
-            localization.refresh(preference: preference, preferredLanguages: LocalizationController.launchPreferredLanguages)
+            localization.refresh(preference: preference, preferredLanguages: LocalizationController.systemPreferredLanguages)
+            // Sparkle's standard driver cannot change its already-loaded
+            // framework localization. Persist this app-only value now so the
+            // next normal launch selects the same language as the UI.
+            SparkleLocalization.persistForNextLaunch(preference: preference, defaults: QAIsolation.preferences)
             installApplicationMenu()
         }
         startSmokeExitIfRequested()
@@ -120,6 +137,19 @@ final class CodexMonitorAppDelegate: NSObject, NSApplicationDelegate {
             guard let self else { return }
             await driver.refreshOnce()
             await accountProvider.refreshOnce()
+        }
+    }
+
+    private func checkForUpdates() {
+        switch sparkleUpdates.checkForUpdates(language: localization.resolvedLanguage) {
+        case .started:
+            break
+        case .restartRequiredForLanguage:
+            let alert = NSAlert()
+            alert.messageText = L10n.tr("update.languageRestartRequiredTitle")
+            alert.informativeText = L10n.tr("update.languageRestartRequiredDescription")
+            alert.addButton(withTitle: L10n.tr("update.ok"))
+            alert.runModal()
         }
     }
 

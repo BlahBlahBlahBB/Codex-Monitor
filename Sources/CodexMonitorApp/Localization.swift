@@ -1,6 +1,80 @@
 import Foundation
 import SwiftUI
 
+/// Bridges Codex Monitor's supported interface choices to the localization
+/// identifiers bundled by Sparkle. Sparkle resolves its standard UI strings
+/// when its framework bundle is first loaded, so this must run before AppKit
+/// creates the standard updater controller.
+enum SparkleLocalization {
+    private static let appleLanguagesKey = "AppleLanguages"
+
+    struct LaunchState: Equatable {
+        let driverLanguage: String
+        let nativeDriverMatchesSelection: Bool
+    }
+
+    /// Records the next launch's native-bundle language only in this app's
+    /// preference domain. It never changes the macOS-wide language list.
+    /// Removing the app value restores normal system-language lookup for
+    /// Follow System mode.
+    static func persistForNextLaunch(
+        preference: InterfaceLanguage,
+        defaults: UserDefaults = .standard
+    ) {
+        switch preference {
+        case .simplifiedChinese:
+            // Sparkle 2.10.0 ships Simplified Chinese as `zh_CN.lproj`.
+            defaults.set(["zh_CN", "zh-Hans", "en"], forKey: appleLanguagesKey)
+        case .english:
+            defaults.set(["en"], forKey: appleLanguagesKey)
+        case .system:
+            defaults.removeObject(forKey: appleLanguagesKey)
+        }
+    }
+
+    /// The Sparkle framework is dynamically loaded before Swift's `main`.
+    /// Capture its already-selected language before persisting the user's new
+    /// choice. If they differ, this process must not present mixed-language
+    /// standard Sparkle UI; the persisted value takes effect on the next
+    /// normal launch.
+    @MainActor
+    static func prepareForLaunch(
+        preference: InterfaceLanguage,
+        defaults: UserDefaults = .standard,
+        persistentDomainName: String? = Bundle.main.bundleIdentifier,
+        systemPreferredLanguages: [String] = Locale.preferredLanguages
+    ) -> LaunchState {
+        // `stringArray(forKey:)` merges the global language domain. We need
+        // only this App's persisted override to distinguish Follow System
+        // from a prior explicit interface-language choice.
+        let existingPreferences = persistentDomainName.flatMap {
+            defaults.persistentDomain(forName: $0)?[appleLanguagesKey] as? [String]
+        }
+        let frameworkLanguage = driverLanguage(
+            for: existingPreferences?.first ?? systemPreferredLanguages.first ?? Locale.current.identifier
+        )
+        let selectedLanguage = driverLanguage(
+            for: LocalizationController.resolve(
+                preference: preference,
+                preferredLanguages: systemPreferredLanguages
+            )
+        )
+        persistForNextLaunch(preference: preference, defaults: defaults)
+        return LaunchState(
+            driverLanguage: frameworkLanguage,
+            nativeDriverMatchesSelection: frameworkLanguage == selectedLanguage
+        )
+    }
+
+    /// The standard Sparkle driver cannot change localization after its
+    /// framework bundle has been loaded. Compare the canonical language rather
+    /// than raw locale spellings so `zh-Hans` and `zh_CN` remain one choice.
+    static func driverLanguage(for resolvedLanguage: String) -> String {
+        let language = Locale(identifier: resolvedLanguage).language.languageCode?.identifier.lowercased()
+        return language == "zh" ? "zh_CN" : "en"
+    }
+}
+
 @MainActor
 final class LocalizationController: ObservableObject {
     @Published private(set) var resolvedLanguage: String
@@ -33,7 +107,19 @@ final class LocalizationController: ObservableObject {
     /// AppKit does not consume `-AppleLanguages` during its manual bootstrap.
     /// Resolve it before the first menu or SwiftUI root is constructed.
     static var launchPreferredLanguages: [String] {
+        systemPreferredLanguages
+    }
+
+    /// `Locale.preferredLanguages` is process-cached after an app-specific
+    /// AppleLanguages override has been used. Follow System must instead read
+    /// the immutable macOS global preference domain, never write to it.
+    static var systemPreferredLanguages: [String] {
         if let override = L10n.commandLineLanguageOverride { return [override] }
+        if let globalLanguages = UserDefaults.standard
+            .persistentDomain(forName: UserDefaults.globalDomain)?["AppleLanguages"] as? [String],
+           !globalLanguages.isEmpty {
+            return globalLanguages
+        }
         return Locale.preferredLanguages
     }
 
