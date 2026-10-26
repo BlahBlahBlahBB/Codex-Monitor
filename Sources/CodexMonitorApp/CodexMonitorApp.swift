@@ -88,7 +88,6 @@ final class CodexMonitorAppDelegate: NSObject, NSApplicationDelegate {
             setMonitoringPaused: { [weak self] in self?.setMonitoringPaused($0) },
             activateApprovalObserver: { [weak self] in self?.activateApprovalObserver() },
             checkForUpdates: { [weak self] in self?.checkForUpdates() },
-            openManualUpdateDownload: { NSWorkspace.shared.open(GitHubUpdateNotifier.officialReleasesPage) },
             qaIsolationEnabled: QAIsolation.enabled
         )
         self.surfaces = surfaces

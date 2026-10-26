@@ -147,7 +147,6 @@
 "update.section" = "更新";
 "update.check" = "检查更新";
 "update.manualDownload" = "手动下载";
-"update.manualDownloadFallback" = "无法自动更新？手动下载";
 "update.languageRestartRequiredTitle" = "请重启 Codex Monitor 后检查更新";
 "update.languageRestartRequiredDescription" = "更新对话框使用 Codex Monitor 启动时选定的语言。请重启 App 后再次检查更新。";
 "update.checking" = "正在检查更新";
