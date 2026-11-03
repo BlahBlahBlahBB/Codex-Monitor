@@ -1,14 +1,14 @@
 # Codex Monitor
 
-[![Release](https://img.shields.io/badge/Release-v1.0.16-2563eb?logo=github)](https://github.com/BlahBlahBlahBB/Codex-Monitor/releases/tag/v1.0.16)
+[![Release](https://img.shields.io/badge/Release-v1.0.17-2563eb?logo=github)](https://github.com/BlahBlahBlahBB/Codex-Monitor/releases/tag/v1.0.17)
 ![Platform](https://img.shields.io/badge/macOS-13%2B%20%7C%20Apple%20Silicon-111827?logo=apple)
 ![Maturity](https://img.shields.io/badge/Maturity-Preview-f59e0b)
 
 **原生 macOS Codex 状态与额度辅助工具。** 通过菜单栏状态、桌面悬浮球、Quick View、用量与设置界面，快速查看 Codex 信息，尽量减少工作中断。
 
-**快速入口：** [下载 1.0.16](https://github.com/BlahBlahBlahBB/Codex-Monitor/releases/download/v1.0.16/Codex-Monitor-1.0.16-Stable-macOS-arm64.dmg) · [更新内容](https://github.com/BlahBlahBlahBB/Codex-Monitor/releases/tag/v1.0.16) · [回退至 1.0.15](https://github.com/BlahBlahBlahBB/Codex-Monitor/releases/tag/v1.0.15)
+**快速入口：** [下载 1.0.17](https://github.com/BlahBlahBlahBB/Codex-Monitor/releases/download/v1.0.17/Codex-Monitor-1.0.17-Stable-macOS-arm64.dmg) · [更新内容](https://github.com/BlahBlahBlahBB/Codex-Monitor/releases/tag/v1.0.17) · [回退至 1.0.16](https://github.com/BlahBlahBlahBB/Codex-Monitor/releases/tag/v1.0.16)
 
-> **当前版本：Codex Monitor 1.0.16 (Build 122)**
+> **当前版本：Codex Monitor 1.0.17 (Build 123)**
 >
 > Codex Monitor 当前为 Preview，不是 Stable Public Release，也不是 OpenAI 官方产品。部分能力依赖 Codex 的本地接口与本地数据结构，Codex 更新可能暂时影响个别能力；当数据源不可用时，应用会优先显示 Unknown / Unavailable，而不是伪造状态。
 
@@ -18,17 +18,17 @@
 
 ### macOS · Apple Silicon
 
-<a href="https://github.com/BlahBlahBlahBB/Codex-Monitor/releases/download/v1.0.16/Codex-Monitor-1.0.16-Stable-macOS-arm64.dmg"><img src="https://img.shields.io/badge/%E4%B8%8B%E8%BD%BD-1.0.16-black?style=for-the-badge&logo=apple" alt="下载 Codex Monitor 1.0.16"></a>
+<a href="https://github.com/BlahBlahBlahBB/Codex-Monitor/releases/download/v1.0.17/Codex-Monitor-1.0.17-Stable-macOS-arm64.dmg"><img src="https://img.shields.io/badge/%E4%B8%8B%E8%BD%BD-1.0.17-black?style=for-the-badge&logo=apple" alt="下载 Codex Monitor 1.0.17"></a>
 
 
-- [查看 v1.0.16 Release](https://github.com/BlahBlahBlahBB/Codex-Monitor/releases/tag/v1.0.16)
-- [SHA-256 校验文件](https://github.com/BlahBlahBlahBB/Codex-Monitor/releases/download/v1.0.16/SHA256SUMS.txt)
-- 发布源码由 `v1.0.16` Tag 固定；DMG、更新 ZIP 与 appcast 的 SHA-256 以 Release 附带的校验文件为准。
+- [查看 v1.0.17 Release](https://github.com/BlahBlahBlahBB/Codex-Monitor/releases/tag/v1.0.17)
+- [SHA-256 校验文件](https://github.com/BlahBlahBlahBB/Codex-Monitor/releases/download/v1.0.17/SHA256SUMS.txt)
+- 发布源码由 `v1.0.17` Tag 固定；DMG、更新 ZIP 与 appcast 的 SHA-256 以 Release 附带的校验文件为准。
 
 下载完成后，可以在终端校验文件：
 
 ```bash
-shasum -a 256 ~/Downloads/Codex-Monitor-1.0.16-Stable-macOS-arm64.dmg
+shasum -a 256 ~/Downloads/Codex-Monitor-1.0.17-Stable-macOS-arm64.dmg
 ```
 
 输出的哈希应与 `SHA256SUMS.txt` 中对应文件的值一致。
@@ -41,7 +41,7 @@ shasum -a 256 ~/Downloads/Codex-Monitor-1.0.16-Stable-macOS-arm64.dmg
 
 ### 首次安装
 
-1. 建议直接从本页 GitHub Release 下载 `Codex-Monitor-1.0.16-Stable-macOS-arm64.dmg`
+1. 建议直接从本页 GitHub Release 下载 `Codex-Monitor-1.0.17-Stable-macOS-arm64.dmg`
 2. 打开 DMG
 3. 将 `Codex Monitor.app` 拖入 `/Applications`
 4. 从“应用程序”启动 Codex Monitor
@@ -49,6 +49,10 @@ shasum -a 256 ~/Downloads/Codex-Monitor-1.0.16-Stable-macOS-arm64.dmg
 > 建议直接从 GitHub Release 下载，不要通过聊天或协作应用二次转发安装包。部分沙箱化应用可能为转存文件附加更严格的隔离属性，导致 macOS 无法走常规的“仍要打开 / Open Anyway”流程。
 
 ### 从旧版本升级
+
+**推荐：** 已安装 v1.0.14 或更新版本的用户可在 Codex Monitor **关于 → 检查更新** 使用 Sparkle 下载、验签并更新，按照应用提示确认安装及重启。
+
+**手动更新（自动更新失败时）：**
 
 1. 先完全退出正在运行的 Codex Monitor
 2. 打开新版 DMG
@@ -66,22 +70,25 @@ shasum -a 256 ~/Downloads/Codex-Monitor-1.0.16-Stable-macOS-arm64.dmg
 
 从 **1.0.15 升级到 1.0.16** 可以使用 Sparkle。About 页面默认只显示“检查更新”主按钮；GitHub Release 页面继续保留为手动下载与恢复入口。
 
+从 **1.0.16 升级到 1.0.17** 可以使用 Sparkle。本次更新修复 Liquid Orb 拖动并增强鼠标事件监听器清理；已完成一次真实 v1.0.16 → v1.0.17 更新验证。
+
 <br>
 
-## ✨ 1.0.14、1.0.15 与 1.0.16 更新
+## ✨ 近期版本更新（v1.0.14–v1.0.17）
 
 - **v1.0.14：** 新增 Sparkle 2.10 应用内更新：自动检查、下载完整 ZIP、Ed25519 验签、用户确认安装并重新启动。
 - **v1.0.14：** Sparkle 更新使用 HTTPS appcast；手动 GitHub 下载/回退入口继续保留。
 - **v1.0.15：** Sparkle 更新界面支持简体中文与 English，并跟随 App 语言偏好。
 - **v1.0.15：** 修改 App 语言后会提示安全重启，以保持 App 与更新器语言一致；“检查更新”是主要操作，手动下载为故障备用入口。
 - **v1.0.16：** 精简 About 页面更新区域：只保留一个右对齐的“检查更新”按钮，统一设置行高度；不改变 Sparkle 更新机制。
+- **v1.0.17：** 修复 Liquid Orb 悬浮球拖动，保持原有 Liquid Glass 外观、Q 弹效果、单击 Quick View、右键菜单、位置锁定与位置持久化；增强鼠标事件监听器生命周期清理，不改变额度、审批或 Sparkle 机制。
 - 1.0.13 用户需手动安装 1.0.14 一次；之后的兼容版本可通过 Sparkle 更新。
 - 当前仍为 ad-hoc 签名、未使用 Apple Developer ID、公证或 Stapling；首次安装仍可能需要 macOS Gatekeeper 正常放行
-- 非 QA 生产 RC 实机运行验收及下载中断场景尚未执行，属于发布负责人接受的剩余风险
+- v1.0.16 → v1.0.17 已完成真实 Sparkle 更新；下载中断与失败恢复场景未进行本版专项验证
 
-自动化回归：**482 executed / 4 skipped / 0 failures**。
+自动化回归：**492 tests / 4 skipped / 0 failures**。
 
-RC1 App / DMG、嵌套 Sparkle/XPC 签名、生产公钥注入与更新 ZIP 静态验证：**PASS**。生产运行路径与下载中断未实测，不得解读为通过。
+v1.0.17 正式 App / DMG / ZIP 构建、嵌套 Sparkle/XPC 签名、生产公钥匹配及 Ed25519 更新签名验证：**PASS**。已完成从 v1.0.16 的真实 Sparkle 升级；下载中断与失败恢复仍未单独验证。
 
 <br>
 
@@ -184,13 +191,13 @@ Codex Monitor 不会用推测值替代未知值；例如 Quota 无法确认时�
 
 ## ⚠️ Preview 数据源说明
 
-Codex Monitor 1.0.13 当前会读取本机 Codex 的本地集成数据面。
+Codex Monitor 当前会读取本机 Codex 的本地集成数据面。
 
 其中部分 Account 能力使用 Codex app-server 的本地 transport；Desktop runtime / session observation、approval attention 也依赖 Codex 的本地 SQLite / rollout / Hook 等实现细节，这些本地 schema 与事件目前不应被视为稳定 public contract。
 
 因此：
 
-- 1.0.13 保持 **Preview-only** 定位
+- 产品仍保持 **Preview-only** 定位，即使发布包名称包含 Stable
 - Codex 更新可能暂时影响某个单独 capability
 - capability 缺失时应用应安全降级
 - 当前不应被描述为 stable production-supported Codex integration
@@ -236,7 +243,10 @@ swift test
 Preview release packaging：
 
 ```bash
-VERSION=1.0.16 BUILD=122 RELEASE_LABEL=Stable ./Tools/package_release.sh
+VERSION=1.0.17 BUILD=123 RELEASE_LABEL=Stable \
+SPARKLE_FEED_URL=https://github.com/BlahBlahBlahBB/Codex-Monitor/releases/latest/download/appcast.xml \
+SPARKLE_PUBLIC_ED25519_KEY='YOUR_EXISTING_PUBLIC_KEY' \
+./Tools/package_release.sh
 ```
 
 在未提供 `SIGNING_IDENTITY` 时，脚本生成明确标记的 ad-hoc local Preview；Developer ID / notarization 流程当前尚未启用。
@@ -245,7 +255,7 @@ VERSION=1.0.16 BUILD=122 RELEASE_LABEL=Stable ./Tools/package_release.sh
 
 ## 📌 Release scope
 
-Codex Monitor 1.0.16 当前验证范围：
+Codex Monitor 1.0.17 当前验证范围：
 
 - macOS 13+
 - Apple Silicon / arm64
@@ -260,4 +270,4 @@ Codex Monitor 1.0.16 当前验证范围：
 - 超长 transcript、跨 chunk、exact/latest turn_context、畸形/截断/超限记录测试：PASS
 - 等待审批 / 完成通知与点击激活 Codex：保持既有验证行为
 - signed ApprovalObserver helper 与 Hook/config 完整性契约保持不变
-- Release Gate：482 executed / 4 skipped / 0 failures
+- Release Gate：492 tests / 4 skipped / 0 failures
