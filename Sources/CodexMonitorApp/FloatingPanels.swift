@@ -30,6 +30,9 @@ final class FloatingStatusPanelController: NSObject, ObservableObject, NSWindowD
         applyPreferences()
         attachLiquidOrbDriverIfNeeded()
         panel?.orderFrontRegardless()
+#if CODEX_MONITOR_QA_ISOLATION
+        OrbDragProbe.shared.installIfNeeded(targetPanel: panel, preferences: preferences)
+#endif
     }
 
     func hide() {
@@ -43,6 +46,9 @@ final class FloatingStatusPanelController: NSObject, ObservableObject, NSWindowD
         cancelQuickViewAutoDismiss()
         quickView?.close()
         liquidOrbDriver?.shutdown()
+        // The panel is about to be closed: withdraw its local mouse monitor
+        // even when AppKit did not deliver a final leftMouseUp.
+        (panel?.contentView as? OrbHostingView)?.cancelForPanelClose()
         panel?.close()
         quickView = nil
         liquidOrbDriver = nil
@@ -100,13 +106,22 @@ final class FloatingStatusPanelController: NSObject, ObservableObject, NSWindowD
     var liquidOrbDriverForTesting: LiquidOrbDriver? { liquidOrbDriver }
 
     func windowWillMove(_ notification: Notification) {
+#if CODEX_MONITOR_QA_ISOLATION
+        OrbDragProbe.shared.record("windowWillMove.frame.before", panel: notification.object as? NSPanel, preferences: preferences)
+#endif
         hideQuickView()
         liquidOrbDriver?.beginUserDrag()
     }
 
     func windowDidMove(_ notification: Notification) {
+#if CODEX_MONITOR_QA_ISOLATION
+        OrbDragProbe.shared.record("windowDidMove.frame.before", panel: notification.object as? NSPanel, preferences: preferences)
+#endif
         liquidOrbDriver?.panelDidMove()
         persistFrame()
+#if CODEX_MONITOR_QA_ISOLATION
+        OrbDragProbe.shared.record("windowDidMove.frame.after", panel: notification.object as? NSPanel, preferences: preferences)
+#endif
     }
     func windowWillStartLiveResize(_ notification: Notification) {
         liveResizeCenter = panel.map { CGPoint(x: $0.frame.midX, y: $0.frame.midY) }
@@ -144,11 +159,14 @@ final class FloatingStatusPanelController: NSObject, ObservableObject, NSWindowD
         panel.delegate = self
         let liquidStore = LiquidOrbPresentationStore(diameter: size)
         let root = AnyView(LocalizedRoot(localization: localization) { FloatingOrbRoot(model: model, preferences: preferences, liquidOrbStore: liquidStore) { [weak self] in
+#if CODEX_MONITOR_QA_ISOLATION
+            OrbDragProbe.shared.record("clickAction", panel: self?.panel, preferences: self?.preferences)
+#endif
             self?.toggleQuickView(model: model)
         } })
         let hostingView = OrbHostingView(rootView: root, menuProvider: { [weak self] in
             self?.makeContextMenu() ?? NSMenu()
-        })
+        }, lockPosition: { [weak preferences] in preferences?.lockPosition ?? true })
         hostingView.wantsLayer = true
         hostingView.layer?.backgroundColor = NSColor.clear.cgColor
         hostingView.layer?.isOpaque = false
@@ -298,10 +316,17 @@ final class FloatingStatusPanelController: NSObject, ObservableObject, NSWindowD
 
 final class OrbHostingView: NSHostingView<AnyView> {
     private let menuProvider: () -> NSMenu
+    private var dragClickCoordinator: OrbDragClickCoordinator?
 
     init(rootView: AnyView, menuProvider: @escaping () -> NSMenu) {
         self.menuProvider = menuProvider
+        dragClickCoordinator = nil
         super.init(rootView: rootView)
+    }
+
+    convenience init(rootView: AnyView, menuProvider: @escaping () -> NSMenu, lockPosition: @escaping () -> Bool) {
+        self.init(rootView: rootView, menuProvider: menuProvider)
+        dragClickCoordinator = OrbDragClickCoordinator(lockPosition: lockPosition)
     }
 
     convenience init(rootView: FloatingOrbRoot, menuProvider: @escaping () -> NSMenu = { NSMenu() }) {
@@ -310,11 +335,13 @@ final class OrbHostingView: NSHostingView<AnyView> {
 
     required init(rootView: AnyView) {
         menuProvider = { NSMenu() }
+        dragClickCoordinator = nil
         super.init(rootView: rootView)
     }
 
     required init?(coder: NSCoder) {
         menuProvider = { NSMenu() }
+        dragClickCoordinator = nil
         super.init(coder: coder)
     }
 
@@ -322,13 +349,124 @@ final class OrbHostingView: NSHostingView<AnyView> {
 
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
+        if window == nil { dragClickCoordinator?.cancelForViewDetach() }
         wantsLayer = true
         layer?.backgroundColor = NSColor.clear.cgColor
         layer?.isOpaque = false
     }
 
+    override func mouseDown(with event: NSEvent) {
+        dragClickCoordinator?.beginTracking(mouseDown: event, window: window)
+        super.mouseDown(with: event)
+    }
+
+    func cancelForPanelClose() {
+        dragClickCoordinator?.cancelForPanelClose()
+    }
+
     override func menu(for event: NSEvent) -> NSMenu? {
         menuProvider()
+    }
+}
+
+@MainActor
+private final class OrbDragClickCoordinator {
+    private let lockPosition: () -> Bool
+    private var mouseDownEvent: NSEvent?
+    private var startLocation = CGPoint.zero
+    private weak var window: NSWindow?
+    private var monitorToken: Any?
+    private var lifecycle = OrbDragLifecycleState()
+
+    init(lockPosition: @escaping () -> Bool) {
+        self.lockPosition = lockPosition
+    }
+
+    func beginTracking(mouseDown: NSEvent, window: NSWindow?) {
+        guard let window else { return }
+        if lifecycle.recoverForNewMouseDown() {
+            cleanup(reason: "recoveredBeforeNewMouseDown")
+        }
+        guard monitorToken == nil, lifecycle.beginTracking() else { return }
+        mouseDownEvent = mouseDown
+        self.window = window
+        startLocation = NSEvent.mouseLocation
+        log("coordinator.mouseDown")
+        let mask: NSEvent.EventTypeMask = [.leftMouseDragged, .leftMouseUp]
+        guard let token = NSEvent.addLocalMonitorForEvents(matching: mask, handler: { [weak self] event in
+            MainActor.assumeIsolated { self?.observe(event) }
+            return event
+        }) else {
+            log("monitor.install.failed")
+            cleanup(reason: "monitorInstallFailed")
+            return
+        }
+        monitorToken = token
+        log("monitor.install tokenInstalled=true")
+    }
+
+    private func observe(_ event: NSEvent) {
+        if event.type == .leftMouseDragged, lifecycle.isTrackingClick {
+            let current = NSEvent.mouseLocation
+            let distance = hypot(current.x - startLocation.x, current.y - startLocation.y)
+            guard distance >= 3, !lockPosition(), let window, let mouseDownEvent else { return }
+            guard lifecycle.beginNativeDrag() else { return }
+            log("nativeDrag.begin")
+            window.performDrag(with: mouseDownEvent)
+            log("nativeDrag.returned")
+            lifecycle.nativeDragReturned()
+            if lifecycle.cleanupPending { cleanup(reason: "mouseUpDuringNativeDrag") }
+#if CODEX_MONITOR_QA_ISOLATION
+            OrbDragProbe.shared.flushSoon()
+#endif
+            return
+        }
+        guard event.type == .leftMouseUp else { return }
+        log("mouseUp.observed")
+        if lifecycle.observeMouseUp() { cleanup(reason: "mouseUp") }
+    }
+
+    private func log(_ event: String) {
+#if CODEX_MONITOR_QA_ISOLATION
+        OrbDragProbe.shared.recordLifecycle(event, monitorCount: monitorToken == nil ? 0 : 1, tracking: lifecycle.isTracking, hasMouseDown: mouseDownEvent != nil, panel: window as? NSPanel)
+#endif
+    }
+
+    func cancelForViewDetach() {
+        let buttonDown = NSEvent.pressedMouseButtons & 1 != 0
+        guard lifecycle.canCancelForDetach(leftButtonDown: buttonDown) else { return }
+        cleanup(reason: "viewDetached")
+    }
+
+    // Only for irreversible panel teardown. The panel no longer owns an
+    // active interaction, so releasing its monitor must not require mouseUp.
+    // Do not call from performDrag's return or from an ordinary view detach.
+    func cancelForPanelClose() {
+        guard monitorToken != nil || mouseDownEvent != nil || lifecycle.isTracking else { return }
+        let panel = window as? NSPanel
+        let token = monitorToken
+        monitorToken = nil
+        mouseDownEvent = nil
+        window = nil
+        lifecycle = OrbDragLifecycleState()
+        if let token { NSEvent.removeMonitor(token) }
+#if CODEX_MONITOR_QA_ISOLATION
+        OrbDragProbe.shared.recordLifecycle("coordinator.cleanup reason=panelClose", monitorCount: 0, tracking: false, hasMouseDown: false, panel: panel)
+        OrbDragProbe.shared.recordLifecycle("monitor.countAfterCleanup", monitorCount: 0, tracking: false, hasMouseDown: false, panel: panel)
+#endif
+    }
+
+    private func cleanup(reason: String) {
+        guard lifecycle.cleanup() else { return }
+        let panel = window as? NSPanel
+        if let monitorToken { NSEvent.removeMonitor(monitorToken) }
+        monitorToken = nil
+        mouseDownEvent = nil
+        window = nil
+#if CODEX_MONITOR_QA_ISOLATION
+        OrbDragProbe.shared.recordLifecycle("coordinator.cleanup reason=\(reason)", monitorCount: 0, tracking: false, hasMouseDown: false, panel: panel)
+        OrbDragProbe.shared.recordLifecycle("monitor.countAfterCleanup", monitorCount: 0, tracking: false, hasMouseDown: false, panel: panel)
+#endif
     }
 }
 
